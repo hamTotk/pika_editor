@@ -1,0 +1,46 @@
+# === ビルド出力 ===
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CMakeUserPresets.json
+*.obj
+*.o
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# === vcpkg（manifest モード）===
+vcpkg_installed/
+vcpkg/
+
+# === Visual Studio / MSVC ===
+.vs/
+*.user
+*.vcxproj.user
+*.aps
+*.suo
+
+# === IDE ===
+.idea/
+.vscode/
+
+# === OS ===
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# === pika 固有 ===
+# ポータブル版のデータルート（テスト/手動実行で生成される。要件13章）
+pika-data/
+# 性能計測の生出力（集計結果のみコミット）
+docs/perf-raw/
+
+# === Claude Code のローカル/一時ファイル ===
+.claude/*.lock
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
