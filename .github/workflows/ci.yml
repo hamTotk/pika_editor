@@ -1,0 +1,45 @@
+# pika CI（雛形）
+#
+# 現状: コード・CMakeLists.txt が未整備のため、実ビルド/テストは無効化済み。
+# 即時有効なのは format ジョブのみ（対象ソースが無い間はスキップ扱い）。
+# ビルド基盤の整備後に build-test ジョブの `if: false` を外して有効化する。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # コード整形チェック（OS非依存・即時有効）
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: clang-format チェック
+        run: |
+          files=$(git ls-files '*.cpp' '*.cc' '*.cxx' '*.h' '*.hpp')
+          if [ -z "$files" ]; then
+            echo "対象ソースなし（src/ 整備までスキップ）"
+            exit 0
+          fi
+          clang-format --dry-run --Werror $files
+
+  # ビルド & テスト（雛形。CMakeLists.txt 整備後に if を外す）
+  build-test:
+    if: false
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: vcpkg セットアップ
+        uses: lukka/run-vcpkg@v11
+        with:
+          # vcpkg-configuration.json の builtin-baseline でバージョン固定（再現ビルド）
+          runVcpkgInstall: true
+      - name: 構成（Release）
+        run: cmake --preset x64-release
+      - name: ビルド
+        run: cmake --build --preset x64-release
+      - name: テスト（gtest / ctest）
+        run: ctest --preset x64-release --output-on-failure

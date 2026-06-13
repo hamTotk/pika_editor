@@ -1,0 +1,24 @@
+# テキストは改行を LF に正規化（MSVC は LF/CRLF いずれも可）。バイナリは除外。
+* text=auto eol=lf
+
+# ソース・設定
+*.cpp  text eol=lf
+*.h    text eol=lf
+*.hpp  text eol=lf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+
+# バイナリ（差分・改行変換の対象外）
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.zip  binary
+*.ttf  binary
+*.woff binary
+*.woff2 binary
+*.pdf  binary
+*.exe  binary
