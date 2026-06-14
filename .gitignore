@@ -44,3 +44,5 @@ docs/perf-raw/
 .claude/*.lock
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+# 診断・レビューツールの生成物（review-harness 等）
+output/
