@@ -64,8 +64,15 @@ pika/
   - 構成：`cmake --preset x64-release`（プリセットは CMakeLists.txt 作成時に定義）
   - ビルド：`cmake --build --preset x64-release`
   - テスト：`ctest --preset x64-release`（gtest）
+- **完了の検証**：実装開始後は、完了を主張する前に `cmake --build --preset x64-release` ＋ `ctest --preset x64-release` を通す。編集直後の hook はファイル単位の即時検査、ctest が全体整合の最終検査で、両方そろって初めて完了が外部検証される。CMakeLists.txt 未整備の現段階では、下記「自動検査」と docs 整合が唯一の検証手段
 
 **テスト方針（design.md 13章）**：自動単体テストの対象は `core/`・`util`。重点は diff・watcher のイベント合成/自己保存抑制・snapshot の退避と容量管理・エンコーディング往復・render のサニタイズ。UIの自動テストは初期版では持たない（`docs/acceptance.md` の手動チェックリストで代替）。性能は基準機・Releaseビルドで自動計測しリリース前ゲートにする。
+
+## 自動検査と規約（ハーネス）
+
+- **編集直後の自動検査**：Edit/Write のたびに `.claude/hooks/post-edit-check.mjs` が走る。C++（.cpp/.h ほか）は `clang-format` の整形チェック（未導入時は素通し）、JSON は構文チェック。整形差分・構文エラーは exit 2 で差し戻される
+- **コミットメッセージ規約** … [.claude/docs/commit.md](.claude/docs/commit.md)
+- **命名・リポジトリ構成の正典** … [docs/design.md](docs/design.md) 12章（本書「リポジトリ構成」節はその写し。乖離したら design.md が正）
 
 ## 実装順序（design.md 14章）
 

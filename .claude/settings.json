@@ -1,0 +1,28 @@
+{
+    "permissions": {
+      "allow": [
+        "Bash(cmake --preset:*)",
+        "Bash(cmake --build:*)",
+        "Bash(ctest:*)",
+        "Bash(clang-format:*)"
+      ],
+      "deny": [
+        "Edit(.clang-format)",
+        "Edit(.github/workflows/**)"
+      ]
+    },
+    "hooks": {
+      "PostToolUse": [
+        {
+          "matcher": "Edit|Write",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/post-edit-check.mjs\"",
+              "timeout": 30
+            }
+          ]
+        }
+      ]
+    }
+  }
