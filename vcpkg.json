@@ -1,0 +1,35 @@
+{
+  "name": "pika",
+  "version-string": "0.0.1",
+  "description": "Windows 向け超軽量 Markdown/HTML エディタ（AI 出力の確認・差分レビュー伴走ツール）",
+  "homepage": "https://app.pika",
+  "supports": "windows & x64",
+  "builtin-baseline": "44819aa2a6c10e56065e2b0330e7d6c89d1d2574",
+  "dependencies": [
+    "md4c",
+    "dtl",
+    {
+      "name": "pcre2",
+      "features": ["platform-default-features"]
+    },
+    "zstd",
+    "xxhash",
+    "toml11"
+  ],
+  "features": {
+    "tests": {
+      "description": "core/util の単体テスト（gtest）。x64-core-test プリセットが有効化する",
+      "dependencies": ["gtest"]
+    },
+    "gui": {
+      "description": "wxWidgets を含む GUI 本体（pika exe）。x64-release プリセットが有効化する。重量依存のため core-test では取得しない",
+      "dependencies": [
+        {
+          "name": "wxwidgets",
+          "default-features": false,
+          "features": ["webview"]
+        }
+      ]
+    }
+  }
+}
