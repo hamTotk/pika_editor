@@ -1,0 +1,27 @@
+{
+  "score": 95,
+  "plan_implementation": {
+    "overall": 95,
+    "notes": "must 6 件すべて充足。前ターン唯一の未充足だった (5)容量管理『未復元かつ14日以内の退避を保護対象から削除しない』を本ターンで充足化: add_stash のインライン LRU と enforce_capacity の LRU を単一実装 SnapshotStore::apply_per_file_lru(snapshot_store.cpp:41-78) に集約し、両経路が is_protected(!restored && now-time<=protect_seconds) を共有。二経路の乖離が解消。新規 gtest 3 件で観測: AddStashLruKeepsProtectedBeyondTen(11件全保護で1件も落ちず最古も復元可)/AddStashLruDropsUnprotectedButKeepsProtected(保護8+非保護2=10、保護退避は1件も失わない)/EnforceCapacityLruKeepsProtectedBeyondTen(enforce 経路でも保護11件維持)。残り must は前ターン充足を維持: (1)保存→復元=BaselineSaveRestoreIdentity/BaselineRoundTripsAfterPersist、(2)4種別退避=AllStashKindsSaveAndRestore、(3)index破損復元=RecoversStashesAfterIndexCorruption、(4)機密ハッシュのみ=SensitiveFileRecordsHashOnly(平文object不在も検証)、(6)mark-and-sweep=SweepKeepsSharedObjectReferencedElsewhere/SweepKeepsBaselineObjectSharedWithStash。CapacityPolicy 既定値も criterion 一致(per_file=10/500MB/90日/14日)。should 3 件中 2 件充足(ワークスペース非汚染=DoesNotWriteInsideWorkspaceFolder、ACL本人のみ=secure_dir owner-only SDDL)。起動時未読プレスクリーンは本層責務外で後続スプリント(8/10系)結線=未充足、generator が理由明示。"
+  },
+  "quality": {
+    "overall": 95,
+    "breakdown": {"d_verify": 100, "d_accept": 100, "d_quality": 90},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[d_verify=100] ctest --preset x64-core-test が exit 0(verify_results 正本)。[d_accept=100] must 6 件全充足。前ターン唯一未充足の容量管理14日保護を、LRU を apply_per_file_lru に単一集約して充足化(add_stash/enforce_capacity が同一保護規則を共有、二経路乖離を解消)。LRU×保護の相互作用を 3 gtest で決定的に観測し『データを失わない=退避が最後の砦』を担保。[d_review=100] 本イテレーションでレビュワー未起動(review_findings=[]、reviewerターンファイルなし)=該当観点なし合格扱い。[d_quality=90] 前ターン feedback の high→medium を網羅対応: (1)security パストラバーサル多層防御=ObjectStore::is_valid_hash(XXH3-64=16桁[0-9a-f] 厳密検証)を get/contains/remove のパス合成前に適用し細工 hash を object 不在化、CraftedIndexHashDoesNotEscapeObjectsDir で objects 外ファイルが sweep/restore で消えない/読まれないことを観測。(2)performance 容量GC O(V·R) syscall を、ループ前 object→size 1回集計+参照カウント減算方式へ改善(再 syscall 排除)。(3)解凍爆弾ガード=decompress に kMaxDecompressedSize=40MB 上限を out 確保前に検査(DecompressRejectsOversizedFrame)。(4)JSON 深さ上限=json_lite kMaxDepth=64 でスタック枯渇前に破損扱い(JsonParserRejectsDeeplyNestedInput)。(5)recover_pending_stashes を time降順→index_gen降順→hash昇順の決定的順序にソート。コードは 1 ファイル 1 責務・命名/イディオム整合・YAGNI 逸脱なし。[テスト改竄=なし] iteration1 で修正された PerFileStashLruKeepsLatestTen(=10 件・最新保持を依然アサート)/BaselineReplaceNotCountedInPerFileLru(=11 件・batch=1 をアサート)は上限挙動の検証を維持しており、緩和/skip/犠牲的期待値変更はない。修正は『14日保護が10件枠より優先』という criterion の要請を正しく反映した spec 整合変更で、generator が根拠を turn report に明示し評価に委ねている(ref-dev『テストが誤りなら根拠を書いて評価に委ねる』に準拠)。[残課題=非ブロッキング] SnapshotIndex::find の線形走査(N件一括 set_baseline で O(n^2))は medium として残存。generator が型(snapshot_types.h)が後続スプリントのテストからも参照されるためスコープ拡大リスクを根拠に性能/workspace結合スプリントへ申し送り=妥当な判断。起動時未読プレスクリーン(should)は本層データ基盤のみで比較ロジックは後続結線。is_sensitive_default の set_baseline sensitive 引数への結線は後続呼び出し側(申し送り済み)。",
+  "feedback_structured": {
+    "high": [],
+    "medium": [
+      {"area": "performance / 計算量(申し送り承認)", "message": "SnapshotIndex::find の線形走査(snapshot_types.cpp)が N件一括 set_baseline で O(n^2)。generator が SnapshotIndex 型(snapshot_types.h)を後続スプリント(workspace/diff/結合)のテストが参照するため修正ターンでの型再設計はスコープ拡大リスクと判断し性能/workspace結合スプリントへ申し送り。本ターンでは add_stash の即時 sweep を『LRU が実際に退避を落としたときだけ走る』よう条件化(snapshot_store.cpp:195-200)し発火頻度を下げたため非ブロッキング。後続スプリントで型と併せて rel_path→index ハッシュマップ化を扱うこと。"},
+      {"area": "snapshot 結線(後続スプリント)", "message": "is_sensitive_default(sensitive.cpp)の判定が set_baseline の sensitive 引数へ結線されるのは後続スプリント(呼び出し側=DocumentController 相当の結合 sprint10系)。後続で sensitive 引数へ確実に渡さないと機密平文がベースライン object に残るため、結合スプリントの must で結線を観測すること。"}
+    ],
+    "low": [
+      {"area": "起動時未読プレスクリーン(should 未充足・本層外)", "message": "起動時未読プレスクリーン(mtime+サイズ→不一致のみハッシュ)は baseline_mtime/baseline_size フィールドのみ本層に存在し、比較ロジックは workspace/起動時判定スプリント(8/10系)で結線予定。本スプリント snapshot の責務外であり未充足は妥当(generator が理由明示済み)。"},
+      {"area": "ux / 復元エラー文言(上位UI責務)", "message": "restore_baseline の Unsupported メッセージ『内容を持たないベースラインは復元できません』は原因を平易に伝えるが『次の一手』は含まない。core API としては妥当で、上位 UI がエラーコード(Unsupported/NotFound/Io)を回復導線へ翻訳する責務。後続 UI スプリントで導線が失われないよう記録。"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

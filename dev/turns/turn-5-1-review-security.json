@@ -1,0 +1,33 @@
+{
+  "reviewer": "security",
+  "sprint_id": 5,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "パストラバーサル / 入力検証",
+      "message": "index.json から読んだ baselineObject / stash[].hash が無検証のまま ObjectStore のファイルパスに合成される。parse_index (index_io.cpp:89, :114) は値を IndexEntry::baseline_object / StashEntry::hash にそのまま格納し、ObjectStore::object_path / meta_path は fs::path(dir_) を hash で結合する (object_store.cpp:28-36)。Windows の std::filesystem operator/ は右辺が親ディレクトリ参照 (ドットドット区切り) を含む相対や、ドライブレターつきの root を含むと objects フォルダ外へ抜けるため、細工された hash で restore_stash/restore_baseline 経由の get() が objects 外の任意ファイルを読み出し、ObjectStore::remove() が任意ファイルを削除しうる (snapshot_store.cpp:184 restore_stash, :117 restore_baseline, :105 remove)。put() は xxh3_64_hex で hash を自前生成するため安全だが、永続化された index.json は外部編集されうる (json_lite.h のヘッダコメント自身が「外部編集された台帳でも壊れず読めるよう」と想定している)。critical の定義 (ref-dev: 未検証の外部入力が injection/RCE に到達) には index.json が attacker-controlled な外部入力ではないため厳密には該当せず high とするが、object_path に渡す前に hash が 16 進固定長 (XXH3-64 = 16 文字の [0-9a-f]) であることを許可リスト検証し、不一致は object 不在扱いにする多層防御を入れるべき。",
+      "location": "src/core/snapshot/object_store.cpp:28"
+    },
+    {
+      "severity": "medium",
+      "area": "DoS / リソース枯渇",
+      "message": "json_lite の再帰下降パーサに再帰深さの上限がない。parse_value が parse_object / parse_array を相互再帰で呼び (json_lite.cpp:221-350)、開き角括弧を大量に連ねた深いネスト入力でコールスタックを枯渇させクラッシュさせられる。入口は index.json とサイドカー meta ファイル (object_store.cpp:177 scan_recoverable_stashes の json::parse) で、いずれも外部編集されうる永続ファイル。設計原則1「データを失わない」(破損 index でも復元経路を生かす) に照らすと、深さ上限を設けて false を返しグレースフルに退避一覧復元へ倒すべき。",
+      "location": "src/core/snapshot/json_lite.cpp:221"
+    },
+    {
+      "severity": "medium",
+      "area": "DoS / 解凍爆弾",
+      "message": "decompress が ZSTD_getFrameContentSize の宣言値だけを信じて out 文字列を宣言サイズで確保する (compression.cpp:35-44)。宣言サイズの上限チェックがないため、外部で差し替えられた object フレームが巨大サイズを宣言すると確保時に OOM を起こしうる。object は通常 pika 自身が圧縮して生成するため到達条件は限定的 (high ではなく medium) だが、解凍後上限 (例: kContentSizeLimit や妥当な天井) を設けて超過フレームを Io エラーで弾く多層防御が望ましい。",
+      "location": "src/core/snapshot/compression.cpp:35"
+    },
+    {
+      "severity": "low",
+      "area": "機密情報 / データ最小化",
+      "message": "機密判定 (sensitive.cpp is_sensitive_default) と退避フロー (snapshot_store.cpp add_stash) が結線されていない点の確認。add_stash は StashRequest コメントどおり機密ファイルでも内容 object を保存する設計で、これは「退避=最後の砦」(設計原則1) と整合し正しい挙動。一方 set_baseline の機密スキップは呼び出し側が渡す sensitive 引数に依存し (snapshot_store.cpp:87)、sensitive.cpp の判定を set_baseline 経路へ結ぶのは本スプリント範囲外 (呼び出し側=後続スプリント)。指摘ではなく注意喚起: 後続で set_baseline を呼ぶ層が is_sensitive_default の結果を sensitive 引数へ確実に渡さないと、機密ファイルの平文がベースライン object として残る。観点内のフォローアップとして記録する。",
+      "location": "src/core/snapshot/snapshot_store.cpp:87"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint5 (core/snapshot) の security レビュー。critical はゼロ。最大の懸念は index.json 由来の hash が無検証で ObjectStore のパス合成に届く経路 (パストラバーサルで任意ファイル読み出し/削除が原理上可能、high)。ただし入口はローカル個人ツールのデータルート内ファイルで attacker-controlled な外部入力ではないため ref-dev の critical 定義には該当せず high とした。object_path に渡す前の hash 許可リスト検証 (XXH3-64 = 16 文字の [0-9a-f]) を強く推奨する。加えて JSON パーサの再帰深さ無制限と decompress の解凍後サイズ無上限はいずれも「データを失わない/固まらない」原則に対する多層防御の不足 (medium)。機密判定は本スプリントでは判定ロジックのみ完結しており、set_baseline 経路への結線は後続スプリントへの申し送り (low)。テストに緩和・スキップ・改竄は見られない。"
+}

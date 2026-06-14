@@ -1,0 +1,27 @@
+{
+  "reviewer": "security",
+  "sprint_id": 6,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "DoS / アルゴリズム計算量 (リソース枯渇)",
+      "message": "行内強調の LCS DP が二次のメモリ/計算量だが、開始前ガードは線形次元しか抑えていない。exceeds_limits の max_line_bytes(既定100,000) は 1 行の長さ n を上限するだけで、diff_tokens の dp(n+1)x(m+1)(std::size_t) は n*m まで膨らむ。空白を含まない行(CJK・URL・1行JSON・改行のないAI生成テキスト等)は words_are_separable が false になり tokenize_chars 経路に入り、100,000バイト級の単一行ペアで約100,001x100,001x8B = 約80GB の dp 確保を試みて OOM/クラッシュに至る。この入力は max_total_bytes(10MB)・max_lines(200,000)・max_line_bytes(100,000) の3ガードを全て満たす(=ガードをすり抜ける)。入力は信頼境界の外(ユーザー/AIが生成した任意ファイル内容)であり、攻撃者制御でなくとも実運用で踏みやすい。inline_diff.cpp の '呼び出し側が長行ガードで n*m の暴走を開始前に断つ前提' というコメントは、線形ガードでは二次の暴走を断てないため前提が成立していない。対策案: 行内強調を実行する前にトークン積 n*m(またはバイト積)の上限を判定し、超過ならその行の spans を空にする(行レベル差分は出すが行内強調だけ諦める)か、DP を 2 行ローリングに変えてメモリだけでも O(min(n,m)) に落とす。ref-dev の critical 定義(機密ハードコード/injection/RCE 到達/認可バイパス)には該当しないため high。ただしプロジェクト第1・第2原則(データを失わない/固まらない)を直接毀損する確度の高い欠陥。",
+      "location": "src/core/diff/inline_diff.cpp:93 (diff_tokens の dp 確保) / src/core/diff/diff_engine.cpp:18 (exceeds_limits の per-line ガード)"
+    },
+    {
+      "severity": "medium",
+      "area": "DoS / 協調キャンセルの到達不能区間",
+      "message": "重い計算(dtl の Myers compose、および diff_tokens の二重ループ LCS)の内部にはキャンセル観測点が無く、cancel トークンは attach_inline_spans の行ペア境界でしか観測されない(diff_engine.cpp:77)。max_lines(200,000) 近傍で全行相違の病的入力を与えると、dtl の Myers は O(ND) が O(N^2) 方向に劣化し、その 1 回の compose 呼び出し中はキャンセルできず数百ms〜秒オーダーで UI 応答前のワーカーを占有しうる(should『差分計算がキャンセル可能』の実効カバレッジが compose 区間で欠ける)。#1 のような確定 OOM ではなく max_lines で上界が付くため medium。対策: 行差分前に行数×平均行長から重さを概算して上限を設けるか、長大入力では Myers 自体をフォールバック(行ハッシュ突合のみ)に切り替える。",
+      "location": "src/core/diff/line_diff.cpp:42 (dtl compose) / src/core/diff/diff_engine.cpp:119"
+    },
+    {
+      "severity": "low",
+      "area": "Info/可用性: 例外がコア公開 API を貫通する",
+      "message": "DiffEngine::compute は DiffResult を値返しし内部に try/catch を持たないため、#1/#2 の大規模確保で std::bad_alloc が発生するとガード設計が意図する truncated フォールバックではなく未捕捉例外としてコア境界の外へ伝播する。CLAUDE.md『コア公開APIは Result<T> 方式。例外はモジュール内部に閉じる』からの逸脱で、メモリ逼迫時にグレースフルな縮退(truncated)にならずアプリ全体を巻き込みうる。#1 のガード追加で確保自体を未然に断てば併せて解消する。実害は #1 の前提下で顕在化するため low。",
+      "location": "src/core/diff/diff_engine.cpp:91"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint6 の core/diff は純ロジックで認証・認可・injection・機密・外部 I/O の sink を持たず、ref-dev の critical 定義に該当する指摘は無い(has_critical=false)。security 観点で唯一意味を持つのは信頼境界外のファイル内容を入力とする DoS/計算量で、最大の懸念は行内強調 LCS の二次メモリが線形の per-line ガードをすり抜ける点(high)。空白の無い単一長行で全ガードを満たしたまま約80GB の DP 確保に至り得る。critical には上げず、行内強調前にトークン積 n*m の上限判定(または DP のローリング化)を入れることを推奨する。dtl compose 中のキャンセル不能区間(medium)と bad_alloc のコア境界貫通(low)は #1 のガード追加で大半が連動して解消する。"
+}

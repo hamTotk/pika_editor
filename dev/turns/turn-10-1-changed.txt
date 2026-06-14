@@ -1,0 +1,10 @@
+CHANGED:
+src/CMakeLists.txt
+tests/CMakeLists.txt
+src/core/document/review_flow.cpp
+src/core/document/review_flow.h
+src/core/state/state_io.cpp
+src/core/state/state_io.h
+src/core/state/state_types.h
+tests/core/document/review_flow_test.cpp
+tests/core/state/state_io_test.cpp

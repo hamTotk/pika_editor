@@ -1,0 +1,33 @@
+{
+  "score": 98,
+  "plan_implementation": {
+    "overall": 100,
+    "notes": "sprint10 must 5件すべて充足。退避結合(incoming/conflict/rollback/baseline-replace)は ReviewFlow が StashKind 別に add_stash で積み、各テストが restore_stash で原内容一致を観測(D6)。index破損後の objects 走査復元(D1)・確認済みのディスク内容ベースライン更新と未読解除・内容なし(10MB以上/画像)のハッシュのみ更新(D3)・巻き戻し非活性判定(D3)・state.json/index.json の未知version安全側(読まず/書き戻さず/再生成せず)と全永続化の tmp→rename アトミック書き込み(K2)を、いずれも決定論 gtest で検証済み。should(すべて確認済みのフリーズ/並行変化スキップ/batchId一括取消・退避不能ガード)も2件とも実装・テスト済みで充足率100%。未実装の must/should は無し。"
+  },
+  "quality": {
+    "overall": 98,
+    "breakdown": {"d_verify": 100, "d_accept": 100, "d_quality": 88},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[合格] sprint10 (退避フロー結合 + 状態永続化) は must 5件・should 2件すべて充足し、verify(ctest x64-core-test) exit 0、data/ux 両レビュワーとも critical=0。ReviewFlow は破壊的操作の前に退避を取る順序・退避不能ガード・巻き戻し非活性を一貫して敷き、state_io/index_io は未知version安全側と全アトミック書き込みを守る。テストは内容一致・ErrorCode・ディスクバイト不変・.tmp残存ゼロ・機密の平文非書き込みなど観測可能な挙動で検証しており、criteria の骨抜き(緩和/skip/犠牲的期待値)は検出されなかった。[high] confirm_all の baseline-replace 退避(review_flow.cpp:159-168)が add_stash の戻り値を確認せず、退避失敗しても confirmed に積んで set_baseline を実行する。退避が取れていないファイルが『すべて確認済み→取り消し(revert_all)』で旧ベースラインに戻らない制御の破れ。ファイル実体は無傷でデータ喪失ではないが『データを失わない』最優先のコアフローで失敗が黙殺される。退避失敗時は skipped 側へ倒すか、一括取消不能件数を AllConfirmedResult に乗せる(data・ux 両者が独立指摘)。[high] add_stash の object 物理削除(LRU sweep)が即時FS反映される一方 index.json の保存は呼び出し側に遅延委譲されるため、save前クラッシュで index↔objects 乖離(ダングリング参照)が起きうる非原子性(data)。[medium] confirm_all の複数ファイル一括処理が原子的でなく部分適用で batch 取消可逆性が部分的に崩れる / skipped が『並行変化』『更新不要』『更新失敗』の3理由を一括りにし上位UIが部分成功を区別通知できない / active_tab・window の範囲検証がコア層に無い。[low] 過去version の明示マイグレーション経路なし(現状version=1で実害なし) / confirm_all に freeze_hash 空 target が混ざると無防備に確認されうる(呼び出し規約で回避可能・テスト範囲外) / Unsupported文言の粒度不揃い / 消失タブ安全遷移・空状態導線は上位スプリント責務(本ターン範囲外)。high以下は次ターン generator が feedback_structured 経由で対応する。",
+  "feedback_structured": {
+    "high": [
+      {"area": "ユーザーの制御と自由(一括取消の保証) / データを失わない", "message": "confirm_all() の baseline-replace 退避(review_flow.cpp:159-168)が store_.add_stash の戻り値を確認せず、退避失敗しても直後の set_baseline を実行し confirmed に積む。退避(=revert_all の起点)が取れていないファイルが confirmed に混ざるため『すべて確認済み→取り消し』でそのファイルだけ旧ベースラインに戻らず、しかも失敗がユーザーに伝わらない。ファイル実体は無傷でデータ喪失(critical)ではないが、設計原則1が最優先のコアフローで黙殺される。退避失敗時は当該ファイルを skipped 側(未読のまま旧ベースライン維持)へ倒すか、一括取消できない件数を AllConfirmedResult に乗せて呼び出し側が通知できるようにする(data・ux 両レビュワーが独立指摘)。"},
+      {"area": "トランザクション境界 / クラッシュ整合性", "message": "add_stash(snapshot_store.cpp:195-202)は object書き込み・サイドカー・LRU sweep の物理削除を即時FS反映する一方、index.json の保存は ReviewFlow では行わず呼び出し側(DocumentController の load→操作→save)に遅延委譲する。この非原子性により add_stash 直後〜save前にクラッシュすると index.json と objects が乖離し、特にLRU溢れ時は古い index.json が既に削除された object を参照するダングリング参照になりうる(restore_baseline/restore_stash が静かに NotFound)。サイドカーが退避喪失方向は担保するため high。緩和: 破壊的 sweep を index save 成功後に遅延させる経路を契約として明記する(data)。"}
+    ],
+    "medium": [
+      {"area": "整合性 / 原子性(confirm_all)", "message": "confirm_all は1ファイルごとに baseline-replace退避→set_baseline を行うが、複数ファイルをまたぐ一括処理全体としては原子的でない。途中の set_baseline 失敗を skipped に積んで続行するため『一部は退避だけ積まれ baseline旧のまま、別は新baseline更新済み』の中間 index が残り、batchId 単位の revert_all で一括取消の意味論(開始時点へ戻す)が部分的にしか成立しない。set_baseline 失敗時に当該 batch を中断/ロールバックする方針を検討(data)。"},
+      {"area": "システム状態の可視化(部分成功の伝達)", "message": "confirm_all は『フリーズ後の並行変更スキップ』『ベースライン一致で更新不要スキップ』『set_baseline 失敗スキップ』の3つの異なる理由をすべて skipped へ一括りにする(review_flow.cpp:138/151/180)。AllConfirmedResult が理由を区別できず、上位UIが『変更ありで未確認のまま』と『更新失敗(要因と再試行)』を区別通知できない。skipped に理由種別を持たせ通知バー文言を出し分けられるようにする(ux)。"},
+      {"area": "スキーマ / 型整合(state.json)", "message": "AppState.active_tab(std::int64_t)と window の x/y/width/height に範囲検証が parse 経路に無い(state_io.cpp:194-197)。state.json が手編集/旧版/破損で active_tab=999 等のとき復元側(UI)が境界チェックを怠ると out-of-range アクセスになりうる。must は『未知version安全側・アトミック書き込み』までで個別フィールド妥当性は範囲外のため medium。コア層で active_tab を [-1, tabs.size()-1] に clamp するか『境界検証は復元側責務』を明示するとデータ→UI 境界が固くなる(data)。"}
+    ],
+    "low": [
+      {"area": "後方互換 / マイグレーション(version規約)", "message": "state.json/index.json とも『現行version か未知(新しい)version か』の2分岐のみで、過去version の明示マイグレーション経路が無い(state_io.cpp:126-130, index_io.cpp:65-69)。現状 version=1 で実害なしだが、将来 version を上げる破壊的変更時に旧版を寛容パースする暗黙挙動依存になる。移行方針(旧→新変換 or 『旧versionは読まず初回起動扱い』)を design.md 7章に明記しておくと安全(data)。"},
+      {"area": "整合性(confirm_all の freeze 判定)", "message": "confirm_all は freeze_hash が空のとき並行変化チェックを行わない(review_flow.cpp:136)。confirm 単体は未設定で妥当だが、confirm_all に freeze_hash 空 target が混ざると並行書き込みされた未確認内容を無防備に baseline 化しうる(E3のスキップ保護すり抜け)。テストは freeze_hash 設定ケースのみで空 target は観測外。呼び出し規約で回避可能だがコア層で強制(空なら拒否/警告)していないため low(data)。"},
+      {"area": "エラー文言の一貫性", "message": "退避不能ガード(review_flow.cpp:27)と巻き戻し非活性(:105)の Unsupported 文言の粒度が揃っておらず、ファイル種別(10MB以上/画像/機密)を呼び出し側が文言へ差し込めない。種別情報を分離しておくと『この .env は機密のため巻き戻しできません』のような具体案内に展開しやすい(ux)。"},
+      {"area": "状態復元の安全遷移(消失タブ・空状態)", "message": "state_io は往復・version安全側・最近20件クランプを正しく実装するが、要件10.1『復元時のパス存在検査・消失ファイルの削除済み表示・ワークスペース消失時の空状態遷移と recent からの再選択促し』のロジックは本層に無い。sprint10 must の範囲外で上位(DocumentController/UI)スプリント責務のため欠陥ではないが、中心ユースケース(終了中にAIがファイル削除)の導線として後段で確実に実装されるよう境界を明示しておく(ux)。本ターン成果物への減点ではない。"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

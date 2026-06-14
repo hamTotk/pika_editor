@@ -1,0 +1,27 @@
+{
+  "reviewer": "data",
+  "sprint_id": 4,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "データ損失(可逆性)",
+      "message": "data 観点の本丸(永続化スキーマ・マイグレーション・トランザクション境界・インデックス)はこのスプリント(core/render)には該当が無い。render は index.json/state.json/objects/snapshot を一切触らず、入力文字列を別の文字列へ変換するインメモリ純関数のみ(markdown_renderer/html_sanitizer/html_tokenizer/url_classifier/csp_builder/html_inspector/render_guard)。永続化スキーマを伴うのは sprint 5(snapshot)/10(state/index・退避結合)であり、data の critical 定義(データ破損・不整合・不可逆マイグレーション)に触れる対象が本ターンには存在しない。data 観点としての critical/high はゼロ。以下は data に隣接する『ユーザー文書の不可逆な情報落ち』の観点での補足(低優先)。",
+      "location": "src/core/render/"
+    },
+    {
+      "severity": "low",
+      "area": "データ損失(可逆性)",
+      "message": "サニタイズはユーザー文書(=データ)を破壊的に書き換える不可逆変換だが、その仕様自体は意図通りで妥当(XSS 境界の一元化)。data 観点で唯一気になるのは『どの要素を落としたか』が呼び出し側に返らない点。sanitize_html は除去結果の文字列だけを返し、危険サブツリーを丸ごと落とした事実(forbidden_subtree_tags の suppress)が呼び出し側に通知されない。プレビューでユーザー文書の一部が黙って消えても利用者に判らない懸念があるが、これは UX/frontend 側の通知設計の論点であり data(永続化)の責務外。元データ(原本ファイル)はサニタイズ後の文字列で上書きされず保持される設計(render はプレビュー用の派生物を作るだけで原本に書き戻さない)なので、不可逆なデータ損失=原本喪失には当たらない。低優先の情報共有に留める。",
+      "location": "src/core/render/html_sanitizer.cpp:316"
+    },
+    {
+      "severity": "low",
+      "area": "正規化の一貫性",
+      "message": "icontains(部分文字列の大小無視一致)が html_sanitizer.cpp と html_inspector.cpp に重複定義されている。サニタイズ判定(is_css_safe)と検知判定(inspect_html の外部リソース検知)で同じ照合ロジックを別実装で持つと、片方だけ仕様変更したとき『サニタイズは落とすが検知は拾わない(またはその逆)』のデータ整合のズレを生みうる。現状は同一挙動だが、判定基準を一元化(util への抽出)すると整合性が崩れにくい。本ターンの正しさには影響しないため low。",
+      "location": "src/core/render/html_sanitizer.cpp:184"
+    }
+  ],
+  "has_critical": false,
+  "summary": "data(永続化スキーマ/マイグレーション/トランザクション/インデックス)観点での critical・high はゼロ。本スプリント sprint4=core/render は DB もスキーマもマイグレーションも持たないインメモリ純関数群で、データ破損・不整合・不可逆マイグレーションのいずれにも該当しない。永続化を伴う論点は sprint5(snapshot)/sprint10(state/index・退避)に現れる。挙げた findings は data に隣接する情報落ち(サニタイズの不可逆変換の通知欠如・照合ロジックの重複)に関する low の情報共有のみで、いずれも原本データ(ファイル)の喪失や永続データの破損には繋がらない(render は原本に書き戻さない派生物生成のため)。d_review への影響なし。"
+}

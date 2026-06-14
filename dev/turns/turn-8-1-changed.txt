@@ -1,0 +1,9 @@
+CHANGED:
+src/CMakeLists.txt
+tests/CMakeLists.txt
+src/core/settings/settings.cpp
+src/core/settings/settings.h
+src/core/workspace/workspace_model.cpp
+src/core/workspace/workspace_model.h
+tests/core/settings/settings_test.cpp
+tests/core/workspace/workspace_model_test.cpp

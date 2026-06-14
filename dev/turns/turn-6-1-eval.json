@@ -1,0 +1,29 @@
+{
+  "score": 92,
+  "plan_implementation": {
+    "overall": 100,
+    "notes": "sprint6 must 5件すべて実機確認で充足。(1)行差分=split_lines_lf(CRLF→LF正規化)+dtl::Diff/compose で add/delete/change を unified順に返す[line_diff.cpp / ReportsAddDeleteChange]。(2)改行のみ差で空=LF正規化後に行分割するため成立[CrlfVsLfOnlyDiffIsEmpty を line_diff/diff_engine 両方で観測]。(3)行内ハイライト=空白トークンLCS、words_are_separable で語が2個未満なら tokenize_chars(UTF-8 CP単位)へフォールバック[inline_diff.cpp / JapaneseFallsBackToCharLevel・MixedAsciiAndJapaneseUsesCharFallbackWhenNoSpaces]。(4)色非依存=DiffLine::marker()で+/-/' '[MarkerIsColorIndependent・EveryLineHasColorIndependentMarker]。(5)大規模ガード=exceeds_limits がバイト/行数/最長行長を開始前判定し truncated を返す(別スレッド中断に頼らない)[LargeByteInputTruncatesBeforeComputing・TooManyLinesTruncates・OverlongLineTruncates]。should 2件も充足: 境界(空/全追加/全削除)[AllAddedWhenBaselineEmpty・AllDeletedWhenCurrentEmpty・EmptyVsEmptyHasNoChanges]、協調キャンセル(CancelToken=atomic、段境界+attach_inline_spans の行ペアループで観測)[PreCancelledReturnsCancelled・NotCancelledWhenTokenClear]。未実装の must/should なし。"
+  },
+  "quality": {
+    "overall": 92,
+    "breakdown": {"d_verify": 100, "d_accept": 100, "d_quality": 82},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[PASS] d_verify=100(ctest --preset x64-core-test exit 0、verify_results 確定値)/d_accept=100(must 5件すべて観測テストで充足)/d_review=100(security・data 両レビュワーとも has_critical=false)/d_quality=82。should 2/2 充足で score=92。テスト改竄なし(3 テストファイルは tests/CMakeLists.txt に登録され ctest で実行・PASS、緩和/skip/犠牲的期待値変更なし。挙動を観測する強いアサーション)。\n[HIGH] 行内強調 LCS の二次メモリが線形 per-line ガードをすり抜ける(security finding 連動)。exceeds_limits の max_line_bytes(既定100,000)は1行長 n を線形に抑えるだけで、diff_tokens の dp(n+1)x(m+1) は n*m まで膨らむ。空白を含まない単一長行(CJK/URL/1行JSON/改行なしAI出力)は words_are_separable=false で tokenize_chars 経路に入り、100,000バイト級ペアで約80GBの DP 確保を試みて OOM に至り得る。この入力は max_total_bytes/max_lines/max_line_bytes の3ガードを全て満たす。inline_diff.cpp:93 のコメント『呼び出し側が長行ガードで n*m の暴走を開始前に断つ前提』は線形ガードでは二次の暴走を断てないため前提不成立。プロジェクト第1/第2原則(データを失わない/固まらない)を直接毀損する確度の高い欠陥。critical 定義(機密/injection/RCE/認可バイパス)非該当のため passed はブロックしないが、次ターンで対応すべき。対策: 行内強調前にトークン積 n*m(またはバイト積)の上限を判定し超過なら spans を空にする(行レベル差分は出す)か、DP を2行ローリングにして O(min(n,m)) に落とす。\n[MEDIUM] 重い計算区間にキャンセル観測点がない。dtl の Myers compose(line_diff.cpp:42)と diff_tokens の二重ループ LCS は内部にキャンセル点を持たず、cancel は attach_inline_spans の行ペア境界(diff_engine.cpp:77)でしか観測されない。max_lines 近傍の全行相違病的入力で compose 1回の実行中はキャンセル不能。should『差分計算がキャンセル可能』の実効カバレッジが compose 区間で欠ける。\n[LOW] (a)DiffEngine::compute は値返しで try/catch を持たず、HIGH の大規模確保で std::bad_alloc が発生すると truncated フォールバックではなく未捕捉例外がコア境界外へ伝播する(CLAUDE.md『コア公開API は Result<T> 方式。例外はモジュール内部に閉じる』からの逸脱。HIGH のガード追加で連動解消)。(b)split_lines_lf は孤立CR(旧Mac改行)を行区切り扱いしない=非対象仕様で問題なし(data finding)。(c)old_line_no/new_line_no の単調増加を直接 assert するテストがなく、行番号整合は dtl SES の不変条件に暗黙依存(data finding。ガター表示・確認済み位置参照に使うデータのため境界テスト追加が望ましい)。",
+  "feedback_structured": {
+    "high": [
+      {"area": "DoS/計算量(robustness・第1/第2原則)", "message": "行内強調 LCS の二次メモリ(dp n*m)が線形 per-line ガード(max_line_bytes)をすり抜ける。空白なし単一長行(CJK/URL/1行JSON)は tokenize_chars 経路で約80GBの DP 確保を試み OOM に至り得る。3ガードを全て満たすため検知されない。inline_diff.cpp:93 のガード前提コメントが線形ガードでは成立しない。対策: 行内強調前に n*m の上限判定で spans を空にする、または DP を2行ローリングで O(min(n,m)) 化。location: src/core/diff/inline_diff.cpp:93 / src/core/diff/diff_engine.cpp:18"}
+    ],
+    "medium": [
+      {"area": "協調キャンセルの到達不能区間", "message": "dtl compose と diff_tokens の二重ループ LCS にキャンセル観測点がなく、cancel は attach_inline_spans の行ペア境界でしか効かない。max_lines 近傍の病的入力で compose 1回の実行中はキャンセル不能。should『キャンセル可能』の実効カバレッジが欠ける。location: src/core/diff/line_diff.cpp:42 / src/core/diff/diff_engine.cpp:119"}
+    ],
+    "low": [
+      {"area": "例外のコア境界貫通", "message": "DiffEngine::compute が try/catch を持たず、大規模確保時の std::bad_alloc が truncated ではなく未捕捉例外としてコア境界外へ伝播する(Result<T> 方針からの逸脱)。HIGH のガード追加で連動解消。location: src/core/diff/diff_engine.cpp:91"},
+      {"area": "CR単独改行の正規化範囲", "message": "split_lines_lf は孤立CR(旧Mac改行)を行区切り扱いしない。spec の must は CRLF/LF のみ対象=非対象仕様で現状維持で問題なし。後続でCR単独を扱う場合はここが照合正規化漏れになる点を記録。location: src/core/diff/line_diff.cpp:11"},
+      {"area": "行番号単調増加のテスト外", "message": "old_line_no/new_line_no の採番は dtl SES の不変条件(old/new を各昇順1回ずつ列挙)に暗黙依存し、単調増加を直接 assert するテストがない。ガター表示・確認済み位置参照に使うデータのため境界テスト追加が望ましい。location: src/core/diff/line_diff.cpp:57"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

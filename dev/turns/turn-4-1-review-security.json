@@ -1,0 +1,33 @@
+{
+  "reviewer": "security",
+  "sprint_id": 4,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "サニタイズ/パーサ差異",
+      "message": "自己終了タグ <script/> のパーサ差異。tokenizer は rawtext 読み飛ばしを `rawtext && !self_closing` でスキップし、sanitizer も forbidden_subtree を `if (!tok.self_closing)` でのみ抑制スタックに積む。結果 `<script/>` は『タグだけ落として後続を出力』に倒れる。HTML5 の本文(非 foreign content)では `<script/>` は自己終了せず後続を script の中身として食う実装が一般的で、ここにパーサ差異が生まれる。本モジュールでは中身が後続 Text トークンとして escape 出力されるため即時の実行コードにはならず、CSP の script-src=app.pika 限定が最終防壁になるが、二重防御の一枚目(サニタイザ)に差異が残る。tokenizer 側で script/style など rawtext 要素は self_closing を無視して常に終了タグまで読み飛ばす(=subtree 抑制対象にする)よう倒すのが安全側。同様の差異は他 rawtext/forbidden 要素にも一般化する。",
+      "location": "src/core/render/html_tokenizer.cpp:283, src/core/render/html_sanitizer.cpp:319-324"
+    },
+    {
+      "severity": "medium",
+      "area": "URL難読化/入力検証",
+      "message": "url_classifier の難読化正規化が数値文字参照(&#106; / &#x6a;)と &colon; のみ対応で、名前付き空白系文字参照(&Tab;=U+0009, &NewLine;=U+000A, &nbsp; 等)を展開しない。`java&Tab;script:` のような分割をスキーム正規化が潰せず、is_dangerous_url がこの形を javascript: と判定せず素通しする。ただし html_sanitizer は URL 属性値出力時に append_escaped_attr_value で '&'→'&amp;' をエスケープするため、出力は `java&amp;Tab;script:` となりブラウザ側でも &Tab; にデコードされず実行に至らない(多層防御で実質遮断)。critical に上げないのはこの出力エスケープが効くため。とはいえ url_classifier 単体の難読化耐性としては穴で、inspector 側の外部URL検知(エスケープを経ない検知用途)にも同じ取りこぼしが波及しうる。decode_numeric_entity に名前付き空白実体の最小セット(Tab/NewLine/colon/sol/NewLine 等)を足すと頑健になる。",
+      "location": "src/core/render/url_classifier.cpp:84-155"
+    },
+    {
+      "severity": "low",
+      "area": "CSP多層防御",
+      "message": "build_csp が base-uri / form-action ディレクティブを明示しない。default-src 'none' は fetch ディレクティブの基盤値だが、base-uri と form-action は default-src のフォールバック対象外で、これらを書かないと CSP 側では <base>/form-action は無制約。本モジュールではサニタイザが <base> を forbidden_void_tags で、<form> を forbidden_subtree_tags で落とすため二重防御の一枚目で塞がれており実害はないが、CSP を独立した壁として完成させる設計方針(generator report 設計判断1『CSP無効化環境でもサニタイザ単体で防ぐ』の逆向き=サニタイザをすり抜けても CSP で止める)に照らすと、base-uri 'none'; form-action 'none' を CSP テンプレートに加えると壁が一段強くなる。UI 側のテンプレート合成で付与する選択肢もあるが、CSP 文字列を一元生成している本 builder に置く方が漏れにくい。",
+      "location": "src/core/render/csp_builder.cpp:16-69"
+    },
+    {
+      "severity": "low",
+      "area": "CSP/インラインCSS",
+      "message": "style-src に 'unsafe-inline' が常時入る。テンプレート由来 style と sanitizer が通した style 属性を描画するために必要で、url()/@import/expression()/javascript:/コメントを含む style は is_css_safe が丸ごと落とすため CSS による情報持ち出し(background:url で値を外部送信)経路は塞がれている。残存は CSS インジェクションによる視覚的偽装程度で実害は薄い。指摘として残すのは、将来テンプレート CSS を app.pika 配信に寄せて 'unsafe-inline' を外せれば壁が一段固くなるという申し送りのため(現スプリントでの修正は不要)。",
+      "location": "src/core/render/csp_builder.cpp:39-45, src/core/render/html_sanitizer.cpp:217-225"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint4 core/render の security 観点レビュー。中心の信頼境界『ユーザー文書由来 Markdown/HTML → プレビュー描画(XSS sink)』は、ホワイトリスト方式サニタイザ＋CSP(default-src 'none', script-src=https://app.pika 限定)の二重防御で塞がれており、md4c 出力も例外なく sanitize_html を経由する(XSS 境界の一元化を実コードで確認)。on* イベント属性除去・script/iframe/object/style/foreignObject の subtree 除去・embed/base/link/meta/frame の void 除去・javascript:/vbscript:/data: の危険スキーム除去・難読化(数値実体・大小文字・前後/内部空白)正規化・CSS url()/@import 遮断・GFM タスクチェックボックスの固定形限定がいずれも実装され、テストは危険入力の不在を EXPECT_FALSE で観測しており基準の緩和・スキップは無い。機密のハードコード無し、認可・外部 API・injection sink(SQL/shell/path)無し。よって critical(injection/RCE 到達・機密混入・認可バイパス)に該当する欠陥は無く has_critical=false。指摘は二重防御の一枚目を強くするための medium 2 件(自己終了 script のパーサ差異 / 名前付き空白実体の難読化取りこぼし=ただし出力エスケープで実質遮断)と、CSP の base-uri/form-action 欠如・style-src unsafe-inline の low 2 件(いずれもサニタイザ側で二重に塞がれている)。use_playwright=false かつ本観点は UI 実機検証を要さないためコード Read のみで判定した。"
+}

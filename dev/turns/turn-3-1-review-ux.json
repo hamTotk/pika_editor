@@ -1,0 +1,33 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 3,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "エラー回復/状態の正しい伝達",
+      "message": "resync の enumerate() が列挙失敗（権限不足・ネットワークドライブ一時切断・ルート消失等）時に空ベクタを返すため、resync 本体はそれを『全ファイルが実在しない』と解釈し baseline 全件を Removed として報告する（resync.cpp:42-48 で ec 時に return、:129-139 で present に無い baseline 全件を Removed 発火）。ユーザー視点では一時的な読み取り障害が『監視中の全ファイルが削除された』という大量の偽削除通知になり、中心体験（外部変更反映→差分確認）が壊れる。要件12章はネットワークドライブ/権限なしをエッジケースとして明示しており、列挙失敗と『本当に空』を区別せず Removed を量産するのは ux 上の回復導線破綻に近い。enumerate のルート列挙そのものが失敗した場合は Removed を 1 件も出さず『再同期不能（現状維持）』を呼び出し側へ返す設計が望ましい（ファイル単位の probe 失敗は別途安全側で可）。",
+      "location": "src/core/watcher/resync.cpp:42-48,129-139"
+    },
+    {
+      "severity": "medium",
+      "area": "フィードバックの正確性",
+      "message": "resync でハッシュ計算に失敗したファイルを『必ず baseline と異なる値』(base.hash_lf ^ 0x1u) に置き換えて Modified を強制発火させている（resync.cpp:114-116）。取りこぼさない安全側の意図は妥当だが、共有違反やロック中で一時的に読めないだけのファイルが『変更あり』として未読化され、ユーザーが差分を開いても実際には差分が無い（または読めない）という不一致フィードバックを生む。ux 観点では『変更したと言われたのに変わっていない』は再認の混乱を招く。読み取り失敗は Modified 確定ではなく後続リトライ/保留（content_hash_lf は Result でエラーを返せる）に倒し、確定できるまで未読化を遅延させる方が、確定読み（SettleReader）の設計思想と一貫する。",
+      "location": "src/core/watcher/resync.cpp:114-116"
+    },
+    {
+      "severity": "low",
+      "area": "状態遷移の一貫性（rename の未読引き継ぎ前提）",
+      "message": "RenameTracker は old/new が窓内に揃わない場合 OLD単独→Removed・NEW単独→Created に正規化する（仕様どおり）。ただし上書き rename（既存ファイルへ rename）のケースは header コメント(rename_tracker.h:8-10)で『呼び出し側が存在判定して Modified に倒す』と明記されているのに、WatcherCore はペア成立 Renamed をそのまま pending_renamed_ に積むだけで（watcher_core.cpp:20-36）、新パス側に既存ファイルがあった場合の Modified への倒し込みを行わない。sprint3 のコアロジック単体では仕様逸脱ではないが、ux 観点では『移動先に既存ファイルがあったのに上書きが変更として見えない』導線が後続スプリント（workspace の未読引き継ぎ）に持ち越される。次スプリントへ申し送る前提が暗黙なので、turn report か呼び出し側 TODO として可視化しておくと、未読・差分の取りこぼし導線の追跡が容易になる。",
+      "location": "src/core/watcher/rename_tracker.h:8-10, src/core/watcher/watcher_core.cpp:20-36"
+    },
+    {
+      "severity": "low",
+      "area": "操作の取り消し不能リスク（呼び出し側への申し送り）",
+      "message": "WatcherCore::drain_for_resync() は保留中の合成・rename・pending_renamed_ を全て破棄する（watcher_core.cpp:103-109）。再列挙が全状態を再構成する前提なので二重計上防止としては正しいが、『破棄してから resync を呼ぶ』という順序契約がコメントにあるのみで API では強制されない。順序を誤ると（drain 後に resync を呼ばない／resync が列挙失敗で空を返す）保留イベントだけが消えて取りこぼしが発生し、ユーザーから見て『変更したのに反映されない』静かな失敗になる。これはコアロジックの責務範囲ではあるが、drain_for_resync と resync をワンセットにする呼び出し規約を呼び出し側設計（後続スプリント）に明示申し送りすると、中心体験の取りこぼし導線を塞げる。",
+      "location": "src/core/watcher/watcher_core.cpp:103-109"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint3 は UI/CLI を持たない core/watcher の純ロジック層であり、ユーザーが直接操作する IF も誤操作起点のデータ喪失パスも存在しないため critical は無し。設計の骨格（ハッシュ一致主条件の自己保存抑制・確定読みによる中途内容防止・rename の安全側正規化）は ux 観点の『誤って外部変更を握り潰さない／中途内容で確定しない』要請に総じて忠実で、テストも該当挙動を観測している。一方、中心体験（外部変更反映→差分確認→確認済み）の正確なフィードバックという ux の核心では、resync の列挙失敗時に baseline 全件を偽 Removed として量産する点（high）と、読み取り失敗ファイルを偽 Modified として未読化する点（medium）が、ユーザーに不正確な未読/削除通知を出し信頼を損なう導線リスクとして残る。rename 上書きの Modified 倒し込みと drain→resync の順序契約は後続スプリントへの申し送り（low）として可視化を推奨する。"
+}

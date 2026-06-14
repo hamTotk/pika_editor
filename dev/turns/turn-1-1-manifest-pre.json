@@ -1,0 +1,15 @@
+{
+  ".clang-format": "4e3ff14f0f2b4f021cd3f238fd46c3fc3c774d383fdc5c99b18e3c2c390dc95a",
+  ".claude/docs/commit.md": "e3afb21349426e3b351388cfe991235731b9c5f0b89913c01d470f7446379724",
+  ".claude/hooks/post-edit-check.mjs": "a52d486634f4bf6ab80ae6d4417bb7986c33ac3ca208a4044ab35566b6f929b0",
+  ".claude/scheduled_tasks.lock": "e2d6428f88dccb12c0f22b40af2e7b70ed9f3b1d0f217ca680a3775d7484acf9",
+  ".claude/settings.json": "8d275da7a7b521f4e182a1461b921b415d13e8d69619cb3fc95506475c0c4e9d",
+  ".gitattributes": "c9fa6cfd3f43a3a7abaebaf49f4511c57ef22d4d3294f2eb887d1b080e915737",
+  ".github/workflows/ci.yml": "6aa0d09ca352f6e6481665176b9588daed8642f0b6273ae9d5225f8b7a0d719d",
+  ".gitignore": "20cfae44fa0d846c3eddd975972748ceebd5ce36809bf4e059ace5f0e1f4557c",
+  "CLAUDE.md": "c237a240da4ba0ac1e3f313eeb6a1b6f24adb9a9682092f4983b35bf3f1b16b6",
+  "docs/design.md": "e2f77e12fcac1eefd54377279b542d5a839f61e8a3ea52d9640fadf96d578a86",
+  "docs/minimal-plan.md": "e92aef3321d997dd1e66640ca0c0c956b9828aaa9e6e8b53f0f13562ef98969e",
+  "docs/requirements.md": "85f5735031c5d77238407d97a71bd230a44b88c7dfd88c10bbb13da4f00fdd0a",
+  "output/harness-diag-2026-06-14.md": "c096c5627beffc4a8a3798da89e850a67dde5044dc805ffbc2500bb1a6e8f252"
+}

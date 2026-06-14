@@ -1,0 +1,21 @@
+{
+  "reviewer": "data",
+  "sprint_id": 7,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "データ表現/シリアライズ整合",
+      "message": "serialize_request は OpenTarget の line/column が 0(指定なし)でも常に \"line\":0,\"column\":0 を出力する。parse 側は v>0 のときのみ採用し 0 を「指定なし」へ正しく復元するため往復整合は保たれており、現状データ破損リスクはない。ただしスキーマ上 0 は『指定なし』の番兵値で意味を持たない冗長フィールドであり、将来 line に 0 を有効値として与える表現拡張(0始まり等)が入ると番兵と衝突する。1始まり前提が崩れない限り問題ないが、IpcRequest のスキーマコメントに『0=指定なしの番兵で、出力では省略可能』である旨を明記しておくと不整合を予防できる。揮発的なプロセス間転送であり永続データではないため severity は low。",
+      "location": "src/core/ipc/ipc_message.cpp:44"
+    },
+    {
+      "severity": "low",
+      "area": "数値表現の境界",
+      "message": "IPC 側 extract_target と CLI 側 strip_trailing_int がともに line/column を 2'000'000'000 でクランプし、json_lite の parse_number は std::stoll のオーバーフローを catch して破棄扱いにしている。整数表現の取り扱いは一貫して安全側で、桁あふれによるデータ不整合(負値混入・ラップアラウンド)は発生しない。一方で IPC 受信(extract_target)はクランプではなく『範囲外は 0=指定なしへ丸める』挙動、CLI(strip_trailing_int)は『上限にクランプ』挙動と、同じ行/桁の範囲外処理が経路ごとに非対称になっている。データ破損には至らないが、巨大行番号指定時に IPC 転送経由と直接起動経由で結果(指定なし vs 上限行)が食い違いうる。挙動の正本を一方に揃えると整合性が上がる。",
+      "location": "src/core/ipc/ipc_message.cpp:88"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint7 は CLI/IPC の引数解釈・転送ロジックであり、永続化スキーマ・インデックス・マイグレーション・トランザクション境界・DB を一切含まない(これらは sprint5/8/10 の領域)。data 観点の核心である『不可逆なデータ損失・スキーマ破損・後方非互換マイグレーション』に該当する変更は構造的に存在せず critical=0。IPC の JSON シリアライズ/デシリアライズは往復テスト(IpcMessage.RoundTrip)で整合が観測されており、整数のオーバーフロー・クランプ・範囲外丸めも安全側に倒されていてデータ不整合は生じない。指摘は番兵フィールドの将来拡張耐性と、行/桁の範囲外処理が IPC 経路と CLI 経路で非対称である点の 2 件(いずれも low、データ破損非該当)。永続化フォーマットの version 付与・アトミック書き込み・未知versionの安全側倒し(マイグレーション安全性)は sprint10 で扱われる設計であり、本スプリントの責務外。"
+}

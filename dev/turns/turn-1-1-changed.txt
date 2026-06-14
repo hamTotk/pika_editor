@@ -1,0 +1,13 @@
+CHANGED:
+CMakeLists.txt
+CMakePresets.json
+src/app/CMakeLists.txt
+src/app/main_console.cpp
+src/app/main_gui.cpp
+src/CMakeLists.txt
+src/util/hash.cpp
+src/util/hash.h
+tests/CMakeLists.txt
+tests/util/hash_test.cpp
+vcpkg-configuration.json
+vcpkg.json

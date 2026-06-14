@@ -1,0 +1,24 @@
+{
+  "score": 100,
+  "plan_implementation": {
+    "overall": 100,
+    "notes": "must 5件すべて実装・gtest 検証済み（未実装なし）。(1) settings 読み取り専用・不正値フォールバック＋警告・起動不能にしない: load_uint/load_bool/load_enum/load_string が型違い/範囲外/未知列挙/負値を既定へ丸めて warnings にキーを積み、parse は try/catch で例外を出さない。(2) 不完全TOMLで直前値維持: catch で previous を返し parse_ok=false。(3) フォルダ先行・自然順(file2<file10): sort_tree＋natural_less。(4) 既定除外(.git/node_modules)非表示かつ木に含めない: is_excluded＋build_tree。(5) rename 引き継ぎ(未読/ベースライン/退避)＋対応付け不能の再判定: apply_renames が Moved/OverwroteDst/Removed(orphaned保全)/Created/Reevaluated(reevaluate積み)を返す。should 2件(自身未読 vs 子孫伝播の区別 / settings からの閾値・除外取得)も充足。"
+  },
+  "quality": {
+    "overall": 100,
+    "breakdown": {"d_verify": 100, "d_accept": 100, "d_quality": 92},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[合格] sprint 8(core/settings・core/workspace)は must 5件を wx非依存コアロジックとして実装し、ctest --preset x64-core-test が exit 0(verify.json)。sprint8 の 26 ケースを実機実行し全 PASS を確認(d_accept=100)。テスト改竄(skip/DISABLED/アサーション緩和)は検出なし。CMake にソース・テストとも配線済み。frontend-ui レビュワーは critical=0(d_review=100)。品質は既存コア(watcher/snapshot/render)と命名・anonymous namespace ヘルパ・struct返却(例外非伝播)・要件番号引用コメントの規約に整合し、natural_less の先頭ゼロ安定化や伝播判定の prefix '/' による部分一致回避など非自明な制約をコメントで説明。 [low] settings.h が util/result.h を include するが Result<T>/util:: は未使用(LoadResult struct 返却で十分なため)。不要 include の整理が望ましい。 [low] workspace_model_test の LeadingZeros(50行目) の `natural_less(v2,v002)||natural_less(v002,v2)` は strict-weak-ordering 上ほぼ恒真で観測力が弱い(隣接 51行目の a02<a10 は実数値順序を検証しており must の整列基準は別途充足)。いずれも欠陥ではなく次ターンの任意改善。",
+  "feedback_structured": {
+    "high": [],
+    "medium": [],
+    "low": [
+      {"area": "settings/不要include", "message": "src/core/settings/settings.h が util/result.h を include しているが、公開 API は LoadResult struct を返し Result<T>/util:: を一切使わない(load_settings は失敗しない設計＝起動不能にしないため Result 不要)。未使用 include を削除するとビルド依存が明確になる。コンパイルは通り criteria には影響しない。"},
+      {"area": "テスト品質/弱いアサーション", "message": "tests/core/workspace/workspace_model_test.cpp:50 の `EXPECT_TRUE(natural_less(\"v2\",\"v002\") || natural_less(\"v002\",\"v2\"))` は strict-weak-ordering で非等価入力なら一方向が必ず成立するため観測力がほぼない。先頭ゼロの安定化方針(短い元桁数を前)を明示する向き付きアサーションに置換すると挙動を固定できる。must の自然順整列は FoldersFirstThenNaturalOrder/NumericOrderingBeatsLexical で充足済みのため合否には影響しない。"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

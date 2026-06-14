@@ -1,0 +1,16 @@
+CHANGED:
+src/app/main_console.cpp
+src/CMakeLists.txt
+tests/CMakeLists.txt
+src/core/ipc/cli_parser.cpp
+src/core/ipc/cli_parser.h
+src/core/ipc/ipc_message.cpp
+src/core/ipc/ipc_message.h
+src/core/ipc/path_normalizer.cpp
+src/core/ipc/path_normalizer.h
+src/core/ipc/pipe_security.cpp
+src/core/ipc/pipe_security.h
+tests/core/ipc/cli_parser_test.cpp
+tests/core/ipc/ipc_message_test.cpp
+tests/core/ipc/path_normalizer_test.cpp
+tests/core/ipc/pipe_security_test.cpp

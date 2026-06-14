@@ -1,0 +1,21 @@
+{
+  "reviewer": "security",
+  "sprint_id": 9,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "DoS / ReDoS",
+      "message": "pcre2_match を match context なしで呼んでおり、PCRE2_MATCH_LIMIT_DEPTH / heap_limit を明示設定していない（match_context 不在を search 内 grep で確認）。ユーザー入力の正規表現（例 (a+)+$ を a の長い行に適用）で破滅的バックトラックが起き、1 回の pcre2_match 呼び出しは PCRE2 既定の MATCH_LIMIT(約1000万) まで走り得る。CancelToken はヒット間でしか観測されず（cancel_token.h でも明記のとおり単一 match 呼び出しは中断不能）、この間は協調キャンセルが効かない。脅威主体はローカル単一ユーザーが自分のファイルに対し自分で打った正規表現＝自己 DoS であり、ref-dev の critical（未検証の外部入力が injection/RCE に到達・認可バイパス・機密ハードコード）には該当しないため medium。多層防御として pcre2_set_depth_limit / pcre2_set_heap_limit を設定し、設計原則「固まらない」(docs/design.md 1章)の最後の安全弁を core 側にも置くことを推奨。なお UI ブロック回避は呼び出し側の TaskRunner 実行が正規の担保であり、本 core はスレッド方針を持たない設計で妥当。",
+      "location": "src/core/search/search_engine.cpp:299"
+    },
+    {
+      "severity": "low",
+      "area": "DoS シグナリング / 失敗時の挙動",
+      "message": "pcre2_match の戻り値 rc<0 を一律 NOMATCH 扱いで break しており、PCRE2_ERROR_MATCHLIMIT・UTF 検証エラー等の異常終了を区別せず黙って打ち切る。SearchResult に truncated もエラーも立たないため、バックトラック上限到達などの異常が呼び出し側・利用者に伝わらない。セキュリティ的にはフェイルクローズ（ループや OOB ではなく停止）で実害は薄く、主に正確性/品質の論点（自観点外）だが、DoS の検知・通知という観点では PCRE2_ERROR_NOMATCH だけを正常終了として扱い、それ以外の負値は truncated/エラーとして上位へ可視化するのが望ましい。",
+      "location": "src/core/search/search_engine.cpp:300"
+    }
+  ],
+  "has_critical": false,
+  "summary": "core/search は純粋・インプロセスのテキスト処理ライブラリで、認証/認可・SQL/シェル/パス操作・ネットワーク(SSRF)・機密・デシリアライズといった injection/RCE/認可バイパスの sink を一切持たない（入力はすべて第一者＝ユーザー自身のパターン/置換/ファイル内容）。よって ref-dev が critical と定義する領域は構造的に不在で critical=0。手書きの UTF-8↔UTF-16 変換・map_back の番兵・ovector の添字・置換テンプレートの substr 算術はいずれも境界チェック済みか PCRE2/番兵契約で内に収まり OOB 読みは認められず、CompiledPattern は両ハンドルを RAII 解放しリークなし。CMake は PCRE2 を private リンクで公開 ABI に漏らさず vcpkg manifest 経由で新規の信頼できない依存も増やしていない。残る security 関連は (1) match limit 未設定による自己 DoS(ローカル単一ユーザーの ReDoS、critical 非該当=medium) と (2) match エラーの黙殺(low) の多層防御不足のみ。"
+}

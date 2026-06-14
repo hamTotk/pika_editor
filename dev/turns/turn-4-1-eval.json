@@ -1,0 +1,51 @@
+{
+  "score": 100,
+  "plan_implementation": {
+    "overall": 100,
+    "notes": "sprint4 must 7件すべて実装・gtestで観測済み: (1)ホワイトリストサニタイズ html_sanitizer.cpp(script/on*/javascript:/iframe/object/embed/base 除去) (2)SVG無害化(script/foreignObject/イベント属性) (3)CSS url()/@import 遮断 is_css_safe (4)JS依存検知 html_inspector.cpp(script/Tailwind CDN) (5)外部リソース検知(http(s)/プロトコル相対) (6)render_guard.cpp(6000万/8000万px・5万要素・HTML要素数/ネスト、開始前判定・乗算オーバーフロー安全側) (7)csp_builder.cpp(script-src=https://app.pika 限定・Blocked時に外部http(s)不含)。should 2件(md4c GFM変換: テーブル/タスクリスト/打消し線/自動リンク、CSPリモート切替)も gtest確認済み。未実装の must/should なし。"
+  },
+  "quality": {
+    "overall": 100,
+    "breakdown": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 92
+    },
+    "dimension_thresholds": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 80
+    }
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[合格] d_verify=100(ctest x64-core-test exit0, 2/2 PASS)・d_accept=100(must 7件全充足)・d_quality=92・d_review=100(security/data とも critical=0)。should 2/2 充足で score 上限100。テスト改竄なし(skip/緩和/犠牲的期待値なし、境界値・難読化・オーバーフローまで観測)。XSS境界が sanitize_html に一元化され md4c出力も例外なく経由する点を実コードで確認。[medium] 次ターン申し送り: (1)html_tokenizer.cpp の rawtext読み飛ばしが `<script/>` 自己終了を後続出力に倒す(html5本文では自己終了しない)パーサ差異。CSP script-src=app.pika 限定とText escape出力で実害は遮断だが、tokenizer側で script/style等 rawtext は self_closing を無視し常に終了タグまで読み飛ばす方が安全側。(2)url_classifier.cpp の難読化正規化が名前付き空白実体(&Tab;/&NewLine;/&nbsp;)を未展開。出力時の &→&amp; エスケープで実行に至らないが、エスケープを経ない inspector の外部URL検知に波及しうる。decode_numeric_entity に最小実体セット追加で頑健化。[low] icontains が html_sanitizer.cpp と html_inspector.cpp に重複定義(util抽出で整合性確保推奨)。CSP に base-uri/form-action 'none' 明示・style-src 'unsafe-inline' 将来除去の余地(いずれもサニタイザ側で二重に遮断済みのため現スプリント修正不要)。",
+  "feedback_structured": {
+    "high": [],
+    "medium": [
+      {
+        "area": "サニタイズ/パーサ差異",
+        "message": "html_tokenizer.cpp:283 の rawtext 読み飛ばしが `rawtext && !self_closing` 条件、html_sanitizer.cpp:319-324 の forbidden_subtree 抑制も `if(!tok.self_closing)` のため、`<script/>` が『タグだけ落として後続を出力』に倒れる。HTML5 本文では `<script/>` は自己終了せず後続を中身として食う実装が一般的でパーサ差異が残る。本モジュールでは後続が Text として escape 出力されるため即時実行コードにはならず CSP script-src=app.pika 限定が最終防壁になるが、二重防御の一枚目に差異が残る。tokenizer 側で script/style など rawtext 要素は self_closing を無視し常に終了タグまで読み飛ばす(=subtree 抑制対象)よう倒すのが安全側。security reviewer medium と一致(d_quality 軽微減点に反映)。"
+      },
+      {
+        "area": "URL難読化/入力検証",
+        "message": "url_classifier.cpp:84-155 の難読化正規化が数値文字参照(&#106;/&#x6a;)と &colon; のみ対応で、名前付き空白系実体(&Tab;=U+0009/&NewLine;=U+000A/&nbsp; 等)を未展開。`java&Tab;script:` のような分割をスキーム正規化が潰せず is_dangerous_url が javascript: と判定しない。html_sanitizer の append_escaped_attr_value で &→&amp; エスケープされるため出力経由では実行に至らない(多層防御で実質遮断)が、エスケープを経ない inspector 側の外部URL検知用途にも取りこぼしが波及しうる。decode_numeric_entity に名前付き空白実体の最小セット追加で頑健化。security reviewer medium と一致(d_quality 軽微減点に反映)。"
+      }
+    ],
+    "low": [
+      {
+        "area": "コード重複/正規化の一貫性",
+        "message": "icontains(部分文字列の大小無視一致)が html_sanitizer.cpp:184 と html_inspector.cpp:13 に重複定義。サニタイズ判定と検知判定で同じ照合を別実装で持つと片方だけ仕様変更時に整合がズレうる。現状同一挙動だが util へ抽出すると崩れにくい。data reviewer low と一致。"
+      },
+      {
+        "area": "CSP多層防御",
+        "message": "csp_builder.cpp:16-69 の build_csp が base-uri/form-action を明示しない。default-src 'none' は fetch ディレクティブの基盤値だが base-uri/form-action はフォールバック対象外。サニタイザが <base> を forbidden_void_tags・<form> を forbidden_subtree_tags で落とすため二重防御の一枚目で塞がれ実害はないが、base-uri 'none'; form-action 'none' を CSP テンプレートに加えると壁が一段強くなる(現スプリント修正不要)。security reviewer low と一致。"
+      },
+      {
+        "area": "CSP/インラインCSS",
+        "message": "csp_builder.cpp:39-45 の style-src に 'unsafe-inline' が常時入る。テンプレート由来 style と sanitizer が通す style 属性の描画に必要で、危険 CSS は is_css_safe が丸ごと落とすため情報持ち出し経路は塞がれている。将来テンプレート CSS を app.pika 配信に寄せて 'unsafe-inline' を外せれば壁が一段固くなる申し送り(現スプリント修正不要)。security reviewer low と一致。"
+      }
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

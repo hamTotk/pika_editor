@@ -1,0 +1,5 @@
+CHANGED:
+src/util/atomic_file.cpp
+src/util/encoding.cpp
+src/util/encoding.h
+tests/util/encoding_test.cpp

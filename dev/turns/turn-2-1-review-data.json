@@ -1,0 +1,33 @@
+{
+  "reviewer": "data",
+  "sprint_id": 2,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "critical",
+      "area": "エンコーディング往復 / 不可逆データ損失",
+      "message": "wide_to_cp932 が WideCharToMultiByte(kCp932, 0, ...) をフラグ 0 で呼んでおり、WC_NO_BEST_FIT_CHARS を指定していない。フラグ 0 では Windows のベストフィット変換が働き、CP932 に厳密には存在しない一部 Unicode 文字(代表例: U+FF5E 全角チルダ→0x8160、U+2212 マイナス記号、U+FF0D 全角ハイフンなど。いわゆる波ダッシュ問題)が『近似する別文字のバイト列』へ静かに置換される。このときベストフィットは lpUsedDefaultChar を FALSE のままにする(既定文字置換ではないため)。結果、encode(.., ShiftJis, ..) の表現可能性チェック(used_default のみで判定)がこれらを『表現可能』と誤判定し、別文字に化けたバイト列を保存中断せず書き出す。これは sprint 2 must criteria #2『Shift_JIS で表現できない文字を検出して保存を中断する』の構造的な抜け穴であり、pika の最上位原則『データを失わない』(CLAUDE.md/spec) を直接侵害する不可逆データ損失。修正方針: wide_to_cp932 の WideCharToMultiByte に WC_NO_BEST_FIT_CHARS を付与し(これにより未マップ文字は既定文字に落ち used_default が立つ)、used_default 判定の信頼性を回復する。検証注記: この環境では C コンパイラ(cl/gcc)が PATH に無く、PowerShell 実行はポリシーで拒否されたため実機での化け再現は未確認。本指摘は『コード上フラグ 0 である』事実(src/util/encoding.cpp:199-208)と、WideCharToMultiByte のベストフィット時に used_default が立たない Microsoft 公式の確定挙動に基づく。テスト(encoding_test.cpp)は全エンコーディングで表現可能な内容のみで往復を検証しており、波ダッシュ問題の境界文字を踏んでいないため、この抜け穴は現テストでは観測されない。",
+      "location": "src/util/encoding.cpp:199-208"
+    },
+    {
+      "severity": "high",
+      "area": "アトミック書き込み / クラッシュ耐性",
+      "message": "write_all_to が ::FlushFileBuffers(h) の戻り値を検査せず、失敗しても rename(ReplaceFile/MoveFileEx)へ進む。FlushFileBuffers が失敗するとデータ・メタデータがディスクへ確実に落ちた保証がないまま最終パスへ置換され、その直後のクラッシュ/電源断で『古い内容も新しい内容も失う』可能性が残る。これは AtomicFile が担保すべき『書き込み途中でも元ファイルが破損しない』(must criteria #4)・design.md 1章『データを失わない』の保証の核であり、戻り値が偽なら tmp を削除して Io エラーを返すべき。現状はクラッシュ耐性が『成功扱い』に倒れている。なお既存テスト(atomic_file_test.cpp)はクラッシュ点の注入をしないためこの欠落を観測できない。",
+      "location": "src/util/atomic_file.cpp:66"
+    },
+    {
+      "severity": "medium",
+      "area": "エンコーディング往復 / 自己保存抑制の整合",
+      "message": "decode 経路(decode_auto/decode_as の ShiftJis/UTF-16)が原バイト列を一切保持せず、保存時は『UTF-8 content → encode で CP932/UTF-16 を再生成』する設計。CP932/UTF-16↔UTF-8 の往復は数学的に bijective ではない経路があり(波ダッシュ系のほか、CP932 の重複マッピング、UTF-16 の未対サロゲート等)、読み込み→無編集保存でディスクバイトが原バイトと変わりうる。spec/design は自己保存抑制を『保存後ハッシュ一致を主条件』とする(sprint 3 watcher の領分)が、無編集保存で原バイトが変わると保存後ハッシュが原ファイルのハッシュと一致せず、自己保存が外部変更と誤認される/未読化される温床になる。本スプリントの責務はエンコード往復の正しさまでだが、『原バイトを保持して無編集時はそのまま書き戻す』か『往復不変性を保証する文字集合に限定する』方針を sprint 3 連結前に明確化すべき。EncodingRoundTrip2 は表現可能な内容での安定のみ確認しており、往復不変でない文字での挙動は未検証。",
+      "location": "src/util/encoding.cpp:261-362"
+    },
+    {
+      "severity": "low",
+      "area": "アトミック置換 / 競合",
+      "message": "write_atomic は GetFileAttributesW で final_exists を判定してから ReplaceFile/MoveFileEx を分岐するが、判定と置換の間に他プロセスが最終パスを作成/削除する TOCTOU 窓がある。final_exists=false 判定後に他者がファイルを作ると MoveFileExW は MOVEFILE_REPLACE_EXISTING 不在のため失敗する。この場合 tmp は削除され Io エラーを返すのでデータ損失は無い(置換が起きないだけ)が、稀に保存が偽陰性で失敗しうる。ネットワークドライブ等で顕在化しやすい。MoveFileExW に MOVEFILE_REPLACE_EXISTING を足すか、ReplaceFile 経路へ一本化する選択肢がある。データ整合性そのものは損なわないため low。",
+      "location": "src/util/atomic_file.cpp:91-109"
+    }
+  ],
+  "has_critical": true,
+  "summary": "sprint 2 は util データ基盤として往復維持・LF正規化ハッシュ・アトミック書き込み・Result<T> をおおむね正しく実装し、テストも観測可能な挙動で検証されている(緩和・スキップは無い)。ただし data 観点で 1 件の critical: CP932 エンコードが WideCharToMultiByte フラグ 0(ベストフィット有効)のため、波ダッシュ系の文字が used_default を立てずに別文字へ化け、must criteria #2『表現不能文字で保存中断』を構造的にすり抜ける不可逆データ損失経路がある(WC_NO_BEST_FIT_CHARS 付与で解消)。加えて FlushFileBuffers 戻り値未チェックでクラッシュ耐性が成功側に倒れている(high)、decode が原バイトを保持せず無編集保存で往復破壊→自己保存抑制の誤認に繋がりうる(medium)。critical は『データを失わない』を最上位原則とする本プロジェクトの核に触れるため過剰指摘ではないと判断した。実機の文字化け再現は環境制約(コンパイラ不在/PowerShell 拒否)で未確認、コードの確定事実と Win32 公式挙動に基づく。"
+}

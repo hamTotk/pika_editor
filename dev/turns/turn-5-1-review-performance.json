@@ -1,0 +1,39 @@
+{
+  "reviewer": "performance",
+  "sprint_id": 5,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "計算量 / ファイルIO",
+      "message": "enforce_capacity の容量GC が while(total_object_bytes() > limit) ループで、毎イテレーション (1) 全 entries×stash を走査して std::set<string> を再構築し、(2) 参照 object ごとに fs::file_size(=ディスク syscall) を呼び、(3) もう一度全 entries×stash を走査して最古 victim を 1 件だけ選び 1 件 erase する。1 件削るたびに全 object サイズを総当たりで再計測するため、超過分が V 件・参照 object が R 件あると O(V) 回ループ × 各 O(R) syscall = 容量GC 全体で最悪 O(V·R) の fs::file_size 呼び出しになる。500MB 超過時(=R が大きい局面)ほど高くつく。criteria に数値レイテンシ要件は無いため critical ではないが、設計原則『固まらない(UI で200ms超ブロックしない)』に照らすと実害が見える。改善案: ループ前に object→size を 1 度だけ集計してマップ化し、victim を削除したら参照カウント減算で total を更新する(再 syscall 不要にする)。または非保護 stash を time 昇順に 1 度ソートして上限内に収まるまで前から削る(O((E·S)log(E·S) + R) syscall)。",
+      "location": "src/core/snapshot/snapshot_store.cpp:265-323"
+    },
+    {
+      "severity": "medium",
+      "area": "計算量",
+      "message": "SnapshotIndex::find が entries の線形走査(O(n))。set_baseline / add_stash は毎回 find を呼ぶため、ワークスペースの追跡ファイル数 n が大きい(数千ファイルのドキュメントフォルダ)場合、N ファイルの一括 set_baseline(起動時の全既読化や『すべて確認済み』)で O(n^2) になる。ホットパスではなく n も中規模想定だが、起動時/一括確認は N 件を順に処理しうるため、将来 rel_path→index のハッシュマップ(unordered_map)を併設すると線形性が保てる。現状の criteria は満たすため high にはしない。",
+      "location": "src/core/snapshot/snapshot_types.cpp:47-69"
+    },
+    {
+      "severity": "medium",
+      "area": "計算量 / IO",
+      "message": "add_stash は LRU 超過(11件目)を検知するたびに sweep_unreferenced_objects を呼ぶ。sweep は list_objects()(objects フォルダ全列挙の directory_iterator)＋全 entries 走査で参照集合を作り、実在 object 全件と突き合わせる。退避を連続投入する局面では『1件あふれるごとに objects 全列挙』となり、退避頻度に対して sweep コストが O(objects 総数) で乗る。データを失わない原則上 sweep 自体は必要だが、あふれ毎の即時 sweep は遅延/バッチ化(enforce_capacity 側に集約)できる余地がある。LRU で落ちた object は他参照が無ければ次回 enforce_capacity でも回収されるため、即時性は機能要件ではない。",
+      "location": "src/core/snapshot/snapshot_store.cpp:162-179, 328-358"
+    },
+    {
+      "severity": "low",
+      "area": "メモリ",
+      "message": "ObjectStore::get / restore_baseline / restore_stash は object 全体を decompress() で std::string に一括展開する。content_object_allowed=false(10MB以上/画像)は内容 object を持たない設計(set_baseline で baseline_object をクリア)なので、復元経路に載る object は 10MB 未満が保証され全件メモリ展開でも上限が効く。ストリーミング不要で妥当。指摘というより設計上ガードが効いていることの確認(過剰最適化を避ける観点)。",
+      "location": "src/core/snapshot/object_store.cpp:86-94, src/core/snapshot/snapshot_store.cpp:84-101"
+    },
+    {
+      "severity": "low",
+      "area": "計算量",
+      "message": "ObjectStore::list_objects / scan_recoverable_stashes / object_path / meta_path で kMetaSuffix を毎回 std::string(kMetaSuffix) で再構築している箇所がある(list_objects 内ループで .size() のたびに一時 string 生成)。directory_iterator のコストに対し誤差レベルで、可読性とのトレードオフでは現状でも許容。ループ外に suffix 長を巻き上げる程度の微修正余地のみ。",
+      "location": "src/core/snapshot/object_store.cpp:129-131"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint5(core/snapshot)を performance 観点でレビュー。criteria に数値レイテンシ/スループット要件は無く、構造的に満たせない実装(critical)は無し。重複排除・zstd 圧縮・10MB ガードによる復元経路のメモリ上限はいずれも妥当。最大の懸念は enforce_capacity の容量GC で、1 件削除ごとに全 object サイズを fs::file_size で総当たり再計測する while ループ(最悪 O(V·R) syscall)であり、500MB 超過局面で設計原則『固まらない』に反しうる(high)。SnapshotIndex::find の線形走査(N 件一括処理で O(n^2))と、あふれ毎の即時 sweep(objects 全列挙)が medium。いずれも現 criteria はテストの規模(数件〜十数件)では顕在化せず通るため、修正は次ターンの feedback で対応可。"
+}

@@ -1,0 +1,27 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 8,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "表示契約/未読バッジ",
+      "message": "UnreadSet は『ファイル自身の未読 (is_unread)』と『子孫伝播未読 (has_unread_descendant)』を別 API で区別でき、要件4.2『折りたたみ中でも気づける』バッジ描画の土台として適切。色非依存の表示要件(要件11章 a11y)を満たすには、UI 側でこの 2 状態を色だけでなく形/記号(自身=塗りバッジ、伝播=リング等)で描き分ける必要がある。本スプリントは core のためモデル上の不足はないが、UI 実装スプリントで『色のみで未読/伝播を区別しない』ことを acceptance に明示することを推奨。現状コードの欠陥ではない。",
+      "location": "src/core/workspace/workspace_model.h:64"
+    },
+    {
+      "severity": "low",
+      "area": "表示契約/未読総数",
+      "message": "UnreadSet::count() はステータスバーの『未読ファイル数』(要件11章)表示の値源として用意されている。スクリーンリーダ向けには UI 側でこの数値の動的更新を aria-live 相当(wx のアクセシブル通知)で読み上げる導線が要る。モデルとしては値が取れる形になっており core 側に不足はない。UI スプリントでの留意点として記録。",
+      "location": "src/core/workspace/workspace_model.h:72"
+    },
+    {
+      "severity": "low",
+      "area": "ビジュアル一貫性/表示名",
+      "message": "TreeNode.name はセグメント名をそのまま表示名として保持する。長いファイル名・極端な文字列でツリー幅が破綻しないかは UI 側のトランケーション/ツールチップ実装に委ねられる(モデルは全文を保持しており情報欠落はない)。frontend-ui チェックリストの『長い文字列でレイアウトが崩れないか』は UI スプリントで検証対象。core モデルに問題はない。",
+      "location": "src/core/workspace/workspace_model.h:36"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 8 は core/settings・core/workspace の wx 非依存コアロジックのみで、描画コード・操作要素・a11y 実装(src/ui/)を一切含まない。frontend-ui の直接対象(画面/コンポーネントの描画・操作・a11y・ビジュアル一貫性)はこのスプリントに存在せず、use_playwright:false かつ Web UI 非対象のため実機検証も対象外。UI が後段で依存する表示契約モデル(ファイル自身の未読 vs 子孫伝播未読の区別、未読総数、自然順・フォルダ先行ソート、表示名の全文保持)は a11y・色非依存・自然順表示の要件を満たす土台として適切に設計されている。critical(主要操作が不能/不可視・致命的 a11y 違反)は該当なし。記録した low findings はいずれも『後続の UI 実装スプリントで色非依存の描き分け/動的更新通知/長文トランケーションを acceptance に含める』ための申し送りであり、本スプリントのコードの欠陥ではない。"
+}

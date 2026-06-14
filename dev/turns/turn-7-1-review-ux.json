@@ -1,0 +1,33 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 7,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "エラー回復(CLI DX)",
+      "message": "parse_argv は失敗理由を ParseResult.message に詰めている(例:『-g に位置指定が指定されていません』『認識できないオプションです』)が、main_console.cpp は errored 時に parsed.message を一切使わず一律で『pika: 不正な引数です』を stderr に出すだけ。Nielsen #9『エラーは原因と次の一手を平易に示す』に反し、-g の引数欠落と未知オプションが同じ無情報な文言に丸められる。エージェント/人間がどの引数が悪いか判別できない。validate 側の v.message(『フォルダは 1 つまで』等)は活用できているので、parse 側も parsed.message を出力すれば対称になる。",
+      "location": "src/app/main_console.cpp:57-61"
+    },
+    {
+      "severity": "medium",
+      "area": "日本語コンソール出力(should: パイプ・リダイレクトで欠落・文字化けしない)",
+      "message": "print_help()/version 出力は UTF-8 のソースリテラルを std::puts/std::printf でそのまま吐く。Windows コンソール/パイプの既定コードページは CP932 等で、UTF-8 バイト列を無変換に出すと『使い方:』等が文字化けし得る。sprint7 should『--help/--version 出力がパイプ・リダイレクトで欠落・文字化けせず取得できる』を満たすには、コンソール側で SetConsoleOutputCP(CP_UTF8) 相当か出力エンコーディングの手当てが必要だが、main_console.cpp にその配慮がない。use_playwright:false かつ CMake 重量ビルド未整備のため実機での出力確認はできず、コード Read による指摘(継承ツールでの実行検証は不可)。should 項目であり主要導線は機能するため medium。",
+      "location": "src/app/main_console.cpp:21-31,71"
+    },
+    {
+      "severity": "medium",
+      "area": "エラーからの回復導線",
+      "message": "不正引数・検証失敗時にエラー文言は出るが、--help への誘導や usage の抜粋を一切出さない(『pika --help で使い方を表示』等の次の一手がない)。ux チェックリスト『エラーは次の一手を示す』『引数なし実行で適切な案内』の観点で、ユーザーが正しい呼び出し方へ辿り着く手がかりが弱い。引数なし起動自体は『前回状態復元』として受理されるため空状態の行き止まりはない。",
+      "location": "src/app/main_console.cpp:59,82-85"
+    },
+    {
+      "severity": "low",
+      "area": "ヘルプ/usage の網羅",
+      "message": "print_help() に -g の桁省略=行頭の挙動や、フォルダは 1 つまで・複数パス可といった受理規則の例示がなく、実際の分類ロジック(validate)より説明が薄い。実行例(例: `pika -g C:\\doc.md:42:5`)を 1〜2 行足すと記憶より再認(Nielsen #6)を助ける。機能上の不足ではなく文言の磨き込み。",
+      "location": "src/app/main_console.cpp:21-31"
+    }
+  ],
+  "has_critical": false,
+  "summary": "ux(CLI DX)観点。終了コード規約(受理=0/不正=非0=2)は分類・テストともに正しく、失敗時に exit 0 を返す経路はない。stdout(help/version)とstderr(エラー)の分離も適切で、主要タスク(引数解釈・分類・転送スキーマ)の導線破綻やデータ喪失はなく critical はゼロ。一方、(1)parse 側のエラー理由(parsed.message)が握り潰され一律『不正な引数です』に丸められる回復導線の弱さが high、(2)UTF-8 日本語のコンソール出力に文字化け対策の手当てがない(should 未達リスク)と(3)エラー時の --help 誘導欠如が medium。いずれもリリースを妨げないが次ターンで文言・誘導・出力エンコーディングを整えると CLI の DX が締まる。"
+}

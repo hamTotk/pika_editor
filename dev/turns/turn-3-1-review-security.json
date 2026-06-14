@@ -1,0 +1,27 @@
+{
+  "reviewer": "security",
+  "sprint_id": 3,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "DoS / パストラバーサル耐性",
+      "message": "resync の enumerate は fs::recursive_directory_iterator を skip_permission_denied のみで構成し、follow_directory_symlink を付けていない（既定でリパースポイント=ディレクトリのシンボリックリンク/ジャンクションを追従しない）ため、監視ルート外への列挙脱出は構造的に起きにくい。これは安全側で妥当。一方 spec.md 12章は『シンボリックリンク循環』を明示の対象としているが、本実装はループ検知を明示的に扱っておらず、ジャンクションで自己参照ループを作られた場合 std::filesystem の実装挙動（一部環境では filesystem_error 送出）に委ねている。it.increment(ec) で ec を見て break する経路はあるため例外で監視スレッドが落ちる致命にはなりにくいが、循環時の挙動を gtest で固定する価値がある。injection/RCE/認可バイパスのいずれにも該当しないため critical ではない。",
+      "location": "src/core/watcher/resync.cpp:43"
+    },
+    {
+      "severity": "low",
+      "area": "入力検証（境界変換）",
+      "message": "fs_probe.cpp の to_wide は MultiByteToWideChar の戻り値（wlen）を検証せず std::wstring(wlen, ...) に渡す。path は監視ルート相対パス（コア内部で生成・正規化済みを前提とする入口）であり外部入力が直接届く経路ではないため実害は薄いが、不正 UTF-8 列で wlen<=0 となれば空 wstring を生成して GetFileAttributesExW が失敗→exists=false に倒れる（安全側）。漏洩・injection には至らない。堅牢性としての記録に留める。",
+      "location": "src/core/watcher/fs_probe.cpp:22"
+    },
+    {
+      "severity": "low",
+      "area": "情報漏洩 / 多層防御",
+      "message": "watcher コアは内容ハッシュ（XXH3, std::uint64_t 値）のみを扱い、ファイル内容のバイト列を保持・ログ出力していない（content_hash_lf は read_all→ハッシュ化のみで本文を返さない）。診断ログに内容を書かない方針（spec 12章・CLAUDE.md）と整合しており、本スプリント範囲で機密内容の漏洩経路は確認されない。機密ファイル（.env/*.key 等）のハッシュのみ記録ポリシーは snapshot 層（sprint5）の責務であり本スプリントの対象外。良好な点として記録。",
+      "location": "src/core/watcher/fs_probe.cpp:56"
+    }
+  ],
+  "has_critical": false,
+  "summary": "security 観点で critical なし。本スプリントは core/watcher（外部FSイベントの合成・自己保存抑制・rename正規化・オーバーフロー再同期・確定読み）の純ロジックで、SQL/shell exec/HTTP発行/HTML描画/デシリアライズといった injection・RCE・SSRF の sink を一切含まず、認証/認可の対象でもない（ref-dev review-profile でも security は conditional 止まり）。ハードコードされた機密・トークンも検出されない。信頼境界としての外部FSイベントは適切に安全側（読めない/不在→exists=false で監視継続、ハッシュ取得失敗→Modified 扱いで取りこぼさない、自己保存はハッシュ一致を主条件にワンショット消費）に倒されており、外部削除/移動を握り潰さない設計も妥当。残る指摘は3件すべて low（シンボリックリンク循環時の挙動の明示固定、境界変換の戻り値未チェック、いずれも実害が薄い堅牢性レベル）。critical/high に該当する欠陥なし。"
+}

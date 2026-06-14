@@ -1,0 +1,33 @@
+{
+  "score": 91,
+  "plan_implementation": {
+    "overall": 91,
+    "notes": "must 5件すべて実装・観測可能テスト化済み(イベント合成=EventSynthesizer、自己保存抑制=SelfSaveGuard+WatcherCore、rename正規化=RenameTracker、オーバーフロー再同期=resync実FS、確定読み=SettleReader)。上書きrename→Modified倒し込みは仕様どおり呼び出し側(sprint8 WorkspaceController)へ委譲しgenerator reportで明示申し送り済みで本スプリントの逸脱ではない。should は2件中1件(NoMissAtScale=100件取りこぼしなし)を充足。残るshould(監視不能環境の定期5sポーリングフォールバック)はresync関数の再利用を設計コメントで示すに留まり、専用エントリ点・5s周期・mtime+サイズプレスクリーン再利用の観測可能テストが無いため未充足とみなした(should=0.5)。"
+  },
+  "quality": {
+    "overall": 91,
+    "breakdown": {"d_verify": 100, "d_accept": 100, "d_quality": 86},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[合格] sprint3(core/watcher 技術リスクb)。d_verify=100(ctest --preset x64-core-test exit 0、watcher 7テストファイルは tests/CMakeLists.txt で pika_tests に配線済み・pika_tests_build フィクスチャ依存で実ビルド検証される)。d_accept=100(must 5件すべて実装・観測可能テスト化)。d_review ゲート=100(security/data/ux 全レビュワー has_critical:false)。テスト改竄なし(skip/disable/緩和なし、件数・kind・path・時刻・ハッシュを具体値で検証、100件スケール検証あり)。generator が訂正した RenameTrackerTest.FlushAllDrainsPending は仕様(窓内 old→new 即ペア成立)に入力を合わせた正当な訂正で、訂正後も両イベントの surface を assert しており骨抜きではない。 [HIGH/要改善] resync.cpp:116 で content_hash_lf 読み取り失敗時に disk_hash を base.hash_lf ^ 0x1u に捏造して Modified を強制発火する点(data/ux 両レビュワーが high 指摘)。安全側(取りこぼしより偽陽性)ではあるが、(a) 捏造が無言でコメント根拠が薄い、(b) content_hash_lf は既に Result でエラーを返せるのに保留/リトライ経路を使っていない、(c) この読み取り失敗分岐に対するテストが無い。次ターンで意図明示コメント+保留オプション+失敗分岐テストを追加すべき。 [HIGH] resync の enumerate() 列挙失敗(権限/ネットワーク切断/ルート消失)時に空ベクタを返し、resync 本体が baseline 全件を偽 Removed として量産する(ux 指摘)。ルート列挙そのものの失敗は『再同期不能(現状維持)』として呼び出し側へ返し、ファイル単位 probe 失敗とは区別すべき。 [MEDIUM] 番兵値 hash==0 が『未登録/読めない/計算不能』の3意味で多重利用されており std::optional<uint64_t> 等での構造分離が堅い(data)。同窓 add+remove の最終状態解決(EventSynthesizer::to_kind)に同窓テストケースが無い(data)。読み取り失敗ファイルの偽 Modified による不一致フィードバック(ux)。 [LOW] resync シンボリックリンク循環時の挙動を gtest で固定する価値(security)、fs_probe to_wide の MultiByteToWideChar 戻り値未検証(security・実害薄)、resync の e.rel.empty() 到達不能分岐の除去(data)、drain_for_resync→resync のワンセット順序契約・rename上書き倒し込みの後続スプリント申し送り可視化(ux)。 d_quality=86: 1ファイル1責務・design.md/req 引用・why コメント・Result<T> 境界・時刻/ハッシュ注入による決定論化・テンポラリ隔離など既存パターン整合と可読性は高水準。high の無言捏造+未テスト失敗分岐の分を減点。",
+  "feedback_structured": {
+    "high": [
+      {"area": "再同期の整合性(読み取り失敗時のハッシュ捏造)", "message": "resync.cpp:116 で content_hash_lf 失敗時 disk_hash=base.hash_lf ^ 0x1u に捏造し Modified を強制発火。安全側だが無言・コメント根拠薄・該当分岐のテスト無し。content_hash_lf は Result でエラーを返せるので保留(このサイクルでは判定せず次回再評価)/リトライに倒すか、捏造を呼び出し側が区別可能な形にし、失敗分岐の gtest を追加すること。"},
+      {"area": "再同期の列挙失敗 vs 空の区別(偽 Removed 量産)", "message": "resync の enumerate() がルート列挙失敗(権限不足/ネットワークドライブ一時切断/ルート消失)で空ベクタを返すと、resync 本体が baseline 全件を偽 Removed として報告する(resync.cpp:42-48,129-139)。ルート列挙そのものの失敗時は Removed を 1 件も出さず『再同期不能=現状維持』を呼び出し側へ返す設計にし、ファイル単位の probe 失敗(安全側で可)と区別すること。要件12章のネットワークドライブ/権限なしエッジケースに直結する。"}
+    ],
+    "medium": [
+      {"area": "番兵値 hash==0 の多重利用", "message": "hash 値 0 が『未登録(register_save)』『読めない/不在(suppressed_as_self_save)』『計算不能(baseline_entry)』の 3 意味の番兵として多重利用されている(self_save_guard.cpp:10, watcher_core.cpp:56)。現状 XXH3 が 0 になる確率は無視できるが、std::optional<uint64_t> 等で『値なし』と『ハッシュ0』を構造分離すると将来の正規化/実装変更に堅い。"},
+      {"area": "同窓 add+remove の最終状態解決", "message": "EventSynthesizer::to_kind は saw_added && saw_removed のとき p.effective(最後に push された生 action)だけで Removed/Created を決める。ReadDirectoryChangesW の同窓イベント順は保証が弱く最終状態を取り違えうる。同窓 add+remove のテストケースが無いため、両順序を注入したテストで挙動を固定すること。"},
+      {"area": "読み取り失敗ファイルの偽 Modified フィードバック", "message": "resync.cpp:114-116 の捏造により共有違反/ロック中で一時的に読めないだけのファイルが『変更あり』として未読化され、差分を開いても実差分が無い不一致フィードバックになる。確定読み(SettleReader)の思想と一貫させ、確定できるまで未読化を遅延する方が ux 上一貫する。"}
+    ],
+    "low": [
+      {"area": "シンボリックリンク循環の挙動固定", "message": "resync の recursive_directory_iterator は follow_directory_symlink 無し(既定で追従しない)で安全側だが、ジャンクションによる自己参照ループ時の挙動を gtest で固定する価値がある(security, spec 12章のシンボリックリンク循環を明示対象としている)。"},
+      {"area": "境界変換の戻り値未検証", "message": "fs_probe.cpp:22 の to_wide が MultiByteToWideChar の wlen を検証せず wstring に渡す。内部生成パス前提で実害は薄く不正 UTF-8 でも exists=false に安全側に倒れるが、堅牢性として記録(security)。"},
+      {"area": "到達不能分岐の除去", "message": "resync.cpp:114-115 の e.rel.empty() 分岐は enumerate がルート自身(rel 空)を push しないため到達不能。死んだ分岐で『root 自体がエントリになりうる』誤含意を与えるため除去して可読性を上げる(data)。"},
+      {"area": "呼び出し側への申し送り可視化", "message": "drain_for_resync→resync のワンセット順序契約(watcher_core.cpp:103-109)と rename 上書き時の Modified 倒し込み(rename_tracker.h:8-10, watcher_core.cpp:20-36)は後続スプリント(workspace の未読引き継ぎ)へ持ち越される。turn report か呼び出し側 TODO として可視化すると取りこぼし導線の追跡が容易になる(ux)。"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

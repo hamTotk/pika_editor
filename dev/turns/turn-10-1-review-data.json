@@ -1,0 +1,39 @@
+{
+  "reviewer": "data",
+  "sprint_id": 10,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "トランザクション境界 / クラッシュ整合性",
+      "message": "add_stash は object 書き込み・サイドカー書き込み・per-file LRU による object の物理削除 (sweep_unreferenced_objects) を即座に FS へ反映するが、index.json の永続化は ReviewFlow では一切行わず呼び出し側 (DocumentController の load→操作→save) に委ねている。この『object 操作 (副作用あり) と index 保存 (遅延)』の非原子性により、add_stash 直後〜呼び出し側 save 前にクラッシュ/例外が起きると、ディスク上の index.json と objects が乖離する。特に LRU 溢れ時は sweep が in-memory index 基準で object を物理削除するため、save 前にクラッシュすると『古い (前回保存時の) index.json が、既に削除された object を参照する』ダングリング参照になりうる。restore_baseline/restore_stash は NotFound を返して落ちはしないが、ベースライン/退避の内容復元が静かに不能になる。設計原則1『データを失わない』の境界事例。critical にしないのはサイドカー (recover_pending_stashes) が『退避を失わない』方向は担保しており、index も同一 in-memory 値から save される単一フロー前提のため (= 即時の破損ではなく save 漏れ/クラッシュ時に限る) 確信が high 止まりだから。緩和策: 破壊的 sweep を index save 成功後に遅延させる、もしくは sweep 対象を『今回の index を save した後』に回す経路を契約として明記する。",
+      "location": "src/core/snapshot/snapshot_store.cpp:195-202 (add_stash 内の apply_per_file_lru→sweep_unreferenced_objects)"
+    },
+    {
+      "severity": "medium",
+      "area": "整合性 / 原子性 (confirm_all)",
+      "message": "confirm_all は 1 ファイルごとに『baseline-replace 退避 (add_stash) → set_baseline』を順に行うが、複数ファイルをまたぐ一括処理全体としては原子的でない。途中の set_baseline が失敗すると result.skipped に積んで続行する設計だが、その時点で『一部ファイルだけ baseline-replace 退避が積まれ baseline は旧のまま、別のファイルは新 baseline に更新済み』という中間状態の index が in-memory に残る。これを呼び出し側が save すれば、batchId 単位の revert_all は『退避が積まれたファイルのみ』を取り消すため、新 baseline に進んだファイルと退避だけ積まれたファイルが混在し、一括取消の意味論 (開始時点へ戻す) が部分的にしか成立しない。個人ローカルツールで set_baseline 失敗 (objects.put のディスク I/O 失敗) は稀だが、batch の部分適用は『すべて確認済み』の取消可逆性をユーザー視点で崩す。set_baseline 失敗時に当該 batch を中断扱いにする/その batch をロールバックする方針を検討。",
+      "location": "src/core/document/review_flow.cpp:159-182 (confirm_all のループ)"
+    },
+    {
+      "severity": "medium",
+      "area": "スキーマ / 型整合 (state.json)",
+      "message": "AppState.active_tab は std::int64_t だが UI 上はタブ配列のインデックス (tabs.size() は実用上 int 域) であり、range 検証が parse 経路に無い。parse_state は active_tab を as_int(-1) で読むだけで、tabs.size() を超える値・負値 (-1 以外) のサニタイズをしない。state.json が手編集/旧版/破損で active_tab=999 のとき、復元側 (UI) が境界チェックを怠ると out-of-range アクセスになりうる。同様に window の x/y/width/height も負/極端値の clamp が無い (画面外復元)。スプリント must は『未知 version 安全側・アトミック書き込み』であり個々のフィールド妥当性検証までは要求していないため medium。コア層 (state_io) で active_tab を [-1, tabs.size()-1] に clamp する、もしくは『境界検証は復元側の責務』を明示すると、データ→UI 境界での防御が一段固くなる。",
+      "location": "src/core/state/state_io.cpp:194-197 (activeTab の読み取り), src/core/state/state_types.h:53"
+    },
+    {
+      "severity": "low",
+      "area": "後方互換 / マイグレーション (version 規約)",
+      "message": "state.json/index.json とも『現行 version か未知(新しい) version か』の 2 分岐のみで、過去 version の明示的マイグレーション経路 (version < kStateVersion 時の旧→新変換) が無い。現状 kStateVersion=kIndexVersion=1 なので実害は無いが、将来 version を上げる破壊的変更時、旧 version の state/index を『現行スキーマとして寛容にパースする』 (欠落キーは既定値) 暗黙挙動に依存することになる。version を上げる契機で旧→新の明示マイグレーション (もしくは『旧 version は読まず初回起動扱い』の明文化) が無いと、キー意味が変わった場合に静かな誤復元を招く。今スプリントの不可逆損失ではないため low。version を上げる際の移行方針を design.md 7章へ追記しておくと安全。",
+      "location": "src/core/state/state_io.cpp:126-130, src/core/snapshot/index_io.cpp:65-69"
+    },
+    {
+      "severity": "low",
+      "area": "整合性 (confirm_all の freeze 判定)",
+      "message": "confirm_all は freeze_hash が空のとき並行変化チェックを行わない (header に明記の仕様)。confirm 単体経路は freeze_hash 未設定で呼ばれる設計であり妥当だが、confirm_all に freeze_hash 未設定の target が混ざると『フリーズ後に並行書き込みされた未確認内容』をそのまま baseline 化しうる (E3 のスキップ保護がすり抜ける)。テストは freeze_hash を設定したケースのみ検証しており、confirm_all 経由で freeze_hash 空 target を渡したときの挙動 (= 無防備に確認される) は観測されていない。呼び出し側が confirm_all では必ず freeze_hash を設定する規約なら問題ないが、コア層でそれを強制 (空なら拒否/警告) しないため、契約違反時に未確認内容の baseline 汚染が起きうる。low (呼び出し規約で回避可能・現状テスト範囲外)。",
+      "location": "src/core/document/review_flow.cpp:136-140 (freeze_hash 空時の分岐)"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint10 のデータ層 (state.json/index.json の version・アトミック書き込み・退避フロー結合) は中核が堅実。version は state/index 双方で未知(新しい)版を読まず・書き戻さず Unsupported に倒し (K2)、全永続化が write_atomic (tmp→rename) 経由で、テストも .tmp 残存ゼロ・ディスク上未知 version 不改変まで観測している。object は content-addressed で重複排除され、baseline-replace 退避が共有実体の dedup を尊重 (旧 baseline と同一 hash) しており誤削除・孤児化は無い。index 破損時もサイドカー走査 (recover_pending_stashes) で退避を失わない最後の砦が機能している。critical (データ破損・不可逆損失を招くスキーマ/トランザクション欠陥) は無し。ただし最大の構造的弱点は『object への破壊的操作 (LRU sweep の物理削除) が即時 FS 反映される一方、index.json の保存は呼び出し側に遅延委譲される』非原子性で、save 漏れ/クラッシュ時に index↔objects 乖離 (ダングリング参照) を招きうる (high)。confirm_all の複数ファイル一括処理が原子的でなく部分適用で batch 取消の可逆性が部分的に崩れる点 (medium)、active_tab/window 等のフィールド範囲検証がコア層に無い点 (medium) を次ターンで詰めると、データ層の不変条件がさらに固くなる。"
+}

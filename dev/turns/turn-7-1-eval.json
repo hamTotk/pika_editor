@@ -1,0 +1,30 @@
+{
+  "score": 93,
+  "plan_implementation": {
+    "overall": 100,
+    "notes": "must 5件すべて実装・gtest検証済み: (1)-gパース(parse_goto: ドライブレターのコロン非分割 colon<=1 ガード・桁省略=column1・非整数サフィックス無視) (2)引数検証(validate: 存在しないフォルダ末尾区切り=非0エラー/存在しないファイル=NewFile受理/複数フォルダ=エラー) (3)相対パス正規化(normalize_to_absolute: CWD注入で絶対化・./..解決・ドライブ相対・UNC) (4)IPCスキーマ検証(parse_request: op=open限定・絶対パスのみ・整数のみ・最大8KB打ち切り・1件でも違反なら全体破棄) (5)終了コード規約(Accepted=0/InvalidArgument=2、ExitCodeContractで明示観測)。should: pipe_security(DACL SDDL+PIPE_REJECT_REMOTE_CLIENTS)は完全充足。--help/--version のパイプ出力文字化け対策(SetConsoleOutputCP)が未手当で should 1件が部分充足。"
+  },
+  "quality": {
+    "overall": 93,
+    "breakdown": {"d_verify": 100, "d_accept": 100, "d_quality": 86},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[PASS] sprint7(CLI/シングルインスタンスの引数解釈・転送ロジック)。d_verify=100(ctest --preset x64-core-test exit 0、pika_tests_build/pika_tests 両PASS)。d_accept=100(must 5件すべて純ロジック+FS実在判定注入で決定論gtest化。テスト改竄なし: skip/DISABLED/緩和アサーションなし、line/column/kind/exit_code を具体値で観測)。d_quality=86。[HIGH] main_console.cpp:57-61 で parse_argv が詰めた具体的失敗理由(parsed.message: '-g に位置指定が指定されていません'/'認識できないオプションです')を握り潰し一律『pika: 不正な引数です』に丸めている。validate側のv.messageは:82-85で活用できているので非対称。parse側もparsed.messageを出せばCLI DXが締まる(ux reviewer high)。[MEDIUM] print_help/version がUTF-8リテラルをputs/printfで直吐きし、Windowsコンソール/パイプ既定CP932で日本語が文字化けし得る。SetConsoleOutputCP(CP_UTF8)相当の手当がなく should『--help/--version がパイプ・リダイレクトで欠落・文字化けせず取得できる』が部分充足。[MEDIUM] 不正引数時に--help誘導やusage抜粋がなく次の一手が弱い。[LOW] IPC serialize_request が line/column=0(指定なし番兵)でも常に出力、IPC受信(範囲外→0丸め)とCLI(範囲外→上限クランプ)で範囲外処理が非対称(data reviewer low、往復整合は保たれデータ破損なし)。両reviewer(data/ux)とも has_critical=false。should充足率0.75(pipe_security完全+console出力部分)。use_playwright:false のため実機UI検証は対象外、コンソール出力の文字化けはコードReadベースの指摘(重量ビルド未整備で実行検証不可)。",
+  "feedback_structured": {
+    "high": [
+      {"area": "エラー回復(CLI DX)", "message": "main_console.cpp:57-61: parse_argv の具体的失敗理由(parsed.message)を出力せず一律『pika: 不正な引数です』に丸めている。-g 引数欠落と未知オプションが同じ無情報文言になり、エージェント/人間がどの引数が悪いか判別できない。validate側はv.message(:82-85)を活用できているので、parse側もparsed.messageを出して対称にすべき。"}
+    ],
+    "medium": [
+      {"area": "日本語コンソール出力(should)", "message": "print_help()/version が UTF-8 ソースリテラルを puts/printf で無変換に出力。Windows コンソール/パイプ既定CP(CP932等)で文字化けし得る。SetConsoleOutputCP(CP_UTF8)相当の出力エンコーディング手当が main_console.cpp になく、should『--help/--version がパイプ・リダイレクトで欠落・文字化けせず取得できる』を満たしきれない(部分充足)。"},
+      {"area": "エラーからの回復導線", "message": "不正引数・検証失敗時に--help誘導やusage抜粋(『pika --help で使い方を表示』等)を出さず、正しい呼び出しへ辿り着く手がかりが弱い。引数なし起動は『前回状態復元』受理で行き止まりはない。"}
+    ],
+    "low": [
+      {"area": "データ表現/シリアライズ", "message": "ipc_message.cpp:44: serialize_request が line/column=0(指定なし番兵)でも常に出力。parse側はv>0のみ採用し往復整合は保たれデータ破損リスクはないが、IpcRequestスキーマに『0=指定なし番兵・出力省略可』を明記すると将来の0始まり表現拡張との衝突を予防できる。"},
+      {"area": "数値範囲外処理の非対称", "message": "ipc_message.cpp:88(IPC extract_target=範囲外→0=指定なしへ丸め) と cli_parser strip_trailing_int(範囲外→上限2'000'000'000クランプ) で同じ行/桁の範囲外処理が経路ごとに非対称。データ破損には至らないが、巨大行番号でIPC転送経由と直接起動経由の結果が食い違いうる。正本を一方に揃えると整合性が上がる。"},
+      {"area": "ヘルプ網羅", "message": "print_help() に -g 桁省略=行頭やフォルダ1つまで等の受理規則の例示がなく、実行例(例: pika -g C:\\doc.md:42:5)を1〜2行足すと再認を助ける。文言の磨き込みで機能不足ではない。"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

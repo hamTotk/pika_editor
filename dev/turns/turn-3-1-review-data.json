@@ -1,0 +1,39 @@
+{
+  "reviewer": "data",
+  "sprint_id": 3,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "再同期の整合性 (フォールバック値の捏造)",
+      "message": "resync() でハッシュ読み取りが失敗したとき disk_hash を base.hash_lf ^ 0x1u に捏造し、必ず baseline と不一致にして Modified を強制発行する。共有違反・一時ロック・権限など過渡的な読み取り失敗で、内容が変わっていないファイルにも偽の外部変更(Modified)が立つ。pika の優先順位『データを失わない』に照らせば偽陽性 Modified は安全側(取りこぼしより誤検知が望ましい)であり critical ではないが、(a) この捏造は無言で起きコメントもログ根拠も薄い、(b) 確定読み/確認済みフローと結合すると未読化が連鎖し baseline が振れる。失敗時は『不明』として保留 (このサイクルでは判定を出さず次回再評価) するか、せめて捏造であることを呼び出し側に区別可能な形で返すべき。少なくとも意図を明示するコメントとテストが要る。",
+      "location": "src/core/watcher/resync.cpp:116"
+    },
+    {
+      "severity": "medium",
+      "area": "番兵値のオーバーロード (hash==0)",
+      "message": "ハッシュ値 0 が『未登録(register_save)』『読めない/不在(suppressed_as_self_save)』『計算不能(baseline_entry の h.is_ok()? : 0)』の 3 つの異なる意味の番兵として多重利用されている。現状は XXH3(任意の実内容) が 0 になる確率が無視できるため実害は出ない(空ファイルも XXH3 は非0)。ただし番兵と正規ハッシュ空間が型レベルで分離されておらず、将来ハッシュ実装や正規化が変わると『内容が偶然 0 のファイル』が自己保存抑制・再同期で取りこぼされうる。std::optional<uint64_t> 等で『値なし』と『ハッシュ0』を構造的に分離するのが堅い。データ破損には至らないため medium。",
+      "location": "src/core/watcher/self_save_guard.cpp:10, src/core/watcher/watcher_core.cpp:56"
+    },
+    {
+      "severity": "medium",
+      "area": "イベント合成の最終状態解決 (作成+削除の同窓畳み込み)",
+      "message": "EventSynthesizer::to_kind で saw_added && saw_removed のとき p.effective(=最後に push された生イベントの action) だけで最終状態(Removed/Created)を決める。push 順=確定の最後の状態という仮定だが、ReadDirectoryChangesW の同一窓内イベント順は to_kind の根拠コメント通り保証が弱い。最終状態を取り違えると『存在するのに Removed として確定』『削除済みなのに Created』となり、後段の未読/ベースライン判定に伝播する。watcher_core は存在判定を持たないため自己回復できず、resync まで誤状態が残りうる。実害は次の確定読み/再同期で訂正される可能性が高いので medium だが、同窓 add+remove のテストケースが無く検証されていない点が弱い。",
+      "location": "src/core/watcher/event_synthesizer.cpp:46-55, tests/core/watcher/event_synthesizer_test.cpp"
+    },
+    {
+      "severity": "low",
+      "area": "到達不能分岐 (root 相対パスの空判定)",
+      "message": "resync() の content_hash_lf 呼び出しで e.rel.empty() を分岐しているが、enumerate() は通常ファイルのみ push し監視ルート自身(rel が空)を列挙しないため e.rel が空になる経路はない。死んだ分岐で、読み手に『root 自体がエントリになりうる』という誤った含意を与える。除去して可読性を上げるのが望ましい。データ整合への影響なし。",
+      "location": "src/core/watcher/resync.cpp:114-115"
+    },
+    {
+      "severity": "low",
+      "area": "除外ディレクトリ判定の一貫性",
+      "message": "is_excluded_dir は完全一致のディレクトリ名(.git/node_modules)で枝刈りし、resync の enumerate は disable_recursion_pending で配下に降りない。これ自体は正しいが、baseline 側に過去 .git/node_modules 配下のエントリが混入していた場合 (別経路で登録された等)、resync では実在側に出ないため一律 Removed として発行されうる。現スプリントの baseline 供給元はまだ無いため理論上の指摘で low。baseline 構築側でも同じ除外を必ず通す契約をテストで固定しておくと安全。",
+      "location": "src/core/watcher/resync.cpp:14-18, 126-139"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint3 は watcher サブシステムのみで RDB スキーマ・マイグレーション・トランザクション境界は存在しないため、data 観点の critical 定義(データ破損を招くスキーマ/トランザクション欠陥・不可逆マイグレーション)に該当する指摘はゼロ。本観点は『内容/状態の確定の正しさ』にスコープを移して評価した。自己保存抑制はハッシュ主条件+ワンショット+多重保存の取り分けが正しく、確定読み(SettleReader)は size/mtime 安定+静穏期間+時刻巻き戻りの安全側扱いができており中途内容で確定しない設計は妥当。再同期は LF 正規化ハッシュ照合で改行のみ差を除外し決定論順序を保つ点も良い。最も実害寄りは resync の読み取り失敗時にハッシュを捏造して Modified を強制する箇所(high)で、偽陽性は『データを失わない』方向の安全側だが無言の捏造ゆえ意図明示と保留オプションを検討すべき。番兵値 0 の多重利用と同窓 add+remove の最終状態解決は将来の堅牢性課題(medium)。critical=0 のため d_review ゲートはブロックしない。"
+}

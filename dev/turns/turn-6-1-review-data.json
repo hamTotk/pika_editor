@@ -1,0 +1,21 @@
+{
+  "reviewer": "data",
+  "sprint_id": 6,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "改行データの正規化範囲",
+      "message": "split_lines_lf は CRLF を LF へ畳むが、孤立 CR(旧 Mac の \r 単独改行)は行区切りとして扱わず行内文字として残す。spec/requirements の must は『CRLF/LF のみ異なる同一内容で差分が空』であり CR 単独改行は非対象仕様のため、データ破損ではなく仕様範囲内。ただし CR を含むファイルでは『LF 正規化後の照合』という前提が CR にだけ効かず、CR 有無で行内容(データ)が変わるため差分結果が直感とずれる余地がある。非対象仕様として現状維持で問題ないが、後続スプリントで CR 単独を扱う場合はここが照合データの正規化漏れになる点を記録しておく。",
+      "location": "src/core/diff/line_diff.cpp:11"
+    },
+    {
+      "severity": "low",
+      "area": "行番号データの一貫性(dtl SES 順依存)",
+      "message": "diff_lines は dtl の SES を『変更ブロック内で add/delete が任意順』と想定し pending_deletes/pending_adds にバッファして unified 順へ並べ替えるが、old_line_no/new_line_no の採番は SES の出現順(delete で ++old_no、add で ++new_no、common で flush)で行う。出現順カウントなので並べ替え後も各行の行番号データは正しく確定するが、この正しさは『dtl の SES が old/new それぞれの行を昇順で 1 回ずつ列挙する』という dtl の不変条件に暗黙依存している。dtl は外部ヘッダオンリー依存で baseline 固定だが、ガター行番号の単調増加(=ベースライン/現在の行位置データの整合)を直接 assert するテストが無く、行番号データの整合は実質テスト外。差分の text 内容自体は検証済みのためデータ破損リスクは低いが、行番号は UI のガター表示と確認済み更新の位置参照に使われるデータなので、old_line_no/new_line_no が各側で単調増加することを観測するテストの追加が望ましい。",
+      "location": "src/core/diff/line_diff.cpp:57"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 6(core/diff)は DB・スキーマ・マイグレーション・トランザクション・永続化を一切含まない純メモリ内アルゴリズム(dtl/Myers 行差分・LCS 行内強調)であり、ref-dev の data critical 定義(データ破損・不整合を招くスキーマ/トランザクション欠陥、不可逆マイグレーション)に構造的に該当する対象が存在しない。review-profile の判定指針『永続化スキーマがなければ data=off』とも整合する。critical=0。データの正しさの観点で見ても、LF 正規化照合・大規模入力ガード(開始前のバイト/行数/最長行長判定)・UTF-8 境界を割らない区間生成・改行のみ差で空、といった『扱うデータの不整合を防ぐ』設計は適切で、テストが各 must を観測可能な挙動で検証している。指摘は low 2 件(CR 単独改行の正規化範囲=非対象仕様、行番号データの単調増加が dtl の不変条件に暗黙依存しテスト外)のみで、いずれもリリースを妨げない。なお dp の O(n*m) メモリやキャンセル粒度は performance 観点に属するため本観点では踏み込まない。"
+}

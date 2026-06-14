@@ -1,0 +1,26 @@
+{
+  "score": 100,
+  "plan_implementation": {
+    "overall": 100,
+    "notes": "must 4件すべて実装・テスト充足: (1)find_all で全ヒット列挙+count・大小区別/単語単位/正規表現 (2)replace_all で $1 / ${1} / 円1 / $$ キャプチャ参照置換 (3)PCRE2_UTF|PCRE2_UCP で p{L}/w の Unicode 文字クラス (4)CancelToken をヒット反復ループ先頭・置換ループで観測する協調キャンセル。should 1件(第2段階200MB超で置換無効化=max_total_bytes 既定200MB→replace_all が truncated で非置換)も OversizeInputTruncatesReplace で充足。未実装の must/should なし。"
+  },
+  "quality": {
+    "overall": 100,
+    "breakdown": {"d_verify": 100, "d_accept": 100, "d_quality": 90},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[high] なし。[medium] (1)security: pcre2_match を match context なしで呼び PCRE2_MATCH_LIMIT_DEPTH/heap_limit 未設定。ローカル単一ユーザーの自己 ReDoS(破滅的バックトラックを誘う正規表現等)で単一 match 呼び出しが PCRE2 既定 MATCH_LIMIT まで走り得て、その間 CancelToken はヒット間でしか観測されず協調キャンセルが効かない(critical 非該当=多層防御不足)。設計原則『固まらない』の最後の安全弁として core 側にも depth/heap limit を置くと良い(search_engine.cpp:299)。(2)CompiledPattern が所有ハンドルを private(code_/match_data_)と public 生ポインタ(code/match_data)で二重保持しており own() で同期させる構造はやや冗長(可読性の微減点)。[low] (1)security: rc<0 を一律 NOMATCH 扱いで break し PCRE2_ERROR_MATCHLIMIT/UTF エラーを区別せず黙殺、SearchResult に truncated/エラーが立たず異常が上位へ可視化されない(PCRE2_ERROR_NOMATCH のみ正常終了扱いにし他の負値は truncated 化が望ましい。search_engine.cpp:300)。テスト改竄なし: 全テストがバイトオフセット・件数・グループ範囲・ErrorCode を実値で検証し、skip/緩和/犠牲的期待値変更は認められない。",
+  "feedback_structured": {
+    "high": [],
+    "medium": [
+      {"area": "DoS / ReDoS (security)", "message": "pcre2_match を match context なしで呼び PCRE2_MATCH_LIMIT_DEPTH/heap_limit 未設定。ユーザー入力正規表現の破滅的バックトラックで単一 match 呼び出しが PCRE2 既定 MATCH_LIMIT まで走り、その間 CancelToken はヒット間でしか観測されず協調キャンセルが効かない。critical 非該当(ローカル単一ユーザーの自己 DoS、injection/RCE/認可バイパスの sink 不在)だが、設計原則『固まらない』の安全弁として pcre2_set_depth_limit/pcre2_set_heap_limit を core 側にも置くことを推奨。src/core/search/search_engine.cpp:299"},
+      {"area": "可読性 (CompiledPattern の二重所有)", "message": "CompiledPattern が所有実体を private(code_/match_data_)と利便用の public 生ポインタ(code/match_data)で二重保持し own() で同期させている。RAII の解放責務は private 側のみだが、public ミラーの存在で同期漏れ余地が構造的に残る。アクセサ経由に寄せれば 1 責務に締まる(機能上の欠陥ではなく品質の微点)。src/core/search/search_engine.cpp:123-157"}
+    ],
+    "low": [
+      {"area": "DoS シグナリング (security)", "message": "pcre2_match の rc<0 を一律 NOMATCH 扱いで break し、PCRE2_ERROR_MATCHLIMIT・UTF 検証エラー等の異常終了を区別せず黙殺。SearchResult に truncated もエラーも立たず、バックトラック上限到達等が呼び出し側・利用者に伝わらない。PCRE2_ERROR_NOMATCH のみ正常終了として扱い、他の負値は truncated/エラーとして上位へ可視化するのが望ましい。src/core/search/search_engine.cpp:300"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

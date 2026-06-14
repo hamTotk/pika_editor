@@ -1,0 +1,14 @@
+CHANGED:
+src/CMakeLists.txt
+tests/CMakeLists.txt
+src/core/diff/cancel_token.h
+src/core/diff/diff_engine.cpp
+src/core/diff/diff_engine.h
+src/core/diff/diff_types.h
+src/core/diff/inline_diff.cpp
+src/core/diff/inline_diff.h
+src/core/diff/line_diff.cpp
+src/core/diff/line_diff.h
+tests/core/diff/diff_engine_test.cpp
+tests/core/diff/inline_diff_test.cpp
+tests/core/diff/line_diff_test.cpp

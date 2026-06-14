@@ -1,0 +1,35 @@
+{
+  "score": 79,
+  "plan_implementation": {
+    "overall": 79,
+    "notes": "must 6 件中 5 件充足、1 件(容量管理の14日保護)未充足。充足: (1)保存→復元同一性=BaselineSaveRestoreIdentity/BaselineRoundTripsAfterPersist、(2)4種別退避=AllStashKindsSaveAndRestore、(3)index破損復元=RecoversStashesAfterIndexCorruption、(4)機密はハッシュのみ=SensitiveFileRecordsHashOnly(平文object不在も検証)、(6)mark-and-sweep誤削除防止=SweepKeepsSharedObjectReferencedElsewhere/SweepKeepsBaselineObjectSharedWithStash。未充足: (5)容量管理の『未復元かつ14日以内の退避を保護対象から削除しない』が add_stash のインライン LRU 経路で破られる(snapshot_store.cpp:162-179 が is_protected を確認せず先頭から無条件 erase。enforce_capacity の LRU(236-248)は保護を尊重しており二経路が乖離)。criterion はファイルごと最新10件LRUを保護すべき機構として明示的に列挙しているため、本経路の非保護は未充足。should 3 件中 2 件充足(ワークスペース非汚染=DoesNotWriteInsideWorkspaceFolder 充足、ACL本人のみ=secure_dir owner-only SDDL 実装で充足、起動時未読プレスクリーンは baseline_mtime/size フィールドのみ存在しプレスクリーン比較ロジック/テストは本層に未実装=未充足)。"
+  },
+  "quality": {
+    "overall": 79,
+    "breakdown": {"d_verify": 100, "d_accept": 0, "d_quality": 72},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": false,
+  "feedback": "[d_verify=100] ctest --preset x64-core-test が exit 0(verify_results 正本)。[d_review=100] security/performance/ux いずれも critical=0。[d_accept=0 / HIGH] must『容量管理…未復元かつ14日以内の退避を保護対象から削除しない』が add_stash のインライン LRU(snapshot_store.cpp:162-179)で破られる: 同一ファイルに11件以上の退避が14日以内に積まれると、未復元・14日以内の最古退避が is_protected 無視で静かに削除され『データを失わない/退避=最後の砦』(最優先原則)に反する。enforce_capacity 側 LRU(236-248)は is_protected を尊重しており、二つの LRU 経路が乖離している。修正: add_stash の LRU も is_protected を尊重する(保護退避は10件枠超過でも残す or 保護分を LRU カウントから別枠化)。[テスト品質 GAP] LRU を検証する PerFileStashLruKeepsLatestTen は保護次元を含まず、保護を検証する ByteGcEvictsOldestUnprotectedButKeepsProtected は per_file_stash_limit=100 で LRU を無効化、AgeGc 系は2件で LRU 非発火のため、criterion が明示する『LRU×14日保護』の相互作用を観測するテストが存在しない(改竄=アサーション緩和/skip ではないが、必須挙動の被覆漏れ)。次ターンで add_stash LRU を保護尊重に修正し、保護退避が11件目以降も残る gtest を追加すること。[HIGH/security] index.json 由来 hash(baselineObject/stash.hash)が無検証で ObjectStore のパス合成に届く(object_store.cpp:28-36)。XXH3-64=16桁[0-9a-f]の許可リスト検証で多層防御を。[HIGH/performance] enforce_capacity 容量GC が1件削除ごとに全 object を fs::file_size 総当たり再計測(O(V·R) syscall、snapshot_store.cpp:265-323)。object→size を事前集計しマップ化を。[MEDIUM] json_lite 再帰下降に深さ上限なし(DoS)、decompress が宣言サイズ無上限(解凍爆弾)、SnapshotIndex::find/即時 sweep の線形コスト。[MEDIUM/ux] recover_pending_stashes の順序が本層で未定義。[should 未充足] 起動時未読プレスクリーン比較ロジックは本スプリント未実装(データフィールドのみ)。",
+  "feedback_structured": {
+    "high": [
+      {"area": "データ保全 / 容量管理(must未充足)", "message": "add_stash のインライン per-file LRU(snapshot_store.cpp:162-179)が is_protected を確認せず先頭から無条件 erase するため、同一ファイルに11件以上の退避が14日以内に積まれると未復元・14日以内の保護退避が静かに削除される。must criterion『ファイルごと最新10件の LRU と容量GC・90日GC が、未復元かつ14日以内の退避を保護対象から削除しない』に違反(criterion は LRU を保護機構として明示列挙)。enforce_capacity の LRU(236-248)は保護を尊重しており二経路が乖離。最優先原則『データを失わない=退避が最後の砦』への明確な毀損。add_stash LRU を is_protected 尊重に修正すること。"},
+      {"area": "テスト品質(被覆漏れ)", "message": "LRU×14日保護の相互作用を検証する gtest が存在しない。PerFileStashLruKeepsLatestTen は保護次元なし、ByteGcEvictsOldestUnprotectedButKeepsProtected は per_file_stash_limit=100 で LRU 無効化、AgeGc 系は2件で LRU 非発火。criterion が gtest を要求する保護挙動が LRU 経路で未観測(改竄ではないが必須挙動の検証漏れ)。保護退避が11件目以降も残ることを観測する gtest を追加すること。"},
+      {"area": "security / パストラバーサル", "message": "index.json 由来の baselineObject/stash[].hash が無検証で ObjectStore::object_path/meta_path のパス合成に届く(object_store.cpp:28-36、parse_index index_io.cpp:89/114)。細工された hash で objects フォルダ外の任意ファイル読み出し/削除が原理上可能。ローカルデータルート内ファイルのため critical 未満だが、object_path 合成前に XXH3-64=16桁[0-9a-f]の許可リスト検証を入れ不一致は object 不在扱いにする多層防御を推奨。"},
+      {"area": "performance / 容量GC", "message": "enforce_capacity の容量GC while ループ(snapshot_store.cpp:265-323)が1件削除ごとに全参照 object を fs::file_size で総当たり再計測し最悪 O(V·R) syscall。500MB 超過局面ほど高コストで『固まらない』原則に反しうる。ループ前に object→size を1度だけ集計しマップ化、削除時は参照カウント減算で total を更新する(再 syscall 不要)。"}
+    ],
+    "medium": [
+      {"area": "security / DoS", "message": "json_lite の再帰下降パーサに再帰深さ上限がない(json_lite.cpp:221-)。深いネスト入力(index.json/サイドカー meta は外部編集されうる)でコールスタック枯渇。深さ上限を設け false 返却でグレースフルに退避一覧復元へ倒す。"},
+      {"area": "security / 解凍爆弾", "message": "decompress が ZSTD_getFrameContentSize の宣言値だけで out を確保(compression.cpp:35-44)。差し替え object が巨大サイズ宣言時に OOM。解凍後上限(kContentSizeLimit 等)を設け超過フレームを Io エラーで弾く。"},
+      {"area": "performance / 計算量", "message": "SnapshotIndex::find が線形走査(snapshot_types.cpp:47-69)で N 件一括 set_baseline 時 O(n^2)。あふれ毎の即時 sweep(add_stash)が objects 全列挙(snapshot_store.cpp:162-179,328-358)。rel_path→index ハッシュマップ併設、sweep の遅延/バッチ化を検討。"},
+      {"area": "ux / 復元導線", "message": "recover_pending_stashes が directory_iterator 順(不定順)で RecoveredStash を返す(object_store.cpp:140-208)。復元待ち一覧の提示順が本層で未定義・未検証。RecoveredStash は time/index_gen を持つため、新しい順など決定的順序を本層で保証するか『上位が time でソートする契約』を明示する。"}
+    ],
+    "low": [
+      {"area": "security / 機密結線(申し送り)", "message": "is_sensitive_default(sensitive.cpp)の判定が set_baseline の sensitive 引数へ結線されるのは後続スプリント(呼び出し側)。後続で sensitive 引数へ確実に渡さないと機密平文がベースライン object に残る。add_stash が機密でも内容退避するのは『退避=最後の砦』と整合し正しい。"},
+      {"area": "ux / エラー文言", "message": "復元失敗時の Result メッセージ(『内容を持たないベースラインは復元できません』等)は原因を平易な日本語で伝えるが『次の一手』は含まない。core API としては妥当で、上位 UI がエラーコード(Unsupported/NotFound/Io)を回復メッセージへ翻訳する責務。後続で導線が失われないよう記録。"},
+      {"area": "performance / 微修正", "message": "object_store.cpp:129-131 で kMetaSuffix を毎回 std::string 再構築。directory_iterator コストに対し誤差レベルだが suffix 長をループ外へ巻き上げる余地。"}
+    ]
+  },
+  "passed": false,
+  "evaluator_skill": "assign-dev-evaluator"
+}

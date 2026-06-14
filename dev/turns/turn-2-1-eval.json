@@ -1,0 +1,28 @@
+{
+  "score": 82,
+  "plan_implementation": {
+    "overall": 80,
+    "notes": "must 5件中4件は実装＋gtestで充足(BOM優先判定・LF正規化XXH3一致・AtomicFile temp→rename・Result<T>例外なし)。must#2『Shift_JISで表現不能文字を検出して保存中断』は used_default 判定で実装されているが、wide_to_cp932 が WideCharToMultiByte(kCp932,0,...) をベストフィット有効(WC_NO_BEST_FIT_CHARS 無し)で呼ぶため、波ダッシュ系(U+FF5E等)が used_default を立てずに別文字へ化けてチェックをすり抜ける。表現不能文字の一部で保存が中断されず不可逆破壊が起きるため must#2 は構造的に未充足。should は TaskRunner・Logger とも実装＋テスト済(2/2)。"
+  },
+  "quality": {
+    "overall": 82,
+    "breakdown": {"d_verify": 100, "d_accept": 0, "d_quality": 72, "d_review": 0},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80, "d_review": 100}
+  },
+  "all_dimensions_passed": false,
+  "feedback": "[HIGH] data観点でcriticalが1件あり d_review=0、かつ同欠陥が must#2 を骨抜きにするため d_accept=0。src/util/encoding.cpp:199-208 の wide_to_cp932 が WideCharToMultiByte(kCp932, 0, ...) をフラグ0(ベストフィット変換有効)で呼んでおり WC_NO_BEST_FIT_CHARS を付けていない。CP932 に厳密には無い一部Unicode文字(波ダッシュ U+FF5E→0x8160、U+2212、U+FF0D 等)がベストフィットで別文字のバイト列へ静かに置換され、このとき lpUsedDefaultChar(used_default)が FALSE のまま立たない。結果 can_encode / encode の表現可能性チェック(!used_default で判定)がこれらを『表現可能』と誤判定し、化けたバイト列を保存中断せず書き出す。これは sprint2 must#2『Shift_JISで表現できない文字を検出して保存を中断する』の構造的抜け穴であり、CLAUDE.md/spec の最上位原則『データを失わない』を直接侵害する不可逆データ損失。修正: WideCharToMultiByte に WC_NO_BEST_FIT_CHARS を付与し(未マップ文字は既定文字へ落ち used_default が立つ)、used_default 判定の信頼性を回復する。[HIGH] src/util/atomic_file.cpp:66 の write_all_to が FlushFileBuffers(h) の戻り値を検査せず、失敗しても rename へ進む。フラッシュ失敗時にディスク確定の保証がないまま最終パスへ置換され、直後のクラッシュ/電源断で旧新両方を失いうる(must#4『書き込み途中でも元ファイルが破損しない』の核を成功側に倒している)。戻り値が偽なら tmp を削除し Io エラーを返すべき。[MEDIUM] decode 経路が原バイトを保持せず保存時に UTF-8→CP932/UTF-16 を再生成する設計のため、往復が bijective でない文字で無編集保存でもディスクバイトが変わりうる。sprint3 の自己保存抑制(保存後ハッシュ一致が主条件)で外部変更と誤認/未読化される温床になるため、sprint3 連結前に『原バイト保持』か『往復不変文字集合への限定』方針を明確化すべき。[LOW] write_atomic の GetFileAttributesW→ReplaceFile/MoveFileEx 分岐に TOCTOU 窓があり、判定後に他プロセスが最終パスを作ると MoveFileExW が MOVEFILE_REPLACE_EXISTING 不在で失敗し稀に保存が偽陰性で失敗する(データ損失はなし)。MOVEFILE_REPLACE_EXISTING 付与か ReplaceFile 一本化で解消。なお verify(ctest x64-core-test)は exit0(2/2 PASS)で d_verify=100。テスト改竄(緩和・skip・犠牲的期待値)は検出されず、テストは観測可能な挙動で誠実に検証している。critical が現テストで観測されないのは波ダッシュ境界文字をテストが踏んでいない誠実なカバレッジ欠落であり改竄ではない。コード品質は命名・1ファイル1責務・制約コメント・Result<T>設計とも良好だが、本スプリントの中核であるデータ安全不変条件が破れている点と安全クリティカル境界のテスト欠落で d_quality は閾値未満。",
+  "feedback_structured": {
+    "high": [
+      {"area": "エンコーディング往復 / 不可逆データ損失 (d_review critical / d_accept must#2)", "message": "src/util/encoding.cpp:199-208 wide_to_cp932 が WideCharToMultiByte(kCp932, 0, ...) をベストフィット有効で呼び WC_NO_BEST_FIT_CHARS を付けていない。波ダッシュ系(U+FF5E等)が used_default を立てずに別文字へ化け、can_encode/encode の表現可能性チェック(!used_default)をすり抜けて保存中断されず不可逆破壊する。must#2『表現不能文字で保存中断』の構造的抜け穴で『データを失わない』を侵害。WC_NO_BEST_FIT_CHARS 付与で解消。"},
+      {"area": "アトミック書き込み / クラッシュ耐性 (must#4)", "message": "src/util/atomic_file.cpp:66 write_all_to が FlushFileBuffers の戻り値を検査せず失敗しても rename へ進む。ディスク確定保証なしで最終パスへ置換され、直後のクラッシュ/電源断で旧新両方喪失しうる。戻り値が偽なら tmp 削除＋Io エラー返却に修正すべき。"}
+    ],
+    "medium": [
+      {"area": "エンコーディング往復 / 自己保存抑制の整合", "message": "decode 経路が原バイトを保持せず保存時に UTF-8→CP932/UTF-16 を再生成するため、bijective でない文字の無編集保存でディスクバイトが変わりうる。sprint3 の自己保存抑制(保存後ハッシュ一致主条件)で外部変更誤認/未読化の温床になる。sprint3 連結前に原バイト保持か往復不変文字集合への限定方針を明確化すべき。"}
+    ],
+    "low": [
+      {"area": "アトミック置換 / 競合 (TOCTOU)", "message": "src/util/atomic_file.cpp:91-109 GetFileAttributesW 判定と ReplaceFile/MoveFileEx 置換の間に TOCTOU 窓があり、稀に保存が偽陰性で失敗する(データ損失なし)。MOVEFILE_REPLACE_EXISTING 付与か ReplaceFile 一本化で解消。"}
+    ]
+  },
+  "passed": false,
+  "evaluator_skill": "assign-dev-evaluator"
+}

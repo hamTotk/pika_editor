@@ -1,0 +1,12 @@
+[
+  {
+    "command": "cmake --preset x64-core-test",
+    "exit_code": 0,
+    "tail": "zstd provides CMake targets:\n\n  find_package(zstd CONFIG REQUIRED)\n  target_link_libraries(main PRIVATE zstd::libzstd)\n\nThe package gtest is compatible with built-in CMake targets:\n\n    enable_testing()\n\n    find_package(GTest CONFIG REQUIRED)\n    target_link_libraries(main PRIVATE GTest::gtest GTest::gtest_main GTest::gmock GTest::gmock_main)\n\n    add_test(AllTestsInMain main)\n\nAll requested installations completed successfully in: 242 us\n-- Running vcpkg install - done\n-- Selecting Windows SDK version 10.0.26100.0 to target Windows 10.0.26200.\n-- Configuring done (4.6s)\n-- Generating done (0.1s)\n-- Build files have been written to: C:/dev/pika_editor/build/x64-core-test"
+  },
+  {
+    "command": "ctest --preset x64-core-test",
+    "exit_code": 0,
+    "tail": "Test project C:/dev/pika_editor/build/x64-core-test\n    Start 1: pika_tests_build\n1/2 Test #1: pika_tests_build .................   Passed    2.09 sec\n    Start 2: pika_tests\n2/2 Test #2: pika_tests .......................   Passed    0.01 sec\n\n100% tests passed, 0 tests failed out of 2\n\nTotal Test time (real) =   2.10 sec"
+  }
+]

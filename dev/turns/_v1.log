@@ -1,0 +1,81 @@
+-- Running vcpkg install
+warning: attempting to set builtin-baseline in vcpkg.json while overriding the default-registry in vcpkg-configuration.json.
+the default-registry from vcpkg-configuration.json will be used.
+Detecting compiler hash for triplet x64-windows-static...
+Compiler found: C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe
+The following packages are already installed:
+    dtl:x64-windows-static@1.21
+    gtest:x64-windows-static@1.17.0#2
+    md4c:x64-windows-static@0.5.3
+    pcre2[core,platform-default-features,jit]:x64-windows-static@10.47#1
+    toml11:x64-windows-static@4.4.0
+  * vcpkg-cmake:x64-windows-static@2024-04-23
+  * vcpkg-cmake-config:x64-windows-static@2024-05-23
+    xxhash:x64-windows-static@0.8.3
+    zstd:x64-windows-static@1.5.7
+dtl is header-only and can be used from CMake via:
+
+  find_path(DTL_INCLUDE_DIRS "dtl/Diff.hpp")
+  target_include_directories(main PRIVATE ${DTL_INCLUDE_DIRS})
+
+md4c provides CMake targets:
+
+find_package(md4c CONFIG REQUIRED)
+target_link_libraries(main PRIVATE md4c::md4c)
+
+pcre2 provides CMake targets:
+
+  find_package(pcre2 CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE PCRE2::8BIT PCRE2::16BIT PCRE2::32BIT PCRE2::POSIX)
+
+pcre2 provides pkg-config modules:
+
+  # PCRE2 - Perl compatible regular expressions C library (2nd API) with 16 bit character support
+  libpcre2-16
+
+  # PCRE2 - Perl compatible regular expressions C library (2nd API) with 32 bit character support
+  libpcre2-32
+
+  # PCRE2 - Perl compatible regular expressions C library (2nd API) with 8 bit character support
+  libpcre2-8
+
+  # Posix compatible interface to libpcre2-8
+  libpcre2-posix
+
+toml11 provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(toml11 CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE toml11::toml11)
+
+xxhash provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(xxHash CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE xxHash::xxhash)
+
+xxhash provides pkg-config modules:
+
+  # extremely fast hash algorithm
+  libxxhash
+
+zstd provides CMake targets:
+
+  find_package(zstd CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE zstd::libzstd)
+
+The package gtest is compatible with built-in CMake targets:
+
+    enable_testing()
+    
+    find_package(GTest CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE GTest::gtest GTest::gtest_main GTest::gmock GTest::gmock_main)
+    
+    add_test(AllTestsInMain main)
+
+All requested installations completed successfully in: 242 us
+-- Running vcpkg install - done
+-- Selecting Windows SDK version 10.0.26100.0 to target Windows 10.0.26200.
+-- Configuring done (4.6s)
+-- Generating done (0.1s)
+-- Build files have been written to: C:/dev/pika_editor/build/x64-core-test

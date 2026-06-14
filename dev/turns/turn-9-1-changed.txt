@@ -1,0 +1,8 @@
+CHANGED:
+src/CMakeLists.txt
+tests/CMakeLists.txt
+src/core/search/cancel_token.h
+src/core/search/search_engine.cpp
+src/core/search/search_engine.h
+src/core/search/search_types.h
+tests/core/search/search_engine_test.cpp

@@ -1,0 +1,8 @@
+CHANGED:
+src/core/snapshot/compression.cpp
+src/core/snapshot/json_lite.cpp
+src/core/snapshot/object_store.cpp
+src/core/snapshot/object_store.h
+src/core/snapshot/snapshot_store.cpp
+src/core/snapshot/snapshot_store.h
+tests/core/snapshot/snapshot_store_test.cpp

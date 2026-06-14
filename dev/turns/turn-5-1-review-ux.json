@@ -1,0 +1,27 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 5,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "データ保全フロー（退避の取りこぼし）",
+      "message": "add_stash 内のインライン LRU（最新10件超過時の古い退避ドロップ）が、enforce_capacity と違い未復元14日保護（is_protected）を確認せず先頭から無条件に削除している。同一ファイルに短時間で11件以上の退避が発生すると、ユーザーがまだ復元していない14日以内の退避が静かに消え、退避内容（conflict=自分の未保存編集 等）が復旧不能になる。snapshot 層は『データを失わない』原則の最後の砦であり、must criteria『ファイルごと最新10件の LRU と容量GC…が、未復元かつ14日以内の退避を保護対象から削除しない』は LRU を含む容量管理全体を保護対象に含む読みなので、本実装は criterion と緊張関係にある。enforce_capacity 同様 is_protected を尊重し、保護退避は10件枠超過でも残す（または保護分は LRU カウントから別枠化する）べき。ux critical の『誤操作でデータ喪失』はユーザーの誤操作起点を指すため critical ではなく high とするが、データ保全の明確な欠陥として最優先で修正対象。",
+      "location": "src/core/snapshot/snapshot_store.cpp:162-179"
+    },
+    {
+      "severity": "medium",
+      "area": "復元導線（復元待ち一覧の提示）",
+      "message": "index.json 破損時の復元導線である recover_pending_stashes が fs::directory_iterator 順（実質ファイルシステム依存の不定順）で RecoveredStash を返す。上位 UI が『復元待ち退避一覧』をユーザーに提示する際、どの退避がいつ・どの種別かを判断するには time / index_gen での並べ替えが前提になるが、本層は順序を定義しておらず順序を検証するテストもない（RecoveredStash には time/index_gen/kind を持たせており並べ替え自体は可能）。最後の砦の提示導線として、新しい順など決定的な順序を本層で保証するか、少なくとも『順序は上位が time でソートする契約』を明示するとよい。また破損復元経路には復元後に当該退避を restored 扱いにする手段が無く（index 未ロードのため）、index 再構築フローが上位に委ねられている点も、復元完了の状態反映導線として上位仕様と突き合わせて取りこぼしが無いか確認したい。",
+      "location": "src/core/snapshot/object_store.cpp:140-208"
+    },
+    {
+      "severity": "low",
+      "area": "エラー文言（回復導線への橋渡し）",
+      "message": "復元・展開失敗時の Result メッセージ（『内容を持たないベースラインは復元できません』『zstd 展開に失敗しました』等）は『何が起きたか』を平易な日本語で伝えており core 層としては適切だが、『次の一手』（例: 機密/大容量ファイルは差分・巻き戻し非活性が正常、退避から復元する 等）は含まない。core API の文言として妥当で本層の欠陥ではないが、ux ヒューリスティック9『エラーからの回復支援＝原因＋次の一手』を最終的に満たす責務は上位 UI 側にある。これらのエラーコード（Unsupported/NotFound/Io）を上位がユーザー向け回復メッセージへ確実に翻訳する導線が後続スプリントで失われないよう、観点分離の境界として記録する。",
+      "location": "src/core/snapshot/snapshot_store.cpp:103-118"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint5 は GUI/CLI を持たない core/snapshot 層であり、ux 観点は『データを失わない』導線（退避＝最後の砦の保全と復元提示）に集中して評価した。保存→復元の同一性、4種別退避、index破損からの復元待ち一覧提示、機密ファイルのハッシュのみ記録、mark-and-sweep の誤削除防止、エラー文言（平易な日本語）はいずれも導線・回復設計として良好で、critical（主要タスク完了不能/誤操作でのデータ喪失）には該当しない。最重要は add_stash のインライン LRU が14日保護を無視して未復元退避を静かに落としうる点（high・データ保全の明確な欠陥で must criterion と緊張関係）。中位は復元待ち一覧の順序が本層で未定義な点、低位は core エラー文言の『次の一手』を上位 UI が確実に補う必要がある点。"
+}
