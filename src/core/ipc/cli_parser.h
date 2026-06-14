@@ -125,4 +125,26 @@ ParseResult parse_argv(const std::vector<std::string>& argv);
 //   - 引数なし（paths 空・help/version でない）は「前回状態を復元」の受理（要件3.1）
 ValidationResult validate(const CliInvocation& inv, const PathProbe& probe);
 
+// コンソールスタブ（pika.com）の最終的な出力・終了コードを決める純ロジック。
+// parse／validate
+// の結果を「何を出力し（help/version/失敗理由）どの終了コードで終わるか」に翻訳する。
+// このグルー（要件3「検証失敗時は非0で即終了」「help/version
+// をコンソール出力」「0=受理/非0=エラー」）を core/ipc 側に置いて gtest で検証する。main_console は
+// SetConsoleOutputCP・FS probe 注入・実出力だけを
+// 担う薄い橋渡しになり、終了コード/メッセージ選択ロジックが自動回帰網に乗る（sprint7 high）。
+struct ConsoleOutcome
+{
+    int exit_code = 0;          // プロセス終了コード（0=受理 / 非0=エラー）
+    bool print_help = false;    // 標準出力にヘルプを出す
+    bool print_version = false; // 標準出力にバージョンを出す
+    // 非空なら標準エラーへ出す失敗理由（具体的な理由。一律文言に潰さない）。
+    std::string error_text;
+};
+
+// parse 結果（と、parse 成功かつ help/version でないときの validate
+// 結果）から出力・終了コードを決める。 validation は「parse 成功かつ help/version
+// でない」ときのみ非 null を渡す（それ以外は nullptr）。
+ConsoleOutcome decide_console_outcome(const ParseResult& parsed,
+                                      const ValidationResult* validation);
+
 } // namespace pika::core::ipc

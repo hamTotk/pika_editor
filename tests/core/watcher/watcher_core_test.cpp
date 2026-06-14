@@ -4,6 +4,7 @@
 #include "core/watcher/watcher_core.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -18,14 +19,18 @@ using pika::core::watcher::RawAction;
 using pika::core::watcher::RawEvent;
 using pika::core::watcher::WatcherCore;
 
-// モックディスク: パス→現在の LF 正規化ハッシュ。0 は不在/読めない扱い。
+// モックディスク: パス→現在の LF 正規化ハッシュ。未登録は nullopt（不在/読めない）。
 struct MockDisk
 {
     std::unordered_map<std::string, std::uint64_t> hashes;
-    std::uint64_t probe(const std::string& path) const
+    std::optional<std::uint64_t> probe(const std::string& path) const
     {
         auto it = hashes.find(path);
-        return it == hashes.end() ? 0u : it->second;
+        if (it == hashes.end())
+        {
+            return std::nullopt;
+        }
+        return it->second;
     }
 };
 

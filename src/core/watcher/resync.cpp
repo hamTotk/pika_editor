@@ -1,6 +1,7 @@
 #include "core/watcher/resync.h"
 
 #include "core/watcher/fs_probe.h"
+#include "util/path_util.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -20,13 +21,15 @@ bool is_excluded_dir(std::string_view name)
 namespace
 {
 
-// root 相対パスを '/' 区切りの UTF-8 で返す。
+// root 相対パスを '/' 区切りの UTF-8 で返す（baseline のキー表記＝'/' 区切り UTF-8 に合わせる）。
+// generic_string() は Windows で CP_ACP のナロー文字列になり、非ASCIIパスでは baseline キーと
+// 不一致（毎回 Created/Removed・Modified 検知崩壊）になるため generic_u8string で UTF-8 を保つ。
 std::string rel_of(const fs::path& root, const fs::path& p)
 {
     std::error_code ec;
     fs::path rel = fs::relative(p, root, ec);
-    std::string s = ec ? p.generic_string() : rel.generic_string();
-    return s;
+    const std::u8string u8 = ec ? p.generic_u8string() : rel.generic_u8string();
+    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }
 
 // 監視時刻と同じ意味（Win32 FILETIME・size）で stat する。
@@ -56,7 +59,7 @@ void enumerate(const fs::path& root, std::vector<Enumerated>& out)
         std::error_code dec;
         if (it->is_directory(dec))
         {
-            if (is_excluded_dir(p.filename().generic_string()))
+            if (is_excluded_dir(pika::util::path_to_utf8(p.filename())))
             {
                 it.disable_recursion_pending(); // .git/node_modules 配下へ降りない
             }
@@ -68,7 +71,7 @@ void enumerate(const fs::path& root, std::vector<Enumerated>& out)
         }
         Enumerated e;
         e.rel = rel_of(root, p);
-        e.st = probe(p.generic_string());
+        e.st = probe(pika::util::path_to_utf8(p));
         if (e.st.exists)
         {
             out.push_back(std::move(e));
@@ -80,7 +83,7 @@ void enumerate(const fs::path& root, std::vector<Enumerated>& out)
 
 std::vector<FsEvent> resync(std::string_view root, const BaselineMap& baseline)
 {
-    const fs::path root_path = fs::path(std::u8string(root.begin(), root.end()));
+    const fs::path root_path = pika::util::utf8_to_path(root);
 
     std::vector<Enumerated> disk;
     enumerate(root_path, disk);
@@ -111,8 +114,9 @@ std::vector<FsEvent> resync(std::string_view root, const BaselineMap& baseline)
             continue;
         }
         // 不一致のみハッシュ比較（改行のみ差・touch だけの mtime 変化を内容変更と誤らない）。
-        auto h = content_hash_lf(e.rel.empty() ? root_path.generic_string()
-                                               : (root_path / e.rel).generic_string());
+        auto h = content_hash_lf(
+            e.rel.empty() ? pika::util::path_to_utf8(root_path)
+                          : pika::util::path_to_utf8(root_path / pika::util::utf8_to_path(e.rel)));
         if (h.is_err())
         {
             // 内容ハッシュが読めない（一時ロック・I/O 障害等）。mtime/size は既にベースラインと

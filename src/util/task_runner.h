@@ -25,7 +25,10 @@ class TaskRunner
     TaskRunner(const TaskRunner&) = delete;
     TaskRunner& operator=(const TaskRunner&) = delete;
 
-    // タスクを投入し、結果を受け取る future を返す。停止後の投入は無効な future を返す。
+    // タスクを投入し、結果を受け取る future を返す。停止後（デストラクタ進行中等）の投入はジョブが
+    // 実行されず破棄され、返る future は broken_promise になる（valid() は true だが .get()/.wait()
+    // で std::future_error を投げる）。呼び出し側は停止フェーズの get() を例外捕捉するか、future
+    // の状態に 依存しないこと（停止後投入は通常の運用経路では発生しない）。
     template <typename F> auto submit(F&& fn) -> std::future<std::invoke_result_t<F>>
     {
         using R = std::invoke_result_t<F>;

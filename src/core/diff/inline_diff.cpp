@@ -207,41 +207,55 @@ bool is_utf8_continuation(unsigned char c)
 void trim_based_spans(std::string_view a, std::string_view b, std::vector<InlineSpan>& out_a,
                       std::vector<InlineSpan>& out_b)
 {
-    // 共通の先頭バイト数。等しい間だけ進め、コードポイント途中で切らないよう境界へ後退する。
+    // 共通の先頭バイト数（バイト一致のみ。スナップ前）。
     std::size_t prefix = 0;
     const std::size_t scan = std::min(a.size(), b.size());
     while (prefix < scan && a[prefix] == b[prefix])
     {
         ++prefix;
     }
-    // 先頭領域はバイト一致なので a 側で境界を判定すれば b 側も同じ位置が境界になる。
-    while (prefix > 0 && prefix < a.size() &&
-           is_utf8_continuation(static_cast<unsigned char>(a[prefix])))
-    {
-        --prefix;
-    }
 
-    // 共通の末尾バイト数（先頭領域と重ならない範囲で）。
+    // 共通の末尾バイト数（先頭領域と重ならない範囲で。スナップ前）。
     std::size_t suffix = 0;
     const std::size_t suffix_scan = std::min(a.size() - prefix, b.size() - prefix);
     while (suffix < suffix_scan && a[a.size() - 1 - suffix] == b[b.size() - 1 - suffix])
     {
         ++suffix;
     }
-    // 末尾領域の開始位置（a.size()-suffix）がコードポイント途中なら境界へ縮める。
-    while (suffix > 0 && is_utf8_continuation(static_cast<unsigned char>(a[a.size() - suffix])))
-    {
-        --suffix;
-    }
+
+    // 各行のコードポイント境界へ独立にスナップする。共通領域はバイト一致だが、相違が始まる位置
+    // (prefix) や末尾領域開始位置の継続バイト性は不正 UTF-8 では a/b で食い違い得るため、a
+    // 決め打ちで スナップすると b
+    // 側の区間が文字途中（継続バイト）から始まり、ヘッダが明文化する「区間は
+    // コードポイント境界を跨がない」不変条件を破る。pa/pb・sa/sb を各バイト列で別々に求める。
+    auto snap_prefix = [](std::string_view s, std::size_t p) {
+        while (p > 0 && p < s.size() && is_utf8_continuation(static_cast<unsigned char>(s[p])))
+        {
+            --p;
+        }
+        return p;
+    };
+    auto snap_suffix = [](std::string_view s, std::size_t suf) {
+        while (suf > 0 && is_utf8_continuation(static_cast<unsigned char>(s[s.size() - suf])))
+        {
+            --suf;
+        }
+        return suf;
+    };
+    const std::size_t pa = snap_prefix(a, prefix);
+    const std::size_t pb = snap_prefix(b, prefix);
+    const std::size_t sa = snap_suffix(a, suffix);
+    const std::size_t sb = snap_suffix(b, suffix);
 
     // 中央の相違部分を各行 1 区間にする（空＝差分なしの側は区間を作らない）。
-    if (prefix < a.size() - suffix)
+    // pa<=prefix<=a.size()-suffix<=a.size()-sa が常に成り立つため begin<=end は保証される。
+    if (pa < a.size() - sa)
     {
-        out_a.push_back(InlineSpan{prefix, a.size() - suffix});
+        out_a.push_back(InlineSpan{pa, a.size() - sa});
     }
-    if (prefix < b.size() - suffix)
+    if (pb < b.size() - sb)
     {
-        out_b.push_back(InlineSpan{prefix, b.size() - suffix});
+        out_b.push_back(InlineSpan{pb, b.size() - sb});
     }
 }
 

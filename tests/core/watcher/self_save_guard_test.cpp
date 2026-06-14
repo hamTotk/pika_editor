@@ -40,13 +40,17 @@ TEST(SelfSaveGuardTest, SuppressesEvenBeyondTimeWindowWhenHashMatches)
     EXPECT_TRUE(g.consume_if_self("a.md", 0xABCD, 100000));
 }
 
-TEST(SelfSaveGuardTest, ZeroHashSaveIsNotRegistered)
+TEST(SelfSaveGuardTest, ZeroIsTreatedAsNormalHashValue)
 {
     SelfSaveGuard g(5000);
-    // 保存後ハッシュが取れない(0)は登録しない＝後続は外部変更扱い（design.md 5.2）。
+    // ハッシュ値 0 は正規の値として扱う（0 をセンチネルにしない）。内容ハッシュが偶然 0
+    // のファイルでも 登録され、ディスク内容ハッシュ 0
+    // と一致すれば自己保存として抑制される（誤検知しない）。 「計算不能」は呼び出し側（WatcherCore
+    // の optional な HashProbe）が型で分離する。
     g.register_save("a.md", 0, 0);
+    EXPECT_EQ(g.pending_count(), 1u);
+    EXPECT_TRUE(g.consume_if_self("a.md", 0, 1)); // 値0同士で一致＝自己保存抑制
     EXPECT_EQ(g.pending_count(), 0u);
-    EXPECT_FALSE(g.consume_if_self("a.md", 0, 1));
 }
 
 TEST(SelfSaveGuardTest, MultipleSavesConsumeOneAtATime)

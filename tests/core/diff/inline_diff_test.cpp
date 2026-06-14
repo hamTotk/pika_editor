@@ -145,6 +145,39 @@ TEST(InlineDiffTest, HugeLineFallbackKeepsUtf8Boundaries)
     }
 }
 
+TEST(InlineDiffTest, HugeLineTrimFallbackSnapsBothSidesOnInvalidUtf8)
+{
+    // 巨大行（トリムフォールバック発動）で、相違開始位置の継続バイト性が a/b で食い違う不正 UTF-8。
+    // old は "\xC3""Z"（先頭バイトに継続が続かない不正列）、new は "\xC3\xA9"(é)。a
+    // 側だけでスナップ すると new
+    // 側の区間が継続バイト(0xA9)から始まり「区間はコードポイント境界を跨がない」不変条件を
+    // 破る。両側独立スナップで両側とも境界に着地することを検証する。
+    const std::string filler(3000, 'x'); // 空白なしの巨大プレフィクスでトリム経路を強制（n*m>4M）
+    const std::string old_line = filler + "\xC3"
+                                          "Z";
+    const std::string new_line = filler + "\xC3\xA9";
+    std::vector<InlineSpan> so;
+    std::vector<InlineSpan> sn;
+    compute_inline_spans(old_line, new_line, so, sn);
+
+    auto begins_on_boundary = [](std::string_view line, const std::vector<InlineSpan>& spans) {
+        for (const auto& s : spans)
+        {
+            if (s.begin < line.size())
+            {
+                const unsigned char b = static_cast<unsigned char>(line[s.begin]);
+                if ((b & 0xC0) == 0x80)
+                {
+                    return false; // 継続バイト＝文字途中から始まっている
+                }
+            }
+        }
+        return true;
+    };
+    EXPECT_TRUE(begins_on_boundary(old_line, so));
+    EXPECT_TRUE(begins_on_boundary(new_line, sn)); // 修正前はここで継続バイト始まりになり失敗
+}
+
 TEST(InlineDiffTest, MixedAsciiAndJapaneseUsesCharFallbackWhenNoSpaces)
 {
     // 空白の無い ASCII+日本語混在も文字単位フォールバック。末尾の差分のみ強調される。

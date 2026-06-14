@@ -53,8 +53,10 @@ std::string xxh3_64_hex(std::string_view data)
     return to_hex16(xxh3_64(data));
 }
 
-std::uint64_t xxh3_64_lf(std::string_view data) noexcept
+std::uint64_t xxh3_64_lf(std::string_view data)
 {
+    // normalize_lf は内部でコピーを確保するため bad_alloc を投げ得る（noexcept にしない＝terminate
+    // 回避。ヘッダ参照）。ここでは握り潰さず伝播させ、捕捉責務は呼び出し側に委ねる。
     return xxh3_64(normalize_lf(data));
 }
 

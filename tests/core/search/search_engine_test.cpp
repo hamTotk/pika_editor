@@ -329,6 +329,55 @@ TEST(SearchEngineTest, NormalRegexNotAffectedByLimits)
     EXPECT_EQ(r.value().count(), 2u);
 }
 
+TEST(SearchEngineTest, ComplexityLimitSetsTruncateReason)
+{
+    // 自己 ReDoS 打ち切りは truncate_reason=ComplexityLimit
+    // で「入力過大」「件数上限」と区別される。
+    SearchLimits limits;
+    limits.match_limit = 1000;
+    limits.depth_limit = 100;
+    SearchEngine engine(limits);
+    SearchOptions opts;
+    opts.regex = true;
+    std::string subject(60, 'a');
+    subject += 'X';
+    auto r = engine.find_all(subject, "(a+)+$", opts);
+    ASSERT_TRUE(r.is_ok());
+    EXPECT_TRUE(r.value().truncated);
+    EXPECT_EQ(r.value().truncate_reason, pika::core::search::TruncateReason::ComplexityLimit);
+}
+
+TEST(SearchEngineTest, ZeroWidthMatchAfterSupplementaryCharNotDropped)
+{
+    // ゼロ幅マッチ（\b）が BMP外文字（😀=U+1F600=4バイト/UTF-16サロゲートペア）の前後で正しく
+    // 列挙され、以降を取りこぼさない。修正前はゼロ幅マッチの +1 前進が下位サロゲートの途中に着地し
+    // pcre2_match が PCRE2_ERROR_BADUTFOFFSET を返し、それを break で握り潰して 😀
+    // 以降を欠落させた。
+    SearchEngine engine;
+    SearchOptions opts;
+    opts.regex = true;
+    // "a😀b": \b は a前(0)・a後=😀前(1)・😀後=b前(5)・b後=末尾(6) に立つ。
+    const std::string text = std::string("a") + "\xF0\x9F\x98\x80" + "b";
+    auto r = engine.find_all(text, "\\b", opts);
+    ASSERT_TRUE(r.is_ok());
+    EXPECT_FALSE(r.value().truncated); // BADUTFOFFSET で途中打ち切りにならない
+    bool found5 = false;
+    bool found6 = false;
+    for (const auto& m : r.value().matches)
+    {
+        if (m.begin == 5u)
+        {
+            found5 = true; // 😀 の後（b 前）の境界
+        }
+        if (m.begin == 6u)
+        {
+            found6 = true; // b の後（末尾）の境界
+        }
+    }
+    EXPECT_TRUE(found5);
+    EXPECT_TRUE(found6);
+}
+
 // ---- 協調キャンセル ----
 
 TEST(SearchEngineTest, PreCancelledFindReturnsCancelled)

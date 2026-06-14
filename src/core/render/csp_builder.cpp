@@ -64,6 +64,13 @@ std::string build_csp(RemoteResourcePolicy policy)
     {
         csp += " https: http:";
     }
+    csp += "; ";
+
+    // base-uri / form-action / frame-ancestors は default-src 'none'
+    // が及ばないため、ポリシー非依存で 常時 'none' を出力する。万一サニタイズが破られても <base>
+    // による相対URL基底すり替え・<form action> での外部送信・フレーム埋め込みを CSP
+    // 単独で止める（二重防御の対称化。design.md 6章 C6）。
+    csp += "base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
     return csp;
 }

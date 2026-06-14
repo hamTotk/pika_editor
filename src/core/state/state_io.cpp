@@ -2,6 +2,7 @@
 
 #include "core/snapshot/json_lite.h"
 #include "util/atomic_file.h"
+#include "util/path_util.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -242,7 +243,7 @@ Result<AppState> parse_state(std::string_view text)
 Result<AppState> load_state(std::string_view state_path)
 {
     std::error_code ec;
-    if (!fs::exists(fs::path(state_path), ec))
+    if (!fs::exists(pika::util::utf8_to_path(state_path), ec))
     {
         AppState fresh; // 初回起動：空の現行 version
         fresh.version = kStateVersion;
@@ -259,7 +260,7 @@ Result<AppState> load_state(std::string_view state_path)
 Result<void> save_state(std::string_view state_path, const AppState& state)
 {
     std::error_code ec;
-    fs::create_directories(fs::path(state_path).parent_path(), ec);
+    fs::create_directories(pika::util::utf8_to_path(state_path).parent_path(), ec);
     return pika::util::write_atomic(state_path, serialize_state(state));
 }
 

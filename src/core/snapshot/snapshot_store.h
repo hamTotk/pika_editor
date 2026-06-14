@@ -4,6 +4,15 @@
 // データルート配下 snapshots\<wsKey>\{index.json, objects\<hash>} を管理する。本クラスは UI
 // 非依存で 実 FS を触る（gtest はテンポラリのデータルートで検証）。容量管理（ファイルごと最新10件
 // LRU・ 容量GC500MB・90日GC・未復元退避14日保護・mark-and-sweep）まで本クラスが担う。
+//
+// 【保存順序の不変条件（呼び出し側の責務）】 add_stash / revert_batch / enforce_capacity は
+// in-memory の SnapshotIndex を更新する過程で、参照されなくなった object を**即座に物理削除**する
+// （mark-and-sweep）。一方 index.json
+// のディスク保存（save）は本クラスでは行わず呼び出し側に委ねる。 したがって呼び出し側は「load →
+// 操作 → save」を 1 まとまりとして扱い、操作後はできるだけ早く save
+// すること。これを怠ると、操作後〜save 前にクラッシュした場合に古い index.json が既に削除された
+// object を指すダングリング参照の窓が残る（restore_* が静かに NotFound を返す）。本窓は将来
+// DocumentController で load→操作→save を原子化して塞ぐ前提（report.md 持ち越し #5）。
 #pragma once
 
 #include "core/snapshot/object_store.h"

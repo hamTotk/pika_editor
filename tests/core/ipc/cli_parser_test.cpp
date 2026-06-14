@@ -12,11 +12,15 @@ namespace
 
 using pika::core::ipc::ArgKind;
 using pika::core::ipc::CliInvocation;
+using pika::core::ipc::ConsoleOutcome;
+using pika::core::ipc::decide_console_outcome;
 using pika::core::ipc::ExitCode;
 using pika::core::ipc::parse_argv;
 using pika::core::ipc::parse_goto;
+using pika::core::ipc::ParseResult;
 using pika::core::ipc::PathProbe;
 using pika::core::ipc::validate;
+using pika::core::ipc::ValidationResult;
 
 // 実在集合を注入する PathProbe を作る（FS 非依存・決定論）。
 PathProbe make_probe(std::set<std::string> dirs, std::set<std::string> files)
@@ -252,6 +256,70 @@ TEST(CliValidate, ExitCodeContract)
 {
     EXPECT_EQ(static_cast<int>(ExitCode::Accepted), 0);
     EXPECT_NE(static_cast<int>(ExitCode::InvalidArgument), 0);
+}
+
+// ---- decide_console_outcome: コンソールスタブのグルー（自己回帰網に乗せる）----
+
+TEST(CliConsoleOutcome, UnknownOptionErrorsWithSpecificReason)
+{
+    const ConsoleOutcome o = decide_console_outcome(parse_argv({"--frobnicate"}), nullptr);
+    EXPECT_NE(o.exit_code, 0);
+    EXPECT_FALSE(o.error_text.empty()); // 具体理由（一律文言に潰さない）
+    EXPECT_FALSE(o.print_help);
+    EXPECT_FALSE(o.print_version);
+}
+
+TEST(CliConsoleOutcome, GotoWithoutSpecAndUnknownDifferInText)
+{
+    const ConsoleOutcome a = decide_console_outcome(parse_argv({"-g"}), nullptr);
+    const ConsoleOutcome b = decide_console_outcome(parse_argv({"--frobnicate"}), nullptr);
+    EXPECT_NE(a.exit_code, 0);
+    EXPECT_NE(b.exit_code, 0);
+    EXPECT_NE(a.error_text, b.error_text); // 失敗理由が区別される
+}
+
+TEST(CliConsoleOutcome, HelpReturnsZeroAndPrintsHelp)
+{
+    const ConsoleOutcome o = decide_console_outcome(parse_argv({"--help"}), nullptr);
+    EXPECT_EQ(o.exit_code, 0);
+    EXPECT_TRUE(o.print_help);
+    EXPECT_TRUE(o.error_text.empty());
+}
+
+TEST(CliConsoleOutcome, VersionReturnsZeroAndPrintsVersion)
+{
+    const ConsoleOutcome o = decide_console_outcome(parse_argv({"--version"}), nullptr);
+    EXPECT_EQ(o.exit_code, 0);
+    EXPECT_TRUE(o.print_version);
+}
+
+TEST(CliConsoleOutcome, ValidationFailureReturnsNonZeroWithMessage)
+{
+    const auto parsed = parse_argv({"C:\\proj\\nope\\"}); // 末尾区切り＝存在しないフォルダ意図
+    const ValidationResult v = validate(parsed.invocation, make_probe({}, {}));
+    const ConsoleOutcome o = decide_console_outcome(parsed, &v);
+    EXPECT_NE(o.exit_code, 0);
+    EXPECT_FALSE(o.error_text.empty());
+}
+
+TEST(CliConsoleOutcome, AcceptedReturnsZeroNoText)
+{
+    const auto parsed = parse_argv({"a.md"});
+    const ValidationResult v = validate(parsed.invocation, make_probe({}, {}));
+    const ConsoleOutcome o = decide_console_outcome(parsed, &v);
+    EXPECT_EQ(o.exit_code, 0);
+    EXPECT_TRUE(o.error_text.empty());
+    EXPECT_FALSE(o.print_help);
+}
+
+TEST(CliConsoleOutcome, EmptyParseMessageFallsBackToGenericText)
+{
+    ParseResult parsed;
+    parsed.errored = true;
+    parsed.message = ""; // 理由が空でも一般文言にフォールバックして無言にしない
+    const ConsoleOutcome o = decide_console_outcome(parsed, nullptr);
+    EXPECT_NE(o.exit_code, 0);
+    EXPECT_FALSE(o.error_text.empty());
 }
 
 } // namespace

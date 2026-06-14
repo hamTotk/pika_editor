@@ -3,8 +3,11 @@
 #include "core/diff/inline_diff.h"
 #include "core/diff/line_diff.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace pika::core::diff
@@ -34,6 +37,34 @@ bool exceeds_limits(std::string_view content, const std::vector<std::string>& li
         }
     }
     return false;
+}
+
+// 相違量（編集距離 D の上限近似）が上限を超えるか（design.md 8章 I6 の補強）。
+// dtl の O(N·D) は行数ガードを通っても D 由来で暴走する。同値行のオーバーラップを O(N) のハッシュで
+// 数え、両側の「非共通行数」がともに max_diff_lines を超える＝共通部分が小さく D が大きい場合のみ
+// 真を返す。全追加/全削除（片側の非共通行が0）や大ファイルの散在編集（共通行が多い）は軽いので通す。
+bool exceeds_diff_distance(const std::vector<std::string>& old_lines,
+                           const std::vector<std::string>& new_lines, const DiffLimits& limits)
+{
+    std::unordered_map<std::string_view, std::size_t> counts;
+    counts.reserve(old_lines.size());
+    for (const auto& l : old_lines)
+    {
+        ++counts[std::string_view(l)];
+    }
+    std::size_t common = 0;
+    for (const auto& l : new_lines)
+    {
+        auto it = counts.find(std::string_view(l));
+        if (it != counts.end() && it->second > 0)
+        {
+            --it->second;
+            ++common;
+        }
+    }
+    const std::size_t resid_old = old_lines.size() - common;
+    const std::size_t resid_new = new_lines.size() - common;
+    return std::min(resid_old, resid_new) > limits.max_diff_lines;
 }
 
 bool is_cancelled(const CancelTokenPtr& cancel)
@@ -103,8 +134,11 @@ DiffResult DiffEngine::compute(std::string_view old_content, std::string_view ne
     std::vector<std::string> new_lines = split_lines_lf(new_content);
 
     // 開始前のサイズガード（要件8章「10MB以上自動オフ」。別スレッド中断に頼らない）。
+    // サイズ（バイト/行数/最長行長）に加え、相違量（編集距離 D）でも開始前に弾く（dtl の O(N·D)
+    // 暴走防止。exceeds_limits が false＝N<=max_lines のときだけ距離計算に進む＝O(N) が有界）。
     if (exceeds_limits(old_content, old_lines, limits_) ||
-        exceeds_limits(new_content, new_lines, limits_))
+        exceeds_limits(new_content, new_lines, limits_) ||
+        exceeds_diff_distance(old_lines, new_lines, limits_))
     {
         result.truncated = true;
         return result;

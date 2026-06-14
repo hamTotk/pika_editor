@@ -95,6 +95,11 @@ struct DiffLimits
     std::size_t max_lines = 200'000u;
     // 1 行の最長バイト数の上限（超長行＝行内 LCS の O(n*m) 悪化を開始前に断つ）。
     std::size_t max_line_bytes = 100'000u;
+    // 相違量（編集距離 D の上限近似）。同値行オーバーラップから求めた両側の非共通行数がともに
+    // これを超えたら計算を開始しない。dtl の O(N·D) は行数ガードを通っても D 由来で暴走するため、
+    // 「行数は N を縛るだけで D を縛らない」隙を塞ぐ（design.md
+    // 8章。全追加/全削除・散在編集は通す）。
+    std::size_t max_diff_lines = 50'000u;
 };
 
 } // namespace pika::core::diff
