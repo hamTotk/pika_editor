@@ -2,6 +2,7 @@
 
 #include "core/snapshot/json_lite.h"
 #include "util/atomic_file.h"
+#include "util/path_util.h"
 
 #include <filesystem>
 #include <system_error>
@@ -143,7 +144,7 @@ Result<SnapshotIndex> parse_index(std::string_view text)
 Result<SnapshotIndex> load_index(std::string_view index_path)
 {
     std::error_code ec;
-    if (!fs::exists(fs::path(index_path), ec))
+    if (!fs::exists(pika::util::utf8_to_path(index_path), ec))
     {
         SnapshotIndex fresh; // 初回オープン：空の現行 version
         fresh.version = kIndexVersion;
@@ -160,7 +161,7 @@ Result<SnapshotIndex> load_index(std::string_view index_path)
 Result<void> save_index(std::string_view index_path, const SnapshotIndex& index)
 {
     std::error_code ec;
-    fs::create_directories(fs::path(index_path).parent_path(), ec);
+    fs::create_directories(pika::util::utf8_to_path(index_path).parent_path(), ec);
     return pika::util::write_atomic(index_path, serialize_index(index));
 }
 

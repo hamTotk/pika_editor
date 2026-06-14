@@ -28,6 +28,18 @@ struct SearchOptions
     bool regex = false;
 };
 
+// 照合を全件出さずに打ち切った理由（truncated=true のときの内訳）。
+// 入力過大/件数上限と、正規表現の複雑度上限（自己ReDoS）/想定外のマッチエラーを区別し、UI が
+// 「読み取り専用で続行」「先頭N件」「式を見直してください」を出し分けられるようにする（要件5.4）。
+enum class TruncateReason
+{
+    None,            // 打ち切っていない
+    OversizeInput,   // 入力が max_total_bytes 超過で照合せずフォールバック
+    MaxMatches,      // max_matches 件に到達して列挙を止めた
+    ComplexityLimit, // PCRE2 の match/depth limit 到達（破滅的バックトラック＝自己ReDoS）
+    MatchError,      // 上記以外の想定外な負の pcre2 戻り値（防御的。通常は到達しない）
+};
+
 // 1 件のヒット。バイトオフセット（UTF-8・対象先頭からの位置）で持つ。
 // groups は正規表現のキャプチャグループ（[0] は全体一致）。リテラル検索では [0] のみ。
 struct Match
@@ -50,8 +62,10 @@ struct SearchResult
 {
     std::vector<Match> matches;
 
-    // 入力が大きすぎる等で照合を開始せずフォールバックしたか（後述 SearchLimits 超過）。
+    // 入力が大きすぎる/件数上限/複雑度上限などで全件を出さずに打ち切ったか。
     bool truncated = false;
+    // truncated=true のときの内訳（None なら未打ち切り）。UI のメッセージ出し分け用。
+    TruncateReason truncate_reason = TruncateReason::None;
 
     // 協調キャンセルで中断したか（true のとき matches は途中までを持ち得る）。
     bool cancelled = false;
@@ -64,8 +78,9 @@ struct ReplaceResult
 {
     std::string text;         // 置換適用後の全文（UTF-8）
     std::size_t replaced = 0; // 置換した件数
-    bool truncated = false;   // 入力過大で置換を開始しなかった
-    bool cancelled = false;   // 協調キャンセルで中断（text は元のまま or 途中まで適用しない）
+    bool truncated = false;   // 入力過大/複雑度上限等で置換を開始/完遂しなかった
+    TruncateReason truncate_reason = TruncateReason::None; // 打ち切り内訳（find_all から伝播）
+    bool cancelled = false; // 協調キャンセルで中断（text は元のまま or 途中まで適用しない）
 };
 
 // 検索・置換の上限（要件5.4 / 2.2 の段階制）。PCRE2 は途中中断できないため、入力サイズで開始前に
@@ -80,6 +95,9 @@ struct SearchLimits
     // ユーザー入力の正規表現は `(a+)+$` のように指数的バックトラックを起こし得る。match_limit は
     // マッチエンジンの内部ステップ上限、depth_limit はバックトラック再帰の深さ上限。超過すると
     // pcre2_match が MATCHLIMIT/DEPTHLIMIT を返し、ヒット列挙を安全に打ち切る（ハングしない）。
+    // 注: 単一の pcre2_match 呼び出しは内部にキャンセル点を持たないため、協調キャンセルの応答
+    // レイテンシ最悪値は「進行中 1 回分の match_limit 消化時間」に律速される（worker 実行で UI は
+    // 固まらないが、最悪レイテンシは性能ゲートで計測する。design.md 13章）。
     std::uint32_t match_limit = 10'000'000u;
     std::uint32_t depth_limit = 10'000u;
 };

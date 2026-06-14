@@ -3,6 +3,7 @@
 #include "core/snapshot/index_io.h"
 #include "core/snapshot/secure_dir.h"
 #include "util/hash.h"
+#include "util/path_util.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -33,7 +34,7 @@ namespace
 
 std::string join(const std::string& a, const std::string& b)
 {
-    return (fs::path(a) / b).string();
+    return pika::util::path_to_utf8(pika::util::utf8_to_path(a) / pika::util::utf8_to_path(b));
 }
 
 } // namespace
@@ -109,6 +110,27 @@ Result<IndexEntry> SnapshotStore::set_baseline(SnapshotIndex& index, const std::
                                                std::string_view content, std::int64_t mtime,
                                                bool sensitive, bool content_object_allowed)
 {
+    // 失敗時に entry を半端変異させない（原子性）。新しいベースライン値はローカルに組み立て、
+    // fallible な内容 object 確保（put）が確定してから一括コミットする。put が I/O 失敗しても
+    // entry を一切触らずに err を返すため、呼び出し側（ReviewFlow::confirm/confirm_all）の
+    // 「失敗時は旧状態維持・未読維持」契約が真に成立する（設計原則1「データを失わない」）。
+    const std::string new_hash = pika::util::xxh3_64_lf_hex(content);
+
+    // 機密ファイル・内容保存不可（10MB以上/画像）は内容 object を持たず baselineHash のみ記録する
+    // （要件9.1/9.2。元ファイル削除後に平文コピーを残さないデータ最小化）。
+    std::string new_object; // ハッシュのみ記録なら空のまま
+    if (!(sensitive || !content_object_allowed))
+    {
+        create_secure_dir(objects_.dir());
+        auto stored = objects_.put(content);
+        if (stored.is_err())
+        {
+            return Result<IndexEntry>::err(stored.error()); // entry 未変異で返す
+        }
+        new_object = stored.value();
+    }
+
+    // ここから先は失敗しない。entry を確定値で一括コミットする（無ければ作る）。
     IndexEntry* entry = index.find(rel_path);
     if (entry == nullptr)
     {
@@ -116,27 +138,11 @@ Result<IndexEntry> SnapshotStore::set_baseline(SnapshotIndex& index, const std::
         entry = &index.entries.back();
         entry->rel_path = rel_path;
     }
-
-    entry->baseline_hash = pika::util::xxh3_64_lf_hex(content);
+    entry->baseline_hash = new_hash;
     entry->baseline_mtime = mtime;
     entry->baseline_size = content.size();
-    entry->unread = false; // 確認済み = ベースライン更新で未読解除
-
-    // 機密ファイル・内容保存不可（10MB以上/画像）は内容 object を持たず baselineHash のみ記録する
-    // （要件9.1/9.2。元ファイル削除後に平文コピーを残さないデータ最小化）。
-    if (sensitive || !content_object_allowed)
-    {
-        entry->baseline_object.clear();
-        return Result<IndexEntry>::ok(*entry);
-    }
-
-    create_secure_dir(objects_.dir());
-    auto stored = objects_.put(content);
-    if (stored.is_err())
-    {
-        return Result<IndexEntry>::err(stored.error());
-    }
-    entry->baseline_object = stored.value();
+    entry->baseline_object = new_object; // ハッシュのみ記録なら空＝旧 object を確実に外す
+    entry->unread = false;               // 確認済み = ベースライン更新で未読解除
     return Result<IndexEntry>::ok(*entry);
 }
 
@@ -213,23 +219,45 @@ std::size_t SnapshotStore::revert_batch(SnapshotIndex& index, const std::string&
     {
         return 0;
     }
-    std::size_t removed = 0;
+    // 「すべて確認済み」の一括取消（要件8.3）。baseline-replace 退避は単に消すのではなく、退避が
+    // 保持する旧ベースライン内容で各ファイルのベースラインを復元してから退避を外す。単に erase する
+    // だけだと取消が no-op になり、さらに sweep で旧 object が物理削除されて復元点が永久に失われる
+    // （設計原則1「データを失わない／退避＝最後の砦」違反）。confirm_all は対象ごとに高々 1 件の
+    // baseline-replace を積むため、各エントリの該当退避を順に旧ベースラインとして適用する。
+    std::size_t reverted = 0;
     for (auto& entry : index.entries)
     {
-        auto before = entry.stash.size();
-        entry.stash.erase(std::remove_if(entry.stash.begin(), entry.stash.end(),
-                                         [&](const StashEntry& s) {
-                                             return s.kind == StashKind::BaselineReplace &&
-                                                    s.batch_id == batch_id;
-                                         }),
-                          entry.stash.end());
-        removed += before - entry.stash.size();
+        for (auto it = entry.stash.begin(); it != entry.stash.end();)
+        {
+            if (it->kind == StashKind::BaselineReplace && it->batch_id == batch_id)
+            {
+                auto old_content = objects_.get(it->hash);
+                if (old_content.is_ok())
+                {
+                    // 旧ベースラインへ復元する。退避 object は既存なので hash を付け替えるだけで
+                    // 再書き込みしない。ハッシュ・サイズは内容から再計算。mtime は退避が保持しない
+                    // ため据え置く（差分基準はハッシュ照合が主。watcher 側で再確定される）。確認の
+                    // 取消なので未読に戻す（復元したベースラインと現ディスク内容は再び相違し得る）。
+                    entry.baseline_object = it->hash;
+                    entry.baseline_hash = pika::util::xxh3_64_lf_hex(old_content.value());
+                    entry.baseline_size = old_content.value().size();
+                    entry.unread = true;
+                    it = entry.stash.erase(it);
+                    ++reverted;
+                    continue;
+                }
+                // 旧内容を取り出せない場合は退避を残しベースラインを変えない（データを失わない側）。
+            }
+            ++it;
+        }
     }
-    if (removed > 0)
+    if (reverted > 0)
     {
+        // 復元で参照が外れた「新ベースライン object」など未参照 object を回収する（復元した旧
+        // object は baseline_object が指すため sweep 対象外）。
         sweep_unreferenced_objects(index);
     }
-    return removed;
+    return reverted;
 }
 
 std::size_t SnapshotStore::enforce_capacity(SnapshotIndex& index, std::int64_t now,
@@ -284,7 +312,7 @@ std::size_t SnapshotStore::enforce_capacity(SnapshotIndex& index, std::int64_t n
         for (const auto& [h, count] : ref_count)
         {
             (void)count;
-            const auto p = fs::path(objects_.dir()) / h;
+            const auto p = pika::util::utf8_to_path(objects_.dir()) / h;
             const auto sz = fs::file_size(p, ec);
             object_size[h] = ec ? 0 : sz;
             ec.clear();
@@ -393,7 +421,8 @@ std::size_t SnapshotStore::sweep_unreferenced_objects(const SnapshotIndex& index
 void SnapshotStore::purge()
 {
     std::error_code ec;
-    fs::remove_all(fs::path(ws_dir_), ec); // index・objects ごと一括削除（手動パージ。要件9.4）
+    fs::remove_all(pika::util::utf8_to_path(ws_dir_),
+                   ec); // index・objects ごと一括削除（手動パージ。要件9.4）
 }
 
 std::vector<RecoveredStash> SnapshotStore::recover_pending_stashes() const

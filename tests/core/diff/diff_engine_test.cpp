@@ -106,6 +106,44 @@ TEST(DiffEngineTest, OverlongLineTruncates)
     EXPECT_TRUE(r.truncated);
 }
 
+TEST(DiffEngineTest, HighEditDistanceTruncatesEvenWithinLineCount)
+{
+    // 行数・バイト上限内でも、共通行が少なく相違量(編集距離)が大きい入力は開始前に打ち切る
+    // （dtl の O(N·D) 暴走防止。両側とも全行相違＝非共通行が max_diff_lines 超）。
+    DiffLimits limits;
+    limits.max_diff_lines = 5; // テスト用に低く設定
+    DiffEngine engine(limits);
+    std::string old_c;
+    std::string new_c;
+    for (int i = 0; i < 20; ++i)
+    {
+        old_c += "old" + std::to_string(i) + "\n";
+        new_c += "new" + std::to_string(i) + "\n";
+    }
+    DiffResult r = engine.compute(old_c, new_c); // 非共通 old=20 / new=20 > 5
+    EXPECT_TRUE(r.truncated);
+}
+
+TEST(DiffEngineTest, LargeFileWithScatteredEditsNotTruncatedByDistanceGuard)
+{
+    // 大ファイルでも共通行が多い（散在する少数編集）なら相違量は小さく、距離ガードで打ち切らない
+    // （このツールの本質＝編集レビューを過剰に弾かない。全追加/全削除も同様に通す）。
+    DiffLimits limits;
+    limits.max_diff_lines = 5;
+    DiffEngine engine(limits);
+    std::string old_c;
+    std::string new_c;
+    for (int i = 0; i < 100; ++i)
+    {
+        const std::string line = "line" + std::to_string(i) + "\n";
+        old_c += line;
+        new_c += (i == 10 || i == 50) ? ("CHANGED" + std::to_string(i) + "\n") : line;
+    }
+    DiffResult r = engine.compute(old_c, new_c); // 共通98・非共通 各2 <= 5
+    EXPECT_FALSE(r.truncated);
+    EXPECT_GT(r.added + r.removed, 0u);
+}
+
 TEST(DiffEngineTest, PreCancelledReturnsCancelled)
 {
     DiffEngine engine;

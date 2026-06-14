@@ -58,10 +58,11 @@ bool path_is_file(const std::string& p)
 
 int main(int argc, char** argv)
 {
-    // 出力（stdout/stderr）を UTF-8 にする。これがないと日本語の help/version/診断が既定の
-    // コンソールコードページ（例: CP932）で化け、パイプ・リダイレクト先でも壊れる（要件3 should
-    // 「--help/--version がパイプ・リダイレクトで欠落・文字化けせず取得できる」）。ソースは /utf-8
-    // でコンパイルされ文字列リテラルは UTF-8 バイト列なので、出力 CP を合わせれば一貫する。
+    // パイプ・リダイレクト時の非文字化けは /utf-8 コンパイル（CMakeLists.txt）で文字列リテラルが
+    // UTF-8 バイト列になることが担保する（CRT の puts/printf
+    // はファイル/パイプへ生バイトを直接書き、
+    // コンソールコードページを介さない）。SetConsoleOutputCP(CP_UTF8)
+    // はこれとは別に、対話コンソール 表示時の化け（既定 CP932 等）を追加で防ぐ（要件3 should）。
     SetConsoleOutputCP(CP_UTF8);
 
     std::vector<std::string> args;
@@ -70,43 +71,40 @@ int main(int argc, char** argv)
         args.emplace_back(argv[i]);
     }
 
-    auto parsed = pika::core::ipc::parse_argv(args);
-    if (parsed.errored)
+    const auto parsed = pika::core::ipc::parse_argv(args);
+
+    // 引数検証は「parse 成功かつ help/version でない」ときだけ、ウィンドウ生成・転送の前に同期実行
+    // する（要件3.2）。FS 実在判定はプラットフォーム層の述語をコアへ注入する。
+    const bool need_validate =
+        !parsed.errored && !parsed.invocation.show_help && !parsed.invocation.show_version;
+    pika::core::ipc::ValidationResult v;
+    if (need_validate)
     {
-        // 具体的な失敗理由（コアが返す message。例:「認識できないオプションです」「-g に位置指定が
-        // 指定されていません」）をそのまま見せる。一律「不正な引数です」で握り潰さない（sprint7
-        // high）。
-        std::fputs("pika: ", stderr);
-        std::fputs(parsed.message.empty() ? "不正な引数です" : parsed.message.c_str(), stderr);
-        std::fputc('\n', stderr);
-        return static_cast<int>(pika::core::ipc::ExitCode::InvalidArgument);
+        pika::core::ipc::PathProbe probe;
+        probe.is_dir = path_is_dir;
+        probe.is_file = path_is_file;
+        v = pika::core::ipc::validate(parsed.invocation, probe);
     }
 
-    if (parsed.invocation.show_help)
+    // 何を出力し・どの終了コードで終わるかの決定は、gtest 検証済みのコアロジックに委ねる
+    // （終了コード/メッセージ選択の自己回帰。sprint7 high）。ここは実出力だけを行う薄い橋渡し。
+    const pika::core::ipc::ConsoleOutcome outcome =
+        pika::core::ipc::decide_console_outcome(parsed, need_validate ? &v : nullptr);
+
+    if (outcome.print_help)
     {
         print_help();
-        return 0;
     }
-    if (parsed.invocation.show_version)
+    if (outcome.print_version)
     {
-        // パイプ・リダイレクトでも欠落しないよう puts/printf（行バッファ）で出力する。
         std::printf("pika %s\n", kVersion);
-        return 0;
     }
-
-    // ウィンドウ生成・転送の前に引数検証を同期実行する（要件3.2）。
-    pika::core::ipc::PathProbe probe;
-    probe.is_dir = path_is_dir;
-    probe.is_file = path_is_file;
-    auto v = pika::core::ipc::validate(parsed.invocation, probe);
-    if (!v.accepted)
+    if (!outcome.error_text.empty())
     {
         std::fputs("pika: ", stderr);
-        std::fputs(v.message.empty() ? "引数が不正です" : v.message.c_str(), stderr);
+        std::fputs(outcome.error_text.c_str(), stderr);
         std::fputc('\n', stderr);
-        return static_cast<int>(v.exit_code);
     }
-
-    // 受理。実際の GUI 起動/転送は GUI 本体（main_gui）が担うため、ここでは受理＝0 を返す。
-    return static_cast<int>(pika::core::ipc::ExitCode::Accepted);
+    // 受理時の実際の GUI 起動/転送は GUI 本体（main_gui）が担う。
+    return outcome.exit_code;
 }

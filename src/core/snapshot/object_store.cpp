@@ -4,6 +4,7 @@
 #include "core/snapshot/json_lite.h"
 #include "util/atomic_file.h"
 #include "util/hash.h"
+#include "util/path_util.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -47,12 +48,28 @@ bool ObjectStore::is_valid_hash(const std::string& hash) noexcept
 
 std::string ObjectStore::object_path(const std::string& hash) const
 {
-    return (fs::path(dir_) / hash).string();
+    return pika::util::path_to_utf8(pika::util::utf8_to_path(dir_) / hash);
 }
 
-std::string ObjectStore::meta_path(const std::string& hash) const
+std::string ObjectStore::stash_discriminator(const std::string& rel_path, StashKind kind,
+                                             std::int64_t time, const std::string& batch_id)
 {
-    return (fs::path(dir_) / (hash + kMetaSuffix)).string();
+    // 退避を一意に識別するキー（区切りに非表示文字 US=0x1F
+    // を使い、各フィールドの結合衝突を避ける）。
+    std::string key = rel_path;
+    key.push_back('\x1f');
+    key += to_string(kind);
+    key.push_back('\x1f');
+    key += std::to_string(time);
+    key.push_back('\x1f');
+    key += batch_id;
+    return pika::util::xxh3_64_hex(key);
+}
+
+std::string ObjectStore::stash_meta_path(const std::string& hash, const std::string& disc) const
+{
+    return pika::util::path_to_utf8(pika::util::utf8_to_path(dir_) /
+                                    (hash + "." + disc + kMetaSuffix));
 }
 
 Result<std::string> ObjectStore::put(std::string_view content)
@@ -63,7 +80,7 @@ Result<std::string> ObjectStore::put(std::string_view content)
         return Result<std::string>::ok(hash); // 重複排除：既存なら書かない
     }
     std::error_code ec;
-    fs::create_directories(dir_, ec); // 遅延作成（初回 put 時）
+    fs::create_directories(pika::util::utf8_to_path(dir_), ec); // 遅延作成（初回 put 時）
     auto compressed = compress(content);
     if (compressed.is_err())
     {
@@ -89,13 +106,16 @@ Result<std::string> ObjectStore::put_stash(std::string_view content, const std::
     const std::string& hash = stored.value();
 
     // 自己記述サイドカー（D1：index.json 破損時に objects 走査だけで復元待ち一覧を再構築する）。
+    // 内容アドレスで object を共有するため、サイドカーは退避単位の一意名にして後勝ち上書きを防ぐ
+    // （内容一致の別退避＝別 relPath/kind でも両方の復元メタを残す）。
+    const std::string disc = stash_discriminator(rel_path, kind, time, batch_id);
     json::Value meta = json::Value::object();
     meta.set("relPath", json::Value::str(rel_path));
     meta.set("kind", json::Value::str(to_string(kind)));
     meta.set("time", json::Value::integer(time));
     meta.set("indexGen", json::Value::integer(index_gen));
     meta.set("batchId", json::Value::str(batch_id));
-    auto wrote = pika::util::write_atomic(meta_path(hash), meta.dump());
+    auto wrote = pika::util::write_atomic(stash_meta_path(hash, disc), meta.dump());
     if (wrote.is_err())
     {
         return Result<std::string>::err(wrote.error());
@@ -136,18 +156,44 @@ void ObjectStore::remove(const std::string& hash)
     }
     std::error_code ec;
     fs::remove(object_path(hash), ec);
-    fs::remove(meta_path(hash), ec);
+    // この object に紐づく全サイドカー（"<hash>.<disc>.meta"）を削除する。1 object に複数退避の
+    // サイドカーがぶら下がり得るため、接頭辞 "<hash>." かつ接尾辞 ".meta"
+    // のファイルを走査して消す。
+    const std::string prefix = hash + ".";
+    const std::string suffix = kMetaSuffix;
+    std::error_code dec;
+    if (!fs::exists(pika::util::utf8_to_path(dir_), dec) || dec)
+    {
+        return;
+    }
+    for (const auto& e : fs::directory_iterator(pika::util::utf8_to_path(dir_), dec))
+    {
+        if (dec)
+        {
+            break;
+        }
+        const std::string name = e.path().filename().string();
+        const bool pfx =
+            name.size() >= prefix.size() && name.compare(0, prefix.size(), prefix) == 0;
+        const bool sfx = name.size() >= suffix.size() &&
+                         name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0;
+        if (pfx && sfx)
+        {
+            std::error_code rec;
+            fs::remove(e.path(), rec);
+        }
+    }
 }
 
 std::vector<std::string> ObjectStore::list_objects() const
 {
     std::vector<std::string> out;
     std::error_code ec;
-    if (!fs::exists(dir_, ec))
+    if (!fs::exists(pika::util::utf8_to_path(dir_), ec))
     {
         return out;
     }
-    for (const auto& e : fs::directory_iterator(dir_, ec))
+    for (const auto& e : fs::directory_iterator(pika::util::utf8_to_path(dir_), ec))
     {
         if (ec)
         {
@@ -174,12 +220,12 @@ std::vector<RecoveredStash> ObjectStore::scan_recoverable_stashes() const
 {
     std::vector<RecoveredStash> out;
     std::error_code ec;
-    if (!fs::exists(dir_, ec))
+    if (!fs::exists(pika::util::utf8_to_path(dir_), ec))
     {
         return out;
     }
     const std::string suffix = kMetaSuffix;
-    for (const auto& e : fs::directory_iterator(dir_, ec))
+    for (const auto& e : fs::directory_iterator(pika::util::utf8_to_path(dir_), ec))
     {
         if (ec)
         {
@@ -195,13 +241,20 @@ std::vector<RecoveredStash> ObjectStore::scan_recoverable_stashes() const
         {
             continue;
         }
-        const std::string object_hash = name.substr(0, name.size() - suffix.size());
+        // ファイル名は "<objhash>.<disc>.meta"。先頭の '.' までを object hash として切り出す
+        // （旧形式 "<objhash>.meta" もこの規則で objhash を取り出せる）。
+        const std::size_t dot = name.find('.');
+        if (dot == std::string::npos)
+        {
+            continue;
+        }
+        const std::string object_hash = name.substr(0, dot);
         // 対応 object が現存しないメタは復元不能のため除外する（退避＝最後の砦の到達性を担保）。
         if (!contains(object_hash))
         {
             continue;
         }
-        auto meta_bytes = pika::util::read_all(e.path().string());
+        auto meta_bytes = pika::util::read_all(pika::util::path_to_utf8(e.path()));
         if (meta_bytes.is_err())
         {
             continue;

@@ -63,4 +63,17 @@ TEST(CspBuilderTest, NeverAllowsObjectOrFrameSrc)
     EXPECT_FALSE(contains(csp, "frame-src"));
 }
 
+TEST(CspBuilderTest, AlwaysRestrictsBaseFormAndFrameAncestors)
+{
+    // base-uri/form-action/frame-ancestors は default-src 'none' が及ばないため、ポリシー非依存で
+    // 常時 'none'（二重防御の対称化。<base> 基底すり替え・<form> 外部送信・フレーム埋め込み防止）。
+    for (const auto policy : {RemoteResourcePolicy::Blocked, RemoteResourcePolicy::Allowed})
+    {
+        const std::string csp = build_csp(policy);
+        EXPECT_TRUE(contains(csp, "base-uri 'none'"));
+        EXPECT_TRUE(contains(csp, "form-action 'none'"));
+        EXPECT_TRUE(contains(csp, "frame-ancestors 'none'"));
+    }
+}
+
 } // namespace

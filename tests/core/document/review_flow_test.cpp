@@ -420,6 +420,54 @@ TEST_F(ReviewFlowTest, RevertAllUndoesBatchBaselineReplace)
     }
 }
 
+TEST_F(ReviewFlowTest, SetBaselinePutFailureLeavesEntryUnmutated)
+{
+    // set_baseline は内容 object 確保(put)が成功してから entry を一括コミットする（原子性）。put が
+    // I/O 失敗しても entry を半端変異させない＝確認前の状態を完全に保つ（confirm/confirm_all の
+    // 「失敗時は旧状態維持・未読維持」契約の土台。設計原則1）。objects
+    // ディレクトリ位置を通常ファイル にして put
+    // を確実に失敗させる（ディスク満杯・権限喪失の代替）。
+    SnapshotStore store(snapshots_root(), workspace_key("C:/ws"));
+    SnapshotIndex index;
+
+    const std::string objects_dir = store.objects().dir();
+    fs::create_directories(fs::path(objects_dir).parent_path());
+    ASSERT_TRUE(pika::util::write_atomic(objects_dir, std::string("blocker")).is_ok());
+
+    auto r = store.set_baseline(index, "a.md", "新内容\n", 5, false, true);
+    EXPECT_TRUE(r.is_err());                // put 失敗が伝播
+    EXPECT_EQ(index.find("a.md"), nullptr); // entry は作られない（半端変異なし）
+    EXPECT_TRUE(index.entries.empty());
+}
+
+TEST_F(ReviewFlowTest, RevertAllRestoresOldBaselineContent)
+{
+    // 「すべて確認済み」の一括取消は、単に baseline-replace 退避を消すのではなく、退避が保持する旧
+    // ベースライン内容へ実際に復元する（要件8.3「ワンクリックで一括取り消し」。設計原則1）。
+    SnapshotStore store(snapshots_root(), workspace_key("C:/ws"));
+    ReviewFlow flow(store);
+    SnapshotIndex index;
+    ASSERT_TRUE(store.set_baseline(index, "a.md", "旧A\n", 1, false, true).is_ok());
+    ASSERT_TRUE(store.set_baseline(index, "b.md", "旧B\n", 1, false, true).is_ok());
+
+    AllConfirmedResult r = flow.confirm_all(
+        index, {target("a.md", "新A\n", 2), target("b.md", "新B\n", 2)}, "batch-R", 10);
+    ASSERT_EQ(r.confirmed.size(), 2u);
+    ASSERT_EQ(store.restore_baseline(index, "a.md").value(), "新A\n"); // 更新後は新内容
+
+    const std::size_t reverted = flow.revert_all(index, "batch-R");
+    EXPECT_EQ(reverted, 2u);
+
+    auto a = store.restore_baseline(index, "a.md");
+    auto b = store.restore_baseline(index, "b.md");
+    ASSERT_TRUE(a.is_ok());
+    ASSERT_TRUE(b.is_ok());
+    EXPECT_EQ(a.value(), "旧A\n"); // 取消で旧内容へ戻る（復元点が破棄されていない）
+    EXPECT_EQ(b.value(), "旧B\n");
+    EXPECT_EQ(index.find("a.md")->baseline_hash, pika::util::xxh3_64_lf_hex("旧A\n"));
+    EXPECT_TRUE(index.find("a.md")->unread); // 確認の取消なので未読へ戻る
+}
+
 TEST_F(ReviewFlowTest, ConfirmAllSkipsWhenOldBaselineCannotBeStashed)
 {
     // 旧ベースラインを baseline-replace 退避へ保存できないとき、退避失敗を黙殺してベースラインを

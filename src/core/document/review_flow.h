@@ -101,6 +101,11 @@ class ReviewFlow
     // ファイルの旧ベースラインを baseline-replace 退避（同一 batch_id）してから更新する。
     // 各 target の freeze_hash（フリーズ時点の内容ハッシュ）と現内容のハッシュが不一致なら、処理
     // 中に並行書き込みで変わった＝未確認内容なのでスキップして未読のまま残す。完了後に一括取消できる。
+    // 【契約】E3 の並行変化スキップ保護を効かせるため、呼び出し側は各 target に必ず freeze_hash を
+    // 設定すること。freeze_hash が空の target は並行変化チェックを行わない（confirm
+    // 単体経路との互換 のための仕様）ため、フリーズ後に並行書き込みされた未確認内容をそのまま
+    // baseline 化しうる。空を
+    // 渡すのは「処理中に並行書き込みが起き得ない」と呼び出し側が保証できる場合に限る。
     AllConfirmedResult confirm_all(pika::core::snapshot::SnapshotIndex& index,
                                    const std::vector<ReviewTarget>& targets,
                                    const std::string& batch_id, std::int64_t time);

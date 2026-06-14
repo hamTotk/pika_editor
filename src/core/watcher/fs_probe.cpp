@@ -3,6 +3,8 @@
 #include "util/atomic_file.h"
 #include "util/hash.h"
 
+#include <new> // std::bad_alloc
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -60,7 +62,18 @@ pika::util::Result<std::uint64_t> content_hash_lf(std::string_view path)
     {
         return pika::util::Result<std::uint64_t>::err(bytes.error());
     }
-    return pika::util::Result<std::uint64_t>::ok(pika::util::xxh3_64_lf(bytes.value()));
+    try
+    {
+        return pika::util::Result<std::uint64_t>::ok(pika::util::xxh3_64_lf(bytes.value()));
+    }
+    catch (const std::bad_alloc&)
+    {
+        // LF 正規化コピーの確保失敗（巨大入力・低メモリ）。terminate させず Result::err に変換し、
+        // resync 等の「読めない時は安全側
+        // Modified」経路へ合流させる（設計原則1・コアは例外を投げない）。
+        return pika::util::Result<std::uint64_t>::err(pika::util::ErrorCode::Io,
+                                                      "内容ハッシュの計算に失敗しました");
+    }
 }
 
 } // namespace pika::core::watcher

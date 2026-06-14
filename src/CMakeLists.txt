@@ -117,6 +117,7 @@ add_library(pika_core STATIC
     util/hash.h
     util/logger.cpp
     util/logger.h
+    util/path_util.h
     util/result.h
     util/task_runner.cpp
     util/task_runner.h

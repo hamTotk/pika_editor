@@ -286,6 +286,7 @@ Result<SearchResult> SearchEngine::find_all(std::string_view text, std::string_v
     if (text.size() > limits_.max_total_bytes)
     {
         result.truncated = true;
+        result.truncate_reason = TruncateReason::OversizeInput;
         return Result<SearchResult>::ok(std::move(result));
     }
 
@@ -321,6 +322,11 @@ Result<SearchResult> SearchEngine::find_all(std::string_view text, std::string_v
         const int rc = pcre2_match(cp.code, subj, subj_len, start, 0, cp.match_data, cp.mcontext);
         if (rc < 0)
         {
+            if (rc == PCRE2_ERROR_NOMATCH)
+            {
+                // 正常な探索終了（この開始位置以降にヒットなし）。
+                break;
+            }
             if (rc == PCRE2_ERROR_MATCHLIMIT || rc == PCRE2_ERROR_DEPTHLIMIT ||
                 rc == PCRE2_ERROR_HEAPLIMIT)
             {
@@ -328,10 +334,15 @@ Result<SearchResult> SearchEngine::find_all(std::string_view text, std::string_v
                 // ので安全に打ち切り、truncated=true で「全件ではない」と呼び出し側へ伝える
                 // （ここまでに得たヒットは保持する）。
                 result.truncated = true;
+                result.truncate_reason = TruncateReason::ComplexityLimit;
                 return Result<SearchResult>::ok(std::move(result));
             }
-            // PCRE2_ERROR_NOMATCH を含むその他は「これ以上ヒットなし」。
-            break;
+            // NOMATCH/limit 以外の負値（BADUTFOFFSET 等）。これを「ヒット無し」と握り潰すと以降を
+            // 静かに取りこぼす。想定外なので truncated=true
+            // で明示し、得たヒットだけ返す（防御的）。
+            result.truncated = true;
+            result.truncate_reason = TruncateReason::MatchError;
+            return Result<SearchResult>::ok(std::move(result));
         }
 
         const PCRE2_SIZE* ov = pcre2_get_ovector_pointer(cp.match_data);
@@ -368,17 +379,26 @@ Result<SearchResult> SearchEngine::find_all(std::string_view text, std::string_v
         if (result.matches.size() >= limits_.max_matches)
         {
             result.truncated = true;
+            result.truncate_reason = TruncateReason::MaxMatches;
             return Result<SearchResult>::ok(std::move(result));
         }
 
-        // 次の探索開始位置。空マッチ（m_end == m_begin）は無限ループを避けるため 1 進める。
+        // 次の探索開始位置。空マッチ（m_end == m_begin）は無限ループを避けるため進める。
         if (m_end > m_begin)
         {
             start = m_end;
         }
         else
         {
-            start = m_end + 1;
+            // ゼロ幅マッチの前進はコードポイント単位にする。m_end が上位サロゲートを指す場合に
+            // +1 だけ進めると下位サロゲートの途中に着地し、PCRE2_UTF 有効・NO_UTF_CHECK 未指定の
+            // pcre2_match が BADUTFOFFSET を返して以降を取りこぼす。BMP外文字（絵文字・CJK拡張）の
+            // 直前のゼロ幅マッチでも正しく次へ進めるため、サロゲートペアなら 2 進める。
+            const bool high_surrogate =
+                m_end < subj_len && subject.u16[m_end] >= 0xD800 && subject.u16[m_end] <= 0xDBFF;
+            const bool has_low = m_end + 1 < subj_len && subject.u16[m_end + 1] >= 0xDC00 &&
+                                 subject.u16[m_end + 1] <= 0xDFFF;
+            start = (high_surrogate && has_low) ? m_end + 2 : m_end + 1;
         }
     }
 
@@ -506,6 +526,7 @@ Result<ReplaceResult> SearchEngine::replace_all(std::string_view text, std::stri
     if (sr.truncated)
     {
         rr.truncated = true;
+        rr.truncate_reason = sr.truncate_reason;
         return Result<ReplaceResult>::ok(std::move(rr));
     }
     if (sr.cancelled)

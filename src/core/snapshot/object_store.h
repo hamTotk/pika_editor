@@ -73,7 +73,13 @@ class ObjectStore
 
   private:
     std::string object_path(const std::string& hash) const;
-    std::string meta_path(const std::string& hash) const;
+    // 退避サイドカーのパス。ファイル名は "<objhash>.<disc>.meta"。object 実体は内容アドレスで共有
+    // しつつ、退避単位（relPath/kind/time/batch）ごとに別サイドカーを持たせ、内容一致の別退避が
+    // 互いのメタを後勝ち上書きしないようにする（D1 復元の取りこぼし防止）。
+    std::string stash_meta_path(const std::string& hash, const std::string& disc) const;
+    // 退避識別子（relPath/kind/time/batch から作る XXH3 hex）。同一退避の再保存は冪等。
+    static std::string stash_discriminator(const std::string& rel_path, StashKind kind,
+                                           std::int64_t time, const std::string& batch_id);
 
     std::string dir_;
 };

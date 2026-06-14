@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,9 +26,12 @@ namespace pika::core::watcher
 class WatcherCore
 {
   public:
-    // path の現ディスク内容の LF 正規化ハッシュを返す関数。存在しない/読めない場合は 0 を返す約束。
-    // 実機では fs_probe::content_hash_lf を束ねる。テストはディスクのモックを返す。
-    using HashProbe = std::function<std::uint64_t(const std::string& path)>;
+    // path の現ディスク内容の LF 正規化ハッシュを返す関数。存在しない/読めない場合は std::nullopt。
+    // ハッシュ値 0 は正規の値として扱う（0 をセンチネルにすると、内容ハッシュが偶然 0
+    // のとき自己保存
+    // 抑制が外れて外部変更を誤検知する＝型で「計算不能」と「値0」を分離する）。実機では
+    // fs_probe::content_hash_lf（Result）を is_err→nullopt / ok→value で束ねる。
+    using HashProbe = std::function<std::optional<std::uint64_t>(const std::string& path)>;
 
     WatcherCore(HashProbe hash_probe, TimeMs debounce_ms = EventSynthesizer::kDefaultDebounceMs,
                 TimeMs rename_window_ms = RenameTracker::kDefaultPairWindowMs);

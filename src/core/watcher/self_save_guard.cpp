@@ -5,12 +5,10 @@ namespace pika::core::watcher
 
 void SelfSaveGuard::register_save(const std::string& path, std::uint64_t hash_lf, TimeMs at)
 {
-    // 保存後ハッシュが取れないケース（0）は登録しない＝後続イベントは外部変更として扱う
-    // （design.md 5.2「保存後ハッシュが取れないケースは外部変更として扱う」）。
-    if (hash_lf == 0)
-    {
-        return;
-    }
+    // hash_lf は正規の値として扱う（0 を「計算不能」のセンチネルにしない）。保存後ハッシュが
+    // 取れないケースの判定は呼び出し側に委ねる＝そもそも register_save を呼ばない（WatcherCore は
+    // 読み取り側 HashProbe を std::optional にして「計算不能」と「値0」を型で分離する）。これにより
+    // 内容ハッシュが偶然 0 のときに自己保存抑制が外れて外部変更を誤検知する事故を防ぐ。
     tokens_[path].push_back(Token{hash_lf, at});
 }
 

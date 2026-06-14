@@ -7,6 +7,7 @@
 #include "core/watcher/fs_probe.h"
 #include "util/atomic_file.h"
 #include "util/hash.h"
+#include "util/path_util.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -154,6 +155,33 @@ TEST_F(ResyncTest, NoMissAtScale)
     {
         EXPECT_EQ(e.kind, FsEventKind::Modified);
     }
+}
+
+TEST_F(ResyncTest, NonAsciiFilenameDetectedAsModifiedNotRecreated)
+{
+    // 非ASCII（日本語）ファイル名でも relPath キーが UTF-8 で一致し、変更が Modified
+    // として検知される。 rel キーが CP_ACP で化けると baseline キー(UTF-8)と不一致になり、毎回
+    // Created＋Removed に 化ける（日本語専用ツールで実害大）。UTF-8 で一貫させて 1 件の Modified
+    // になることを確認する。
+    const std::string root_u8 = pika::util::path_to_utf8(root_);
+    const std::string abs_u8 = root_u8 + "/日本語ファイル.md";
+    ASSERT_TRUE(pika::util::write_atomic(abs_u8, std::string("before")).is_ok());
+
+    BaselineMap base;
+    BaselineEntry e;
+    const FileStat st = probe(abs_u8);
+    e.size = st.size;
+    e.mtime_ns = st.mtime_ns;
+    auto h = pika::core::watcher::content_hash_lf(abs_u8);
+    e.hash_lf = h.is_ok() ? h.value() : 0;
+    base["日本語ファイル.md"] = e;
+
+    ASSERT_TRUE(pika::util::write_atomic(abs_u8, std::string("after the change")).is_ok());
+
+    auto events = resync(root_u8, base);
+    ASSERT_EQ(events.size(), 1u); // Created+Removed の2件に化けない
+    EXPECT_EQ(events[0].path, "日本語ファイル.md");
+    EXPECT_EQ(events[0].kind, FsEventKind::Modified);
 }
 
 TEST_F(ResyncTest, SubdirectoryFilesAreEnumerated)

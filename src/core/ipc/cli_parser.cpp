@@ -120,9 +120,9 @@ ParseResult parse_argv(const std::vector<std::string>& argv)
             ++i;
             continue;
         }
-        // それ以外のオプション（先頭 '-' で既知でない）は不正引数。
-        // ただし単独の '-' や、パスが '-' で始まらないケースは通常パスとして受理する。
-        if (a.size() >= 2 && a[0] == '-' && a[1] != '\0' && a != "-")
+        // それ以外のオプション（先頭 '-' で2文字以上）は未知オプション＝不正引数。
+        // 単独の '-'（size 1）はこの条件に入らず通常パスとして受理する（stdin 慣習等）。
+        if (a.size() >= 2 && a[0] == '-')
         {
             // ドライブレターやパスではない未知オプション。
             out.errored = true;
@@ -214,6 +214,43 @@ ValidationResult validate(const CliInvocation& inv, const PathProbe& probe)
     // ここまで来たら受理（引数なし＝前回状態復元も受理。要件3.1）。
     out.accepted = true;
     out.exit_code = ExitCode::Accepted;
+    return out;
+}
+
+ConsoleOutcome decide_console_outcome(const ParseResult& parsed, const ValidationResult* validation)
+{
+    ConsoleOutcome out;
+
+    // 1) parse 失敗：具体的な理由（parsed.message）を見せて非0で終了する（一律文言に潰さない）。
+    if (parsed.errored)
+    {
+        out.exit_code = static_cast<int>(ExitCode::InvalidArgument);
+        out.error_text = parsed.message.empty() ? "不正な引数です" : parsed.message;
+        return out;
+    }
+
+    // 2) help / version：GUI を起動せずコンソール出力して 0 で終了する（要件3）。
+    if (parsed.invocation.show_help)
+    {
+        out.print_help = true;
+        return out;
+    }
+    if (parsed.invocation.show_version)
+    {
+        out.print_version = true;
+        return out;
+    }
+
+    // 3) 引数検証の失敗：validate の終了コードとメッセージで非0終了する。
+    if (validation != nullptr && !validation->accepted)
+    {
+        out.exit_code = static_cast<int>(validation->exit_code);
+        out.error_text = validation->message.empty() ? "引数が不正です" : validation->message;
+        return out;
+    }
+
+    // 4) 受理（転送/前回状態復元へ進む）。実際の GUI 起動は main_gui が担う。
+    out.exit_code = static_cast<int>(ExitCode::Accepted);
     return out;
 }
 

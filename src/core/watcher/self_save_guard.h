@@ -31,7 +31,9 @@ class SelfSaveGuard
     explicit SelfSaveGuard(TimeMs window_ms = kDefaultWindowMs) : window_ms_(window_ms) {}
 
     // 保存直前に呼ぶ。path への保存後内容の LF 正規化ハッシュ（hash_lf）を登録する。
-    // 保存後ハッシュが取れないケース（呼び出し側で 0 を渡す等）は登録しない＝外部変更扱いになる。
+    // hash_lf は正規の値として扱う（0 を「計算不能」のセンチネルにしない）。保存後ハッシュが
+    // 取れない場合は呼び出し側が register_save を呼ばないこと（WatcherCore::HashProbe
+    // は読み取り側を std::optional にして「計算不能(nullopt)」と「値0」を型で分離する）。
     void register_save(const std::string& path, std::uint64_t hash_lf, TimeMs at);
 
     // 変更イベントを自己保存として消し込むか判定する。

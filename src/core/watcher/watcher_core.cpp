@@ -53,12 +53,13 @@ bool WatcherCore::suppressed_as_self_save(const FsEvent& ev, TimeMs now)
     {
         return false;
     }
-    const std::uint64_t disk_hash = hash_probe_ ? hash_probe_(ev.path) : 0;
-    if (disk_hash == 0)
+    const std::optional<std::uint64_t> disk_hash =
+        hash_probe_ ? hash_probe_(ev.path) : std::nullopt;
+    if (!disk_hash.has_value())
     {
         return false; // 読めない/不在は外部変更として扱う（design.md 5.2）
     }
-    return self_save_.consume_if_self(ev.path, disk_hash, now);
+    return self_save_.consume_if_self(ev.path, *disk_hash, now);
 }
 
 std::vector<FsEvent> WatcherCore::poll(TimeMs now)
