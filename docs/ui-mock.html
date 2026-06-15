@@ -38,7 +38,8 @@
   --text-faint:  #a9a9b1;
   --border-1:    #dcdce0;
   --border-2:    #cacace;
-  --accent:      #4f74a8;   /* 既定UIでは基本使わない（フォーカス等の控え） */
+  --accent:      #4f74a8;   /* 強調: 未保存/カーソル/差分あり/差分トグルON/フォーカス */
+  --accent-strong: #3d63a0; /* 差分トグルON塗りの背景（白文字4.5:1確保） */
   --alert:       #a8602a;   /* 衝突＝データ損失リスクの警告（唯一の差分外の色強調）*/
   /* 差分（彩度を落とし全体トーンへ馴染ませる。色＋記号＋下線で冗長化）*/
   --diff-add-bg: #e9f2ec;   --diff-add-tx: #2f6b41;  --diff-add-gut: #d6e6dc;  --diff-add-word: #bbddc6;
@@ -61,6 +62,7 @@
   --border-1:    #2b2b31;
   --border-2:    #393940;
   --accent:      #7d9ec9;
+  --accent-strong: #5b86bf;
   --alert:       #c98a52;
   --diff-add-bg: #18271d;   --diff-add-tx: #6fb585;  --diff-add-gut: #244430;  --diff-add-word: #2f5b3d;
   --diff-del-bg: #271a1c;   --diff-del-tx: #d18b86;  --diff-del-gut: #432528;  --diff-del-word: #5f3535;
@@ -138,7 +140,7 @@ body {
 .trow.dir .name { color: var(--text-1); }
 .trow.indent1 { padding-left: 24px; }
 .trow.indent2 { padding-left: 42px; }
-.trow.deleted .name { text-decoration: line-through; color: var(--text-3); }
+.trow.deleted .name { text-decoration: line-through; color: var(--text-2); }
 
 /* 状態バッジ（モノトーン。形・位置・濃淡で弁別）*/
 .badge { width: 16px; text-align: center; font-size: 11px; line-height: 1; flex: none; }
@@ -181,13 +183,12 @@ body {
 }
 .tab.active { background: var(--bg-raised); color: var(--text-1); }  /* アクティブは面の明るさで示す */
 .tab .tname { overflow: hidden; text-overflow: ellipsis; }
-.tab.deleted .tname { text-decoration: line-through; color: var(--text-3); }
+.tab.deleted .tname { text-decoration: line-through; color: var(--text-2); }
 .tab .x { color: var(--text-3); width: 16px; height: 16px; line-height: 16px; text-align: center;
           border-radius: var(--radius-sm); font-size: 12px; }
 .tab .x:hover { background: var(--bg-hover); color: var(--text-1); }
 .tab .x.dirty { color: var(--accent); font-size: 11px; }      /* 未保存＝閉じる位置の●（強調色＋位置で弁別）*/
-.tab .lead.new { color: var(--diff-add-tx); }                 /* 新規タブ＝＋（緑）*/
-.tab .lead.del { color: var(--diff-del-tx); }                 /* 削除済みタブ＝−（赤）*/
+.tab .lead.new { color: var(--diff-add-tx); }                 /* 新規タブ＝◆（緑）*/
 .tab .lead { font-size: 13px; color: var(--accent); font-weight: 700; }   /* 差分あり＝名前左の±（強調色）*/
 .tabbar .spring { flex: 1; }
 .tab-tools { display: flex; align-items: center; gap: 6px; padding: 0 8px; border-left: 1px solid var(--border-1); }
@@ -208,7 +209,7 @@ body {
   font-size: 12.5px; padding: 3px 11px; border: 1px solid var(--border-2); border-radius: var(--radius-sm);
   background: var(--bg-raised); color: var(--text-2); cursor: pointer; white-space: nowrap;
 }
-.diff-toggle.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.diff-toggle.on { background: var(--accent-strong); color: #fff; border-color: var(--accent-strong); }
 .diff-toggle[disabled] { color: var(--text-faint); cursor: default; }
 .hidden-unread {
   align-self: center; font-size: 11px; color: var(--text-2); background: var(--bg-active);
@@ -300,7 +301,7 @@ body {
 .status {
   position: absolute; right: 0; bottom: 0; z-index: 2;
   display: flex; align-items: center; gap: 10px;
-  background: var(--bg-sunken); color: var(--text-3); font-size: 11.5px;
+  background: var(--bg-sunken); color: var(--text-2); font-size: 11.5px;
   padding: 2px 10px;
   border-top: 1px solid var(--border-1); border-left: 1px solid var(--border-1);
   border-radius: 7px 0 0 0;          /* 右辺・下辺は画面端まで塗り、左上だけ角丸（Obsidian流）*/
@@ -436,7 +437,7 @@ body {
           </div>
         </div>
         <div class="status">
-          <span class="seg-s">142 行</span><span class="seg-s">3,847 文字</span>
+          <span class="seg-s">差分 3</span><span class="seg-s">142 行</span><span class="seg-s">3,847 文字</span>
         </div>
       </div>
     </div>
@@ -514,7 +515,7 @@ body {
           </div>
         </div>
         <div class="status">
-          <span class="seg-s">98 行</span><span class="seg-s">2,140 文字</span>
+          <span class="seg-s">差分 2</span><span class="seg-s">98 行</span><span class="seg-s">2,140 文字</span>
         </div>
       </div>
     </div>
@@ -570,7 +571,7 @@ body {
           </div>
         </div>
         <div class="status">
-          <span class="seg-s">24 行</span><span class="seg-s">412 文字</span><span class="seg-s cursor">行 4, 9 文字目</span>
+          <span class="seg-s">差分 0</span><span class="seg-s">24 行</span><span class="seg-s">412 文字</span><span class="seg-s cursor">行 4, 9 文字目</span>
         </div>
       </div>
     </div>
@@ -636,7 +637,7 @@ body {
             <div class="eline"><span class="ln">2</span><span class="lt">{"id":2,"text":"…","emb":[0.41,0.07, …]}</span></div>
             <div class="eline"><span class="ln">3</span><span class="lt">…（閲覧・検索・保存は通常どおり）</span></div>
           </div>
-          <div class="status"><span class="seg-s">1,204,500 行</span><span class="seg-s">28.4 MB</span></div>
+          <div class="status"><span class="seg-s">差分 1</span><span class="seg-s">1,204,500 行</span><span class="seg-s">28.4 MB</span></div>
         </div></div>
       </div>
       <p class="caption">Partial: 機能を黙って切らず、理由＋手動再有効化を通知で明示（req 2.2）。</p>
@@ -656,7 +657,7 @@ body {
             <div class="eline"><span class="ln">2</span><span class="lt"></span></div>
             <div class="eline"><span class="ln">3</span><span class="lt">プレビューは無効でもソース編集は可能。</span></div>
           </div>
-          <div class="status"><span class="seg-s">3 行</span><span class="seg-s">64 文字</span><span class="seg-s cursor">行 1, 1 文字目</span></div>
+          <div class="status"><span class="seg-s">差分 0</span><span class="seg-s">3 行</span><span class="seg-s">64 文字</span><span class="seg-s cursor">行 1, 1 文字目</span></div>
         </div></div>
       </div>
       <p class="caption">Error: 機能を縮退（プレビュー/差分のみ無効）してアプリは起動継続。次の一手を提示（req 2.3）。</p>
