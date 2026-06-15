@@ -243,7 +243,7 @@ sequenceDiagram
   * 各退避objectは自己記述メタ（元relPath・kind・時刻・元index世代）を `objects` 側のサイドカーに併記する。`index.json` 破損時はこのメタを `objects` 走査で読み、「復元待ち退避一覧」を提示してから `baseline`/`unread` を再生成する（D1）
   * 閾値跨ぎ：内容objectを持つファイルが10MB以上になっても、その内容objectは容量上限まで保持し差分・巻き戻しの起点に使う。次回確認済みでハッシュのみへ移行する（要件9.2／D2）
 * `baselineHash` および未読判定・差分照合のハッシュは**LF正規化後**の内容に対する XXH3 とする（改行コードのみの差は未読・差分に現れない）。保存時の改行維持（要件5.2）はこれと独立に原文を保つ（E6）
-* `state.json` の主な内容：`{ version, window{位置・サイズ・最大化}, lastWorkspace, tabs:[{path, caret, scroll, mode, previewScroll}], activeTab, treeExpanded[], modeByType{}, theme{current}, recent{files[], folders[]} }`。表示モードのファイル種別ごとの記憶（要件6.1）は `modeByType`、最近使った項目（要件10.2）、テーマの現在値（システム追従の解決結果。settings.tomlは読み取り専用のため。要件10.3／K7）も本ファイルに含める
+* `state.json` の主な内容：`{ version, window{位置・サイズ・最大化}, lastWorkspace, tabs:[{path, caret, scroll, mode, diffOn, previewScroll}], activeTab, treeExpanded[], treeCollapsed, modeByType{}, theme{current}, recent{files[], folders[]} }`。表示モード（ソース/分割/プレビュー）のファイル種別ごとの記憶（要件6.1）は `modeByType`、**差分トグルのON/OFFは各タブの `diffOn`** として別に保持する（モードと差分は直交。要件6.1）。ツリー折りたたみ状態は `treeCollapsed`。最近使った項目（要件10.2）、テーマの現在値（システム追従の解決結果。settings.tomlは読み取り専用のため。要件10.3／K7）も本ファイルに含める
 * snapshots フォルダ・`index.json`・`objects` はユーザー本人のみアクセスできる権限（ACL）で作成する。settings.toml のベースライン除外パターン（既定 `.env`・`*.key`・`*.pem`・`*secret*`）に該当する機密ファイルは内容（object）を保存せず `baselineHash` のみ記録する。ファイル/ワークスペースを閉じた際にスナップショットを手動パージするAPIを提供する（要件9.1/9.4・C4）
 * `objects` は内容ハッシュ名で重複排除・共有されるため、退避/ベースライン削除に伴う object の物理削除は **mark-and-sweep**（どの `baselineHash` からも・どの `stash.hash` からも参照されていないことを確認）してから行う（共有実体の誤削除防止。D5）
 * **クラウドプレースホルダ対策**：ベースライン取得・起動時未読判定の走査では、`FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS`／`FILE_ATTRIBUTE_OFFLINE` が立っているファイルを内容読み取りから除外する（列挙時のメタデータのみで判定し、ハイドレーションを誘発しない。要件12.1）
@@ -287,6 +287,7 @@ sequenceDiagram
 * 監視不能環境のポーリング実行中・F5実行中は、その旨と進捗をステータスバー/通知バーに表示する（要件12.1。F3）
 * About 画面に同梱サードパーティOSSのライセンス・著作権表示を載せる（要件13章。K6）
 * ユーザー向け文言は単一のメッセージ定義（ID→日本語文字列）から取得し、UIクラスに生文字列を直接書かない（将来の多言語化の余地。要件2.3/14章。K9）
+* **視覚仕様の正典は `docs/ui-design.md`**（本章の詳細化）：配色トークン（モノトーン基調＋僅か寒色・ダークは再調整）、タイポ（Segoe UI Variable／Cascadia・非同梱）、状態記号体系（差分あり ±／新規 ◆／削除済み 取り消し線・色＋記号で弁別）、ファイルタイプアイコン（モノトーン線・lucide(MIT)ベース＋自作、`wxBitmapBundle` で高DPI）、ステータスの右下固定、差分トグルUI、通知バーの色運用（衝突のみ警告色）。モック実体は `docs/ui-mock.html`。色を使うのは差分・強調（accent）・衝突警告（alert）のみとする
 
 ## 11. 性能設計（予算の分解）
 
