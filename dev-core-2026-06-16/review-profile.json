@@ -1,0 +1,13 @@
+{
+  "version": "1",
+  "reviewers": {
+    "security": "conditional",
+    "performance": "conditional",
+    "data": "conditional",
+    "frontend-ui": "conditional",
+    "ux": "conditional",
+    "backend-api": "off",
+    "product": "conditional"
+  },
+  "rationale": "pika はローカル個人向けの Windows ネイティブ GUI ツール(wxWidgets)であり、外部公開 API を持たず(IPC は単一インスタンス用の内部のみ)、UI 自動テストも初期版では持たない方針(design.md 13章)。この性格上、レビュアは過剰起動を避けコスト優先で conditional に倒す。backend-api=off: 外部から呼ばれる公開 API 契約が無いため(内部 IPC のみ)。frontend-ui=conditional: GUI はあるがネイティブで Web ではなく、UI 自動テストを持たないため GUI/描画系スプリント(WebView2 プレビュー/差分・ツリー/タブ描画)を触った時のみ。data=conditional: index.json/objects/snapshot 等の永続化スキーマと退避は設計原則1『データを失わない』が最優先で、永続化を触るスプリント(snapshot・state/index・退避結合)で起動。security=conditional: プレビューのサニタイズ/CSP・JS有効無効切替・機密ファイルのハッシュのみ記録・外部リソース取得既定オフを扱うがローカル個人ツールのため always にはせず、render/IPC/機密まわりのスプリントで起動。performance=conditional: 起動500ms・200msブロック禁止・軽量性が核だが各スプリント末計測で足り、性能影響のあるスプリントで起動。ux=conditional: CLI(pika -g・--help・終了コード)＋GUI を人が直接操作するため CLI/UI 挙動を触った時に起動。product=conditional: 『足さない／要件14章にない機能は作らない』判断が重要なため、機能追加を伴うスプリントで要件逸脱を確認する。"
+}

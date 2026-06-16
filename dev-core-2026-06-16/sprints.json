@@ -1,0 +1,220 @@
+{
+  "project": "pika",
+  "spec": "dev/spec.md",
+  "use_playwright": false,
+  "sprints": [
+    {
+      "id": 1,
+      "goal": "ビルド基盤が成立し、wx非依存の pika_core + util と gtest(pika_tests) が x64-core-test プリセットで構成・ビルド・テストできる。重量依存(wx/WebView2)を含まない最小構成で ctest が exit 0 を返す。",
+      "depends_on": [],
+      "acceptance_criteria": {
+        "must": [
+          "ルート CMakeLists.txt と vcpkg.json・vcpkg-configuration.json が存在し、x64-core-test プリセット(core/+util と gtest のみ、wx/WebView2 を含まない)が定義されている",
+          "cmake --preset x64-core-test が exit 0 で構成成立する(vcpkg manifest 解決を含む)",
+          "pika_core(静的lib, core/+util)と pika_tests(gtest) のターゲットがビルドでき、最小のスモークテスト(util のハッシュ XXH3 か簡単な算術)が ctest --preset x64-core-test で 1 件以上 PASS する",
+          "/W4・警告エラー扱いの設定下で core/util のコードが警告ゼロでビルドされる"
+        ],
+        "should": [
+          "x64-release プリセット(wx を含む pika GUI exe)の CMake 構成定義が存在する(初回重量ビルドの完走は必須にしない)",
+          "ターゲット分割が design.md 12章どおり pika_core / pika / pika.com / pika_tests で定義されている",
+          ".github/workflows/ci.yml の build-test ジョブが将来 if:false を外せる前提と整合している"
+        ]
+      },
+      "verify": [
+        "cmake --preset x64-core-test",
+        "ctest --preset x64-core-test"
+      ]
+    },
+    {
+      "id": 2,
+      "goal": "util の基盤(エンコーディング判定・往復、ハッシュ、アトミック書き込み、Result<T>、TaskRunner)が UI 非依存で実装され gtest で検証される。コア全体が依存する土台を決定論的に固める。",
+      "depends_on": [1],
+      "acceptance_criteria": {
+        "must": [
+          "EncodingDetector: BOM(UTF-8/UTF-16 LE/BE)を最優先で判定し、BOMなしは UTF-8→Shift_JIS の順で妥当性検査する。UTF-8/BOM/UTF-16/Shift_JIS × LF/CRLF の読み込み→書き出し往復で原文のエンコーディング・BOM・改行が維持される(gtest)",
+          "書き出し時の表現可能性チェック: Shift_JIS で表現できない文字(絵文字等)を検出して保存を中断するエラーを返す(gtest)",
+          "ハッシュ: LF正規化後の内容に対する XXH3 が、CRLF/LF のみ異なる同一内容で一致する(gtest)",
+          "AtomicFile: 一時ファイル→rename のアトミック書き込みが成功し、書き込み途中でも元ファイルが破損しない経路である(gtest、テンポラリフォルダ使用)",
+          "コア公開 API が Result<T> 方式で、失敗時に例外を投げずエラー値を返す(gtest)"
+        ],
+        "should": [
+          "TaskRunner(2〜4本のワーカープール)が用意され、タスク投入と完了取得ができる",
+          "Logger がファイル内容を書かずパス・操作・エラーのみ記録する方針で実装されている"
+        ]
+      },
+      "verify": [
+        "ctest --preset x64-core-test"
+      ]
+    },
+    {
+      "id": 3,
+      "goal": "技術リスク(b): core/watcher のイベント合成・自己保存抑制・rename正規化・バッファオーバーフロー再同期・確定読みが UI 非依存ロジックとして実装され、テンポラリフォルダを使った実FS gtest で検証される。",
+      "depends_on": [2],
+      "acceptance_criteria": {
+        "must": [
+          "イベント合成: 連続書き込み(短時間に複数イベント)がデバウンス(100ms目安)で 1 つの FsEvent に合成される(gtest)",
+          "自己保存抑制: 保存トークン(パス+保存後ハッシュ)に対し、現ディスク内容のハッシュが一致する場合のみ自己イベントとしてワンショット消費し、時刻窓を超えてもハッシュ一致なら抑制、内容が異なれば外部変更として扱う(gtest)",
+          "rename 正規化: old/new ペアが時間窓内に揃えば追従、揃わない場合は安全側(old単独=削除、new単独=新規、上書きrename=内容変更)に正規化する(gtest)",
+          "バッファオーバーフロー再同期: ERROR_NOTIFY_ENUM_DIR 相当の溢れ時に監視ルートを全再列挙し mtime/サイズ→ハッシュ比較で再同期して取りこぼさない(gtest)",
+          "確定読み: 静穏期間＋mtime/サイズの安定確認を満たすまで内容を確定読みせず、中途内容で確定しない(gtest)"
+        ],
+        "should": [
+          "監視不能環境向けの定期ポーリング(既定5秒)フォールバックのロジックが mtime+サイズプレスクリーンを再利用して実装されている",
+          "N件(100件規模)同時変更で取りこぼしが起きないことが gtest で確認される"
+        ]
+      },
+      "verify": [
+        "ctest --preset x64-core-test"
+      ]
+    },
+    {
+      "id": 4,
+      "goal": "技術リスク(c)の決定論部分: core/render のホワイトリスト方式サニタイズ・JS依存検知・外部リソース検知・CSP組み立て・レンダリング暴走ガード判定が UI/WebView2 非依存で実装され gtest で検証される。",
+      "depends_on": [2],
+      "acceptance_criteria": {
+        "must": [
+          "ホワイトリスト方式サニタイズ: 許可タグ・許可属性のみ通し、<script>・イベント属性(onload等)・javascript: URL・<iframe>/<object>/<embed>/<base> を除去する(gtest)",
+          "インラインSVG無害化: SVG内の script/foreignObject/イベント属性を除去する(gtest)",
+          "CSS遮断: CSS の url() と @import を遮断する(gtest)",
+          "JS依存検知(HtmlInspector): <script> タグ・Tailwind CDN 参照を検知してフラグを返す(gtest)",
+          "外部リソース検知: http(s) の画像・CSS・フォント等の外部参照を検知する(gtest)",
+          "レンダリング暴走ガード判定: 画像6000万px・SVG展開8000万px相当/要素5万・HTML要素数/ネスト深さの閾値超過を入力サイズから開始前に判定し、超過ならレンダリング不可フラグを返す(gtest)",
+          "CSP テンプレートが script-src を https://app.pika のみに限定し、リモート許可オフ時に外部 http(s) を含まない文字列を生成する(gtest)"
+        ],
+        "should": [
+          "md4c による Markdown→HTML 変換(GFM: テーブル・タスクリスト・打消し線・自動リンク)が呼び出せる",
+          "リモートリソース許可オン時のみ CSP の img-src/font-src/style-src に http: https: を追加する切替が gtest で確認される"
+        ]
+      },
+      "verify": [
+        "ctest --preset x64-core-test"
+      ]
+    },
+    {
+      "id": 5,
+      "goal": "core/snapshot のベースライン・退避の保存/復元と容量管理が実装され、データを失わない原則(index破損時の objects 走査復元を含む)が gtest で検証される。中心体験の差分・確認済みの永続基盤を固める。",
+      "depends_on": [2],
+      "acceptance_criteria": {
+        "must": [
+          "保存→復元の同一性: テキストを zstd 圧縮して objects に内容ハッシュ名で格納し、復元で原内容と一致する(gtest、テンポラリのデータルート使用)",
+          "退避フロー: conflict/incoming/rollback/baseline-replace の各退避が保存され、復元で原内容と一致する(gtest)",
+          "index破損復元: index.json が壊れても objects の自己記述メタ(元relPath・kind・時刻)走査から復元待ち退避一覧を提示でき、退避を失わない(gtest)",
+          "機密ファイル(.env/*.key/*.pem/*secret*)は内容(object)を保存せず baselineHash のみ記録する(gtest)",
+          "容量管理: ファイルごと最新10件の LRU と容量GC(既定500MB)・90日GC が、未復元かつ14日以内の退避を保護対象から削除しない(gtest)",
+          "object の物理削除が mark-and-sweep(どの baselineHash・stash.hash からも未参照を確認)で共有実体を誤削除しない(gtest)"
+        ],
+        "should": [
+          "ワークスペース内に管理ファイル(.pika 等)を一切作らないことが gtest で確認される",
+          "起動時未読判定が mtime+サイズプレスクリーン→不一致のみハッシュ比較で動く",
+          "snapshots/index/objects が本人のみアクセス可能な ACL で作成される方針が実装されている"
+        ]
+      },
+      "verify": [
+        "ctest --preset x64-core-test"
+      ]
+    },
+    {
+      "id": 6,
+      "goal": "core/diff の行差分(dtl/Myers)と行内の単語/文字単位ハイライト、累積差分の基盤が実装され、LF正規化照合・大規模入力ガード・色非依存(+/-)出力が gtest で検証される。",
+      "depends_on": [2],
+      "acceptance_criteria": {
+        "must": [
+          "行差分: ベースライン内容 vs 現在内容を LF正規化後に行分割して Myers 差分を計算し、追加/削除/変更行を返す(gtest)",
+          "改行のみの差: CRLF/LF のみ異なる同一内容で差分が空になる(gtest)",
+          "行内ハイライト: 空白区切りトークンの LCS で変更語を特定し、トークン境界が取れない日本語等では文字単位 LCS にフォールバックする(gtest)",
+          "色非依存出力: 各差分行に追加/削除を示す +/- 記号クラスが必ず付与される(gtest)",
+          "大規模入力ガード: 行数・最長行長が上限超過(10MB以上相当)なら計算を開始せずフォールバック結果を返す(別スレッド中断に頼らない)(gtest)"
+        ],
+        "should": [
+          "空ファイル・全行追加(新規=ベースラインなし)・全行削除の境界が正しく扱われる(gtest)",
+          "差分計算がキャンセル可能(協調キャンセルのアトミックフラグ)である"
+        ]
+      },
+      "verify": [
+        "ctest --preset x64-core-test"
+      ]
+    },
+    {
+      "id": 7,
+      "goal": "CLI とシングルインスタンスの引数解釈・転送ロジック(pika.com スタブ含む)が実装され、-g パース・引数検証・終了コード・IPC スキーマ検証が gtest で検証される。エージェント向けAPIの土台を貫通させる。",
+      "depends_on": [2],
+      "acceptance_criteria": {
+        "must": [
+          "-g パース: `<file>:<行>[:<桁>]` を末尾から剥がし、ドライブレター直後のコロン(C:\\)を分割せず、桁省略は行頭、整数でない行/桁は位置指定無視でパスとして解釈する(gtest)",
+          "引数検証: 存在しないフォルダはエラー(非0)、存在しないファイルパスは新規タブ扱いとして受理する分類ロジックを返す(gtest)",
+          "相対パス正規化: クライアント側で呼び出し元 CWD 基準に絶対パス正規化してから転送する(gtest)",
+          "IPC スキーマ検証: 受信 JSON(1行・最大数KB)がスキーマに合わないデータを破棄し、受理操作をパス引数のオープンに限定する(gtest)",
+          "終了コード規約: 受理=0(転送受理はファイルが開かれた保証ではない)、不正引数=非0 を返す分類が gtest で確認される"
+        ],
+        "should": [
+          "pika.com コンソールスタブの --help/--version 出力がパイプ・リダイレクトで欠落・文字化けせず取得できる",
+          "名前付きパイプ \\\\.\\pipe\\pika-<SID> の DACL(作成者のみ)＋PIPE_REJECT_REMOTE_CLIENTS の設定方針が実装されている"
+        ]
+      },
+      "verify": [
+        "ctest --preset x64-core-test"
+      ]
+    },
+    {
+      "id": 8,
+      "goal": "core/settings と core/workspace が実装され、settings.toml の読み取り専用・不正値フォールバック、ツリーモデル(自然順・除外リスト)・未読集合・rename引き継ぎが gtest で検証される。",
+      "depends_on": [3, 5],
+      "acceptance_criteria": {
+        "must": [
+          "settings: settings.toml を読み取り専用(書き戻さない)で読み込み、不正な値は既定値にフォールバックして警告フラグを返し、起動不能にしない(gtest)",
+          "settings: 保存途中の不完全な TOML でパース失敗時は直前の有効値を維持する(gtest)",
+          "workspace ツリー: フォルダ先行・自然順ソート(file2 が file10 より前)が成立する(gtest)",
+          "workspace 除外: 既定除外リスト(.git/node_modules)が非表示かつ監視対象外になる(gtest)",
+          "未読の rename 引き継ぎ: リネーム/移動で未読・ベースライン・退避を引き継ぎ、対応付け不能時は最終ディスク内容で再判定する(gtest)"
+        ],
+        "should": [
+          "子孫に未読があるフォルダの伝播未読と、ファイル自身の未読が区別できるモデルである(gtest)",
+          "除外リスト・閾値等の設定項目が settings から取得できる"
+        ]
+      },
+      "verify": [
+        "ctest --preset x64-core-test"
+      ]
+    },
+    {
+      "id": 9,
+      "goal": "core/search(PCRE2)の検索・置換エンジンが実装され、後方参照・キャプチャ参照・Unicode文字クラス・正規表現置換・巨大入力のキャンセル可能性が gtest で検証される。",
+      "depends_on": [2],
+      "acceptance_criteria": {
+        "must": [
+          "検索: インクリメンタル・大文字小文字区別・単語単位・正規表現・全ヒット列挙とヒット件数を返す(gtest)",
+          "正規表現置換: キャプチャ参照(後方参照)を用いた全置換が正しく結果を返す(gtest)",
+          "Unicode文字クラス: PCRE2(pcre2-16/UTF対応)で Unicode 文字クラスを含むパターンがマッチする(gtest)",
+          "巨大/長行入力の検索・全置換がキャンセル可能な処理として実装され、協調キャンセルで中断できる(gtest)"
+        ],
+        "should": [
+          "第2段階(200MB超相当)の読み取り専用では置換が無効化される判定がある"
+        ]
+      },
+      "verify": [
+        "ctest --preset x64-core-test"
+      ]
+    },
+    {
+      "id": 10,
+      "goal": "退避フロー結合(DocumentController×snapshot 相当のコアロジック)と状態永続化(state.json/index.json の version・アトミック書き込み・マイグレーション安全側)が実装され gtest で検証される。中心体験の衝突・巻き戻し・復元を決定論的に固める。",
+      "depends_on": [5, 6],
+      "acceptance_criteria": {
+        "must": [
+          "退避結合: 保存時衝突の incoming 退避・取り込み時の conflict 退避・巻き戻し前の rollback 退避・すべて確認済みの baseline-replace 退避が発生し、復元で原内容と一致する(gtest)",
+          "index破損後に objects 走査から退避が復元できる(gtest)",
+          "確認済み: ディスク内容でベースラインを更新し未読を解除する。内容を持たない(10MB以上/画像)ファイルはハッシュベースラインのみ更新する(gtest)",
+          "巻き戻し: 退避を取れないファイル(10MB以上/画像)では巻き戻しを提供しない(非活性)判定を返す(gtest)",
+          "state.json/index.json が version を持ち、未知(新しい)version は読み込まず・書き戻さず・再生成もせず安全側に倒す。すべての永続化が一時ファイル→rename のアトミック書き込みである(gtest)"
+        ],
+        "should": [
+          "すべて確認済み: 開始時点の未読集合をフリーズし、処理中に変化したファイルはスキップ(未読のまま)、baseline-replace を batchId で一括取消できる(gtest)",
+          "退避不能ガード: 退避を取れないファイルへの破壊的操作が既定でブロックされる(gtest)"
+        ]
+      },
+      "verify": [
+        "ctest --preset x64-core-test"
+      ]
+    }
+  ]
+}

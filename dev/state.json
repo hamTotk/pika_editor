@@ -1,23 +1,10 @@
 {
-  "current_sprint": 10,
+  "current_sprint": 1,
   "iteration": 1,
-  "total_turns": 12,
+  "total_turns": 0,
   "max_turns_per_sprint": 3,
   "max_total_turns": 15,
-  "history": [
-    {"sprint": 1, "iteration": 1, "score": 100, "passed": true, "duration_sec": 600},
-    {"sprint": 2, "iteration": 1, "score": 82, "passed": false, "duration_sec": 1263},
-    {"sprint": 2, "iteration": 2, "score": 100, "passed": true, "duration_sec": 872},
-    {"sprint": 3, "iteration": 1, "score": 91, "passed": true, "duration_sec": 1524},
-    {"sprint": 4, "iteration": 1, "score": 100, "passed": true, "duration_sec": 1671},
-    {"sprint": 5, "iteration": 1, "score": 79, "passed": false, "duration_sec": 1836},
-    {"sprint": 5, "iteration": 2, "score": 95, "passed": true, "duration_sec": 1048},
-    {"sprint": 6, "iteration": 1, "score": 92, "passed": true, "duration_sec": 1035},
-    {"sprint": 7, "iteration": 1, "score": 93, "passed": true, "duration_sec": 1119},
-    {"sprint": 8, "iteration": 1, "score": 100, "passed": true, "duration_sec": 1008},
-    {"sprint": 9, "iteration": 1, "score": 100, "passed": true, "duration_sec": 876},
-    {"sprint": 10, "iteration": 1, "score": 98, "passed": true, "duration_sec": 1423}
-  ],
-  "status": "done",
-  "sprint_criteria_done": {"sprint": 10, "reviewers": ["data", "ux"]}
+  "history": [],
+  "status": "running",
+  "sprint_criteria_done": {"sprint": 1, "reviewers": []}
 }

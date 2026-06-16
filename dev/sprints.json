@@ -1,45 +1,46 @@
 {
-  "project": "pika",
+  "project": "pika (UI実装フェーズ)",
   "spec": "dev/spec.md",
   "use_playwright": false,
   "sprints": [
     {
       "id": 1,
-      "goal": "ビルド基盤が成立し、wx非依存の pika_core + util と gtest(pika_tests) が x64-core-test プリセットで構成・ビルド・テストできる。重量依存(wx/WebView2)を含まない最小構成で ctest が exit 0 を返す。",
+      "goal": "controller 層を pika_core(wx非依存)に新設し pika_tests から gtest 検証できるビルド構成を確立する。最初の wx非依存 ViewModel として『ツリー→ViewModel 変換』(core/workspace の build_tree/UnreadSet 結果を状態マーク ±/◆/取消線・伝播±淡・種別アイコン分類へ写像)を実装しテストする。これで以後の controller スプリントが決定論ゲートに乗る土台ができる。",
       "depends_on": [],
       "acceptance_criteria": {
         "must": [
-          "ルート CMakeLists.txt と vcpkg.json・vcpkg-configuration.json が存在し、x64-core-test プリセット(core/+util と gtest のみ、wx/WebView2 を含まない)が定義されている",
-          "cmake --preset x64-core-test が exit 0 で構成成立する(vcpkg manifest 解決を含む)",
-          "pika_core(静的lib, core/+util)と pika_tests(gtest) のターゲットがビルドでき、最小のスモークテスト(util のハッシュ XXH3 か簡単な算術)が ctest --preset x64-core-test で 1 件以上 PASS する",
-          "/W4・警告エラー扱いの設定下で core/util のコードが警告ゼロでビルドされる"
+          "src/controller/ が新設され、その wx非依存ソースが pika_core 静的lib に含まれる(PIKA_BUILD_GUI の影響下に置かない)。x64-core-test プリセットで pika_core がビルドできる",
+          "tests/controller/ の新規 gtest が pika_core にリンクし ctest --preset x64-core-test で実行・PASS する(従来の373件は非回帰でPASS)",
+          "TreeViewModel: core/workspace の build_tree() 結果と UnreadSet を入力に、各ノードへ状態マーク種別(差分あり=±/新規=◆/削除済み=取消線/伝播=±淡/なし)を決定論的に付与する。同一入力で同一出力(純粋関数)",
+          "状態マークの重畳優先は『削除済み ＞ 未保存 ＞ 差分あり』(ui-design 5章)に従い、テストで優先順位が観測できる",
+          "種別アイコン分類: 拡張子→カテゴリ(folder/code/data/config/script/image/text/unknown。ui-design 6章の表)へ写像し、未知拡張子は generic にフォールバックする。テストで代表拡張子の分類が観測できる",
+          "フォルダの伝播マーク: 子孫に差分ありがあるフォルダは伝播±(淡)を、自身に差分があるファイルは±(実心)を付け、両者をテストで区別できる"
         ],
         "should": [
-          "x64-release プリセット(wx を含む pika GUI exe)の CMake 構成定義が存在する(初回重量ビルドの完走は必須にしない)",
-          "ターゲット分割が design.md 12章どおり pika_core / pika / pika.com / pika_tests で定義されている",
-          ".github/workflows/ci.yml の build-test ジョブが将来 if:false を外せる前提と整合している"
+          "cmake --preset x64-release で GUI 構成が成立する(既存 build/x64-release キャッシュ前提)",
+          "ViewModel の文字列は単一のメッセージ定義(ID→日本語)経由にできる構造を用意し、生文字列を散らさない(design 10章 K9)",
+          "自然順ソート・既定除外(.git/node_modules)は core 側の natural_less/is_excluded をそのまま使い ViewModel 側で再実装しない(足さない)"
         ]
       },
       "verify": [
-        "cmake --preset x64-core-test",
         "ctest --preset x64-core-test"
       ]
     },
     {
       "id": 2,
-      "goal": "util の基盤(エンコーディング判定・往復、ハッシュ、アトミック書き込み、Result<T>、TaskRunner)が UI 非依存で実装され gtest で検証される。コア全体が依存する土台を決定論的に固める。",
+      "goal": "中心体験①『開く』のアプリケーション層を決定論で固める。AppController/データルート解決/CLI受領/単一インスタンス判定の wx非依存ロジックと、TabManager 状態機械(タブ追加・削除・アクティブ遷移・重畳状態の表示優先・消失タブの安全遷移)を controller に実装しテストする。",
       "depends_on": [1],
       "acceptance_criteria": {
         "must": [
-          "EncodingDetector: BOM(UTF-8/UTF-16 LE/BE)を最優先で判定し、BOMなしは UTF-8→Shift_JIS の順で妥当性検査する。UTF-8/BOM/UTF-16/Shift_JIS × LF/CRLF の読み込み→書き出し往復で原文のエンコーディング・BOM・改行が維持される(gtest)",
-          "書き出し時の表現可能性チェック: Shift_JIS で表現できない文字(絵文字等)を検出して保存を中断するエラーを返す(gtest)",
-          "ハッシュ: LF正規化後の内容に対する XXH3 が、CRLF/LF のみ異なる同一内容で一致する(gtest)",
-          "AtomicFile: 一時ファイル→rename のアトミック書き込みが成功し、書き込み途中でも元ファイルが破損しない経路である(gtest、テンポラリフォルダ使用)",
-          "コア公開 API が Result<T> 方式で、失敗時に例外を投げずエラー値を返す(gtest)"
+          "DataRoot 解決: portable.txt 検出により データルートを %LOCALAPPDATA%\\pika\\ と exe隣 ./pika-data/ に分岐する純粋関数を実装し、検出有無の両分岐をテストで観測できる(design 5.1・7章 K1)",
+          "CLI 受領: core/ipc の parse_argv/parse_goto(-g file:line:col・ドライブレターのコロン非分割)結果を AppController が受け取り、開くべき OpenTarget 列(絶対パス・カーソル位置)へ正規化する。相対パスの絶対化を含めテストで観測できる",
+          "単一インスタンス判定ロジック: core/ipc の make_pipe_name/serialize_request を用い、サーバー/クライアントの役割決定と転送 JSON 組み立てを wx非依存関数として実装しテストする(実パイプ I/O は sprint3 で配線)",
+          "TabManager 状態機械: タブの open/close/activate と、重畳状態(削除済み/未保存/差分あり)の表示優先(削除済み ＞ 未保存 ＞ 差分あり)を決定論的に解決する。消失タブ(パス消滅)は削除済み表示へ安全遷移しクラッシュしない。これらをテストで観測できる",
+          "ctest --preset x64-core-test が PASS する(新規テスト含め全件)"
         ],
         "should": [
-          "TaskRunner(2〜4本のワーカープール)が用意され、タスク投入と完了取得ができる",
-          "Logger がファイル内容を書かずパス・操作・エラーのみ記録する方針で実装されている"
+          "AppController の起動手順(データルート解決→CLI解析→単一インスタンス判定→表示前検証)の順序が design 5.1 と一致する",
+          "フォルダ切替(design 5.6)の状態遷移(未保存確認→後始末→新フォルダ列挙開始)を状態機械として表現しテストできる"
         ]
       },
       "verify": [
@@ -48,172 +49,141 @@
     },
     {
       "id": 3,
-      "goal": "技術リスク(b): core/watcher のイベント合成・自己保存抑制・rename正規化・バッファオーバーフロー再同期・確定読みが UI 非依存ロジックとして実装され、テンポラリフォルダを使った実FS gtest で検証される。",
+      "goal": "中心体験①『開く』の GUI/プラットフォーム配線。main_gui.cpp(現スタブ)を実体化し MainFrame(メニュー/左ツリー/タブバー/通知バー/メイン/ステータス右下)を構築、Scintilla エディタ配線、名前付きパイプ実 I/O(CreateNamedPipe を原子的ロック・敗者はクライアント転送)を配線する。sprint1/2 の ViewModel/状態機械を GUI に結線する。",
       "depends_on": [2],
       "acceptance_criteria": {
         "must": [
-          "イベント合成: 連続書き込み(短時間に複数イベント)がデバウンス(100ms目安)で 1 つの FsEvent に合成される(gtest)",
-          "自己保存抑制: 保存トークン(パス+保存後ハッシュ)に対し、現ディスク内容のハッシュが一致する場合のみ自己イベントとしてワンショット消費し、時刻窓を超えてもハッシュ一致なら抑制、内容が異なれば外部変更として扱う(gtest)",
-          "rename 正規化: old/new ペアが時間窓内に揃えば追従、揃わない場合は安全側(old単独=削除、new単独=新規、上書きrename=内容変更)に正規化する(gtest)",
-          "バッファオーバーフロー再同期: ERROR_NOTIFY_ENUM_DIR 相当の溢れ時に監視ルートを全再列挙し mtime/サイズ→ハッシュ比較で再同期して取りこぼさない(gtest)",
-          "確定読み: 静穏期間＋mtime/サイズの安定確認を満たすまで内容を確定読みせず、中途内容で確定しない(gtest)"
+          "main_gui.cpp が実体化され、MainFrame に メニューバー/左ペイン(ファイルツリー)/タブバー/通知バー領域/メイン領域/右下固定ステータス(非オーバーレイ配置。design 10章)のレイアウト骨格が配置される",
+          "ファイルツリーが wxDataViewCtrl(第一候補)で実装され、sprint1 の TreeViewModel を入力に種別アイコン+テキスト+状態マークを列内描画する。逐次追加列挙でフォルダを開ける(UIブロックしない)",
+          "Scintilla(wxStyledTextCtrl)が タブに結線され、core/document のエンコーディング/改行結果を反映してテキストを表示する。タブ/インデント設定(SCI_SETTABWIDTH/SCI_SETUSETABS)を明示し原文を変えない(design 10章 G3)",
+          "名前付きパイプ \\.\\pipe\\pika-<SID> の実 I/O を配線: CreateNamedPipe をシングルインスタンスの原子的ロックとし、獲得失敗プロセスはクライアントとして引数を絶対パス化のうえ転送し終了コード0で終了する(敗者フォールバック。design 5.1)。サーバー公開はウィンドウ表示前に完了する",
+          "cmake --build --preset x64-release がコンパイル+リンク成功する(/W4・警告エラー扱いで exit 0)。sprint1/2 の controller を GUI から呼ぶ結線を含む",
+          "ctest --preset x64-core-test が非回帰で PASS する"
         ],
         "should": [
-          "監視不能環境向けの定期ポーリング(既定5秒)フォールバックのロジックが mtime+サイズプレスクリーンを再利用して実装されている",
-          "N件(100件規模)同時変更で取りこぼしが起きないことが gtest で確認される"
+          "ステータス右下固定が WebView2/Scintilla 上で airspace 問題を起こさない非オーバーレイ配置(ビュー高さを削る)になっている(design 10章)",
+          "起動→ウィンドウ表示が最短経路(設定同期読み・状態読みのみ、ツリー列挙/監視は表示後に非同期。design 5.1)で、手動計測で500msを目標にできる構造である(手動・acceptance.md)",
+          "テーマ適用(ライト/ダーク/システム追従)の骨格が入り、ui-design 2章トークンで配色される"
         ]
       },
       "verify": [
-        "ctest --preset x64-core-test"
+        "ctest --preset x64-core-test",
+        "cmake --build --preset x64-release"
       ]
     },
     {
       "id": 4,
-      "goal": "技術リスク(c)の決定論部分: core/render のホワイトリスト方式サニタイズ・JS依存検知・外部リソース検知・CSP組み立て・レンダリング暴走ガード判定が UI/WebView2 非依存で実装され gtest で検証される。",
-      "depends_on": [2],
+      "goal": "中心体験②『外部変更を反映』のアプリケーション層と Win32 監視配線。WorkspaceController(watcher の FsEvent を受けて未読/ツリー更新、自己保存トークン照合、rename 追従)の wx非依存ロジックをテストし、ReadDirectoryChangesW の監視スレッド実体(FILE_NOTIFY_INFORMATION→RawEvent→WatcherCore::on_raw)とポーリングフォールバック/F5 を配線する。",
+      "depends_on": [3],
       "acceptance_criteria": {
         "must": [
-          "ホワイトリスト方式サニタイズ: 許可タグ・許可属性のみ通し、<script>・イベント属性(onload等)・javascript: URL・<iframe>/<object>/<embed>/<base> を除去する(gtest)",
-          "インラインSVG無害化: SVG内の script/foreignObject/イベント属性を除去する(gtest)",
-          "CSS遮断: CSS の url() と @import を遮断する(gtest)",
-          "JS依存検知(HtmlInspector): <script> タグ・Tailwind CDN 参照を検知してフラグを返す(gtest)",
-          "外部リソース検知: http(s) の画像・CSS・フォント等の外部参照を検知する(gtest)",
-          "レンダリング暴走ガード判定: 画像6000万px・SVG展開8000万px相当/要素5万・HTML要素数/ネスト深さの閾値超過を入力サイズから開始前に判定し、超過ならレンダリング不可フラグを返す(gtest)",
-          "CSP テンプレートが script-src を https://app.pika のみに限定し、リモート許可オフ時に外部 http(s) を含まない文字列を生成する(gtest)"
+          "WorkspaceController: core/watcher の poll() が返す FsEvent を受け、未読集合(UnreadSet)とツリー ViewModel を更新する手順を wx非依存ロジックとして実装する。自己保存トークン照合(ハッシュ一致を主条件・ワンショット)の消し込みをテストで観測できる(design 5.2)",
+          "rename 追従: core/workspace の apply_renames を用いて index エントリの relPath 付け替え(未読・ベースライン・退避の引き継ぎ)を行うフローを実装し、rename後に未読状態が引き継がれることをテストで観測できる(design 5.2)",
+          "ReadDirectoryChangesW 監視スレッド実体を配線: FILE_NOTIFY_INFORMATION を UTF-8/'/'区切りに正規化し TimeMs を付して RawEvent として WatcherCore::on_raw へ供給する(プラットフォーム層。実FS依存のため系統B/Cで検証)",
+          "監視不能環境のポーリングフォールバック(既定5秒)と F5 が同じ再同期処理(core/watcher resync)をオンデマンド実行する配線が入る。バッファオーバーフロー(ERROR_NOTIFY_ENUM_DIR)で全再列挙→再同期する",
+          "ctest --preset x64-core-test が PASS し、cmake --build --preset x64-release がコンパイル+リンク成功する(/W4 exit 0)"
         ],
         "should": [
-          "md4c による Markdown→HTML 変換(GFM: テーブル・タスクリスト・打消し線・自動リンク)が呼び出せる",
-          "リモートリソース許可オン時のみ CSP の img-src/font-src/style-src に http: https: を追加する切替が gtest で確認される"
+          "クリーン(未保存なし)タブへの外部変更は Scintilla 内容差し替えを単一 Undo アクションで反映し dirty にしない(design 5.2・要件7.2)。手動で Ctrl+Z 復帰を確認(acceptance.md)",
+          "監視/ポーリング実行中・F5実行中はその旨と進捗をステータス/通知バーに表示する(design 10章 F3)",
+          "監視スレッドは重い処理をせずイベント合成してキューに積むだけ(design 4章)"
         ]
       },
       "verify": [
-        "ctest --preset x64-core-test"
+        "ctest --preset x64-core-test",
+        "cmake --build --preset x64-release"
       ]
     },
     {
       "id": 5,
-      "goal": "core/snapshot のベースライン・退避の保存/復元と容量管理が実装され、データを失わない原則(index破損時の objects 走査復元を含む)が gtest で検証される。中心体験の差分・確認済みの永続基盤を固める。",
-      "depends_on": [2],
+      "goal": "中心体験③『差分』のアプリケーション層と WebView2 配線。差分モード状態機械((モード∈{ソース,分割,プレビュー})×(差分ON/OFF)の直交・占有世代(タブ,モード,diffOn)算定・自動無効化判定)を controller でテストし、共有1枚 WebView2 とプレビュー/差分HTML描画(core/render・core/diff・PreviewBuilder 配線)・仮想ホスト・CSP/サニタイズ・JS有効無効の直列切替を配線する。",
+      "depends_on": [4],
       "acceptance_criteria": {
         "must": [
-          "保存→復元の同一性: テキストを zstd 圧縮して objects に内容ハッシュ名で格納し、復元で原内容と一致する(gtest、テンポラリのデータルート使用)",
-          "退避フロー: conflict/incoming/rollback/baseline-replace の各退避が保存され、復元で原内容と一致する(gtest)",
-          "index破損復元: index.json が壊れても objects の自己記述メタ(元relPath・kind・時刻)走査から復元待ち退避一覧を提示でき、退避を失わない(gtest)",
-          "機密ファイル(.env/*.key/*.pem/*secret*)は内容(object)を保存せず baselineHash のみ記録する(gtest)",
-          "容量管理: ファイルごと最新10件の LRU と容量GC(既定500MB)・90日GC が、未復元かつ14日以内の退避を保護対象から削除しない(gtest)",
-          "object の物理削除が mark-and-sweep(どの baselineHash・stash.hash からも未参照を確認)で共有実体を誤削除しない(gtest)"
+          "差分モード状態機械: (モード ソース/分割/プレビュー)×(差分 ON/OFF)の直交組合せと、各組合せでの描画面構成(ソース+差分ON=差分面のみ/分割+差分ON=エディタ+差分面/プレビュー+差分ON=1枚WebView内左右grid)を決定論的に解決する。占有世代を(タブ,モード,diffON)の組で算定する。これらをテストで観測できる(ui-design 8章・design 6章)",
+          "差分トグルの自動無効化: 10MB超・WebView2不在・ベースライン未取得のとき差分トグルを無効化し理由を返す純粋ロジックを実装しテストする(ui-design 8/15章 Partial)",
+          "共有1枚 WebView2 を配線し、core/render の render_markdown 結果(サニタイズ済HTML)・core/diff の DiffResult を PreviewBuilder 経由で unified 差分HTML(+/-記号クラス必須・色非依存)として表示する。タブ/モード/差分切替で再ナビゲートし占有世代を再照合する(design 5.5・6章)",
+          "仮想ホスト app.pika(同梱アセット)/doc.pika(カスタムリソースハンドラで親フォルダ配下のみ・../遮断)を配線し、CSP テンプレート(default-src 'none'・script-src https://app.pika・base-uri/form-action/frame-ancestors 'none')を適用する。Markdownプレビュー/差分=JS有効、HTMLプレビュー=JS無効を直列(ナビゲート完了待ち)で切替え前モード残留を防ぐ(design 6章 C5)",
+          "cmake --build --preset x64-release がコンパイル+リンク成功し(/W4 exit 0)、ctest --preset x64-core-test が PASS する"
         ],
         "should": [
-          "ワークスペース内に管理ファイル(.pika 等)を一切作らないことが gtest で確認される",
-          "起動時未読判定が mtime+サイズプレスクリーン→不一致のみハッシュ比較で動く",
-          "snapshots/index/objects が本人のみアクセス可能な ACL で作成される方針が実装されている"
+          "TrySuspend アイドル回収(全タブ非プレビュー一定時間でサスペンド)の配線が入り、Resume レイテンシ300msは手動計測で確認(acceptance.md・design 6章 DEC-02)",
+          "ナビゲーションインターセプト(wxEVT_WEBVIEW_NAVIGATING を全キャンセルし pika 側振り分け)・スクロール同期(data-line 線形補間)・プレビュー内検索(WebView2 Find)を配線する",
+          "差分計算・プレビュー変換は TaskRunner(ワーカー)で実行し UIを200ms以上ブロックしない(design 4章)。差分は開始前サイズ/編集距離ガードを通す(core 既実装を利用)"
         ]
       },
       "verify": [
-        "ctest --preset x64-core-test"
+        "ctest --preset x64-core-test",
+        "cmake --build --preset x64-release"
       ]
     },
     {
       "id": 6,
-      "goal": "core/diff の行差分(dtl/Myers)と行内の単語/文字単位ハイライト、累積差分の基盤が実装され、LF正規化照合・大規模入力ガード・色非依存(+/-)出力が gtest で検証される。",
-      "depends_on": [2],
+      "goal": "中心体験④『確認済みにする』と保存・衝突退避の結線。確認済み/すべて確認済み/巻き戻し(core/document ReviewFlow × core/snapshot SnapshotStore)を DocumentController から呼ぶフローと、保存(衝突検知→incoming退避→アトミック置換)を実装。退避結合の Result を握り潰さず通知バー/ログへ変換することを必須にし『データを失わない』を UI 側でも死守する。",
+      "depends_on": [5],
       "acceptance_criteria": {
         "must": [
-          "行差分: ベースライン内容 vs 現在内容を LF正規化後に行分割して Myers 差分を計算し、追加/削除/変更行を返す(gtest)",
-          "改行のみの差: CRLF/LF のみ異なる同一内容で差分が空になる(gtest)",
-          "行内ハイライト: 空白区切りトークンの LCS で変更語を特定し、トークン境界が取れない日本語等では文字単位 LCS にフォールバックする(gtest)",
-          "色非依存出力: 各差分行に追加/削除を示す +/- 記号クラスが必ず付与される(gtest)",
-          "大規模入力ガード: 行数・最長行長が上限超過(10MB以上相当)なら計算を開始せずフォールバック結果を返す(別スレッド中断に頼らない)(gtest)"
+          "DocumentController: ReviewFlow.confirm / confirm_all / rollback と SnapshotStore を結線した確認済みフローを wx非依存ロジックとして実装し、確認済みで未読集合から除去・ツリー/タブのマーク解除がされることをテストで観測できる(design 5.4)",
+          "退避結合の戻り値(Result<T>)を握り潰さない: confirm_all の baseline-replace 退避や保存時 incoming 退避が失敗したとき、ベースラインを更新せず(未読維持)エラーを通知/ログ用の結果として返すことをテストで観測できる(『データを失わない』最上位原則。前回 report 持ち越し #5 の UI 側ガード)",
+          "保存フロー: 保存前に現ディスク実内容ハッシュを再計算し、最後の読み込み時点と異なれば衝突として ディスク内容を incoming 退避してから上書きする手順を実装。表現不能文字は保存中断、退避不能(10MB超等)は既定ブロックする判定をテストで観測できる(design 5.3)",
+          "ショートカット割当表: フォーカス別ディスパッチ(Ctrl+Enter=差分/プレビュー時・Ctrl+Shift+Enter=エディタ時・Ctrl+Alt+Enter=一括確認。design 10章 J3)を決定論テーブルとして実装しテストする",
+          "cmake --build --preset x64-release がコンパイル+リンク成功し(/W4 exit 0)、ctest --preset x64-core-test が PASS する"
         ],
         "should": [
-          "空ファイル・全行追加(新規=ベースラインなし)・全行削除の境界が正しく扱われる(gtest)",
-          "差分計算がキャンセル可能(協調キャンセルのアトミックフラグ)である"
+          "ファイル単位の巻き戻し(rollback 退避→ベースライン内容で上書き→バッファ再読込)とフォルダ単位の一括確認(同一API)をメニュー/ツリー右クリックから起動できる(design 5.4・10章 J6)",
+          "確認済み確定直前に mtime/ハッシュを再照合し不一致なら中断・再差分する(ユーザーが見ていない内容をベースライン化しない。design 5.4 E2)",
+          "保存は一時ファイル→ReplaceFile のアトミック書き込み(属性/ACL維持)で行う(design 5.3)"
         ]
       },
       "verify": [
-        "ctest --preset x64-core-test"
+        "ctest --preset x64-core-test",
+        "cmake --build --preset x64-release"
       ]
     },
     {
       "id": 7,
-      "goal": "CLI とシングルインスタンスの引数解釈・転送ロジック(pika.com スタブ含む)が実装され、-g パース・引数検証・終了コード・IPC スキーマ検証が gtest で検証される。エージェント向けAPIの土台を貫通させる。",
-      "depends_on": [2],
+      "goal": "周辺機能の肉付け(縦切り貫通後)。検索/置換 UI(core/search 配線)、状態復元の組み立て(state.json→AppState→タブ/ツリー展開/モード/差分/ペイン収納の再構成)、settings.toml 監視反映(core/settings 配線・読み取り専用)、最近使った項目/ジャンプリスト、通知バー集約 ViewModel(最大3本+他N件・優先順位・集約)を実装する。controller/ViewModel 部分を決定論テストする。",
+      "depends_on": [6],
       "acceptance_criteria": {
         "must": [
-          "-g パース: `<file>:<行>[:<桁>]` を末尾から剥がし、ドライブレター直後のコロン(C:\\)を分割せず、桁省略は行頭、整数でない行/桁は位置指定無視でパスとして解釈する(gtest)",
-          "引数検証: 存在しないフォルダはエラー(非0)、存在しないファイルパスは新規タブ扱いとして受理する分類ロジックを返す(gtest)",
-          "相対パス正規化: クライアント側で呼び出し元 CWD 基準に絶対パス正規化してから転送する(gtest)",
-          "IPC スキーマ検証: 受信 JSON(1行・最大数KB)がスキーマに合わないデータを破棄し、受理操作をパス引数のオープンに限定する(gtest)",
-          "終了コード規約: 受理=0(転送受理はファイルが開かれた保証ではない)、不正引数=非0 を返す分類が gtest で確認される"
+          "状態復元の組み立て: core/state の AppState(window/tabs/activeTab/treeExpanded/treePaneCollapsed/modeByType/diffOn/theme/recent)から UI 復元用の構造を決定論的に再構成する純粋ロジックを実装。欠落フィールドは安全な既定値(diffOn=false・treePaneCollapsed=false)で補完し、未知 version は読まない/書き戻さない安全側に倒す(design 7章 K2)。これらをテストで観測できる",
+          "通知バー集約 ViewModel: 最大3本+『他N件』集約、優先順位(衝突 ＞ 設定エラー ＞ 外部リソース参照 ＞ JS検知 ＞ 巨大ファイル)、同一ファイル/同一種別の最新集約、タブ固有/グローバルの切替を決定論的に解決しテストで観測できる(design 10章 J1)",
+          "検索/置換ロジックの結線: core/search の SearchEngine(find_all/replace_all・PCRE2・キャンセル)を呼ぶ DocumentController フローを実装し、検索結果のカーソル遷移・置換適用を決定論部分でテストする(UI パネル描画は系統B)",
+          "settings.toml 監視反映: core/settings の load_settings 結果(不正値は既定フォールバック+警告)を UI 設定へ反映する純粋写像を実装しテストする。pika は settings.toml に書き戻さない(読み取り専用)",
+          "cmake --build --preset x64-release がコンパイル+リンク成功し(/W4 exit 0)、ctest --preset x64-core-test が PASS する"
         ],
         "should": [
-          "pika.com コンソールスタブの --help/--version 出力がパイプ・リダイレクトで欠落・文字化けせず取得できる",
-          "名前付きパイプ \\\\.\\pipe\\pika-<SID> の DACL(作成者のみ)＋PIPE_REJECT_REMOTE_CLIENTS の設定方針が実装されている"
+          "最近使った項目(最大20件)・ジャンプリスト更新の配線、引数なし起動での完全復元(消失タブは削除済み表示・ワークスペース消失は空状態へ)",
+          "テーマ解決の現在値(システム追従の解決結果)を state.json に保持し wxSysColourChangedEvent で再起動なし再適用する",
+          "巨大ファイル段階制(10MB/200MB/2GB)・第2段階の置換UI無効化を DocState フラグ参照で分散させず判定する(design 10章 G4)"
         ]
       },
       "verify": [
-        "ctest --preset x64-core-test"
+        "ctest --preset x64-core-test",
+        "cmake --build --preset x64-release"
       ]
     },
     {
       "id": 8,
-      "goal": "core/settings と core/workspace が実装され、settings.toml の読み取り専用・不正値フォールバック、ツリーモデル(自然順・除外リスト)・未読集合・rename引き継ぎが gtest で検証される。",
-      "depends_on": [3, 5],
+      "goal": "エッジケース・画像簡易ビュー・GUI 統合と手動 acceptance の整備。ラスター画像の wxImage 簡易ビュー(WebView2不使用・ピクセル数ガード)、読み取り専用/権限/ネットワークドライブ/クラウドプレースホルダの縮退表示、診断ログ(内容を書かない)を配線し、docs/acceptance.md に視覚・実挙動の手動チェックリストを整備する(系統C)。",
+      "depends_on": [7],
       "acceptance_criteria": {
         "must": [
-          "settings: settings.toml を読み取り専用(書き戻さない)で読み込み、不正な値は既定値にフォールバックして警告フラグを返し、起動不能にしない(gtest)",
-          "settings: 保存途中の不完全な TOML でパース失敗時は直前の有効値を維持する(gtest)",
-          "workspace ツリー: フォルダ先行・自然順ソート(file2 が file10 より前)が成立する(gtest)",
-          "workspace 除外: 既定除外リスト(.git/node_modules)が非表示かつ監視対象外になる(gtest)",
-          "未読の rename 引き継ぎ: リネーム/移動で未読・ベースライン・退避を引き継ぎ、対応付け不能時は最終ディスク内容で再判定する(gtest)"
+          "縮退判定ロジック: 読み取り専用/権限なし/シンボリックリンク循環/ネットワークドライブ/クラウドプレースホルダ(FILE_ATTRIBUTE_OFFLINE/RECALL_ON_DATA_ACCESS)/画像ピクセル数超過 の各ケースを、機能を縮退してアプリ継続+次の一手提示へ写像する決定論ロジックを実装しテストで観測できる(ui-design 15章 Partial/Error・design 7章・10章)",
+          "ビュー別5状態(Ideal/Empty/Loading/Partial/Error)の状態解決を ViewModel として実装し、Empty の3分岐(フォルダ未オープン/検索0件/消化後)で文言が変わることをテストで観測できる(ui-design 15章・要件10章)",
+          "docs/acceptance.md に系統C(手動)チェックリストを整備する: 起動500ms・TrySuspend再表示300ms・WebView2実描画・JS有効無効切替の順序保証・Scintilla実編集・ライブリロード実動・画像簡易ビュー実描画・requirements 各章受け入れ基準。各項目に対応する requirements/design 節を併記する",
+          "cmake --build --preset x64-release がコンパイル+リンク成功し(/W4 exit 0)、ctest --preset x64-core-test が PASS する"
         ],
         "should": [
-          "子孫に未読があるフォルダの伝播未読と、ファイル自身の未読が区別できるモデルである(gtest)",
-          "除外リスト・閾値等の設定項目が settings から取得できる"
+          "ラスター画像簡易ビュー(wxImage+自前描画・WebView2起動しない)を配線し、ヘッダ寸法で総ピクセル数ガード超過時はデコードせず外部アプリ誘導する(design 10章 B3)。実描画は手動確認(acceptance.md)",
+          "診断ログ(error/warn/info・既定warn以上・ユーザーのファイル内容を書かない・5MB×3世代)を配線する(design 9章・要件12.3)",
+          "About 画面に同梱サードパーティ OSS のライセンス表示(assets/THIRD_PARTY_NOTICES)を載せる(design 10章 K6)",
+          "中心体験(開く→外部変更反映→差分→確認済み)がキーボードのみで完結する(F6/Shift+F6 フォーカス循環。ui-design 13章)。手動確認(acceptance.md)"
         ]
       },
       "verify": [
-        "ctest --preset x64-core-test"
-      ]
-    },
-    {
-      "id": 9,
-      "goal": "core/search(PCRE2)の検索・置換エンジンが実装され、後方参照・キャプチャ参照・Unicode文字クラス・正規表現置換・巨大入力のキャンセル可能性が gtest で検証される。",
-      "depends_on": [2],
-      "acceptance_criteria": {
-        "must": [
-          "検索: インクリメンタル・大文字小文字区別・単語単位・正規表現・全ヒット列挙とヒット件数を返す(gtest)",
-          "正規表現置換: キャプチャ参照(後方参照)を用いた全置換が正しく結果を返す(gtest)",
-          "Unicode文字クラス: PCRE2(pcre2-16/UTF対応)で Unicode 文字クラスを含むパターンがマッチする(gtest)",
-          "巨大/長行入力の検索・全置換がキャンセル可能な処理として実装され、協調キャンセルで中断できる(gtest)"
-        ],
-        "should": [
-          "第2段階(200MB超相当)の読み取り専用では置換が無効化される判定がある"
-        ]
-      },
-      "verify": [
-        "ctest --preset x64-core-test"
-      ]
-    },
-    {
-      "id": 10,
-      "goal": "退避フロー結合(DocumentController×snapshot 相当のコアロジック)と状態永続化(state.json/index.json の version・アトミック書き込み・マイグレーション安全側)が実装され gtest で検証される。中心体験の衝突・巻き戻し・復元を決定論的に固める。",
-      "depends_on": [5, 6],
-      "acceptance_criteria": {
-        "must": [
-          "退避結合: 保存時衝突の incoming 退避・取り込み時の conflict 退避・巻き戻し前の rollback 退避・すべて確認済みの baseline-replace 退避が発生し、復元で原内容と一致する(gtest)",
-          "index破損後に objects 走査から退避が復元できる(gtest)",
-          "確認済み: ディスク内容でベースラインを更新し未読を解除する。内容を持たない(10MB以上/画像)ファイルはハッシュベースラインのみ更新する(gtest)",
-          "巻き戻し: 退避を取れないファイル(10MB以上/画像)では巻き戻しを提供しない(非活性)判定を返す(gtest)",
-          "state.json/index.json が version を持ち、未知(新しい)version は読み込まず・書き戻さず・再生成もせず安全側に倒す。すべての永続化が一時ファイル→rename のアトミック書き込みである(gtest)"
-        ],
-        "should": [
-          "すべて確認済み: 開始時点の未読集合をフリーズし、処理中に変化したファイルはスキップ(未読のまま)、baseline-replace を batchId で一括取消できる(gtest)",
-          "退避不能ガード: 退避を取れないファイルへの破壊的操作が既定でブロックされる(gtest)"
-        ]
-      },
-      "verify": [
-        "ctest --preset x64-core-test"
+        "ctest --preset x64-core-test",
+        "cmake --build --preset x64-release"
       ]
     }
   ]

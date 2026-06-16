@@ -1,14 +1,16 @@
-# pika — 開発スプリント仕様（spec.md）
+# pika — UI実装フェーズ 開発スプリント仕様（spec.md）
 
 ## 出典（source_doc）
 
 本仕様は以下の正典ドキュメントを正として整形したものである（元ドキュメントは書き換えない／Read のみ）。
-迷ったら上位の意図に従い、詳細は下位を見る。要件の可否は requirements.md を正とする。
+要件の可否は requirements.md を正とし、迷ったら上位の意図に従う。
 
-1. `C:\dev\pika_editor\docs\minimal-plan.md` — コンセプト・スコープの根拠
-2. `C:\dev\pika_editor\docs\requirements.md` — 要件の正（全14章＋各章「受け入れ基準」）
-3. `C:\dev\pika_editor\docs\design.md` — 設計（12章リポジトリ構成・13章テスト方針・14章実装順序・15章判断ガイド）
-4. `C:\dev\pika_editor\CLAUDE.md` — プロジェクト指示（設計原則の優先順位・確定済み判断）
+1. `C:\dev\pika_editor\docs\requirements.md` — 要件の正（全14章＋各章「受け入れ基準」）。本フェーズで主に効くのは 4・5・6・7・8・10・11・12章
+2. `C:\dev\pika_editor\docs\design.md` — 設計（2章レイヤー依存・5章主要フロー・6章WebView2・10章UI補足・11章性能・13章テスト方針・14章実装順序）
+3. `C:\dev\pika_editor\docs\ui-design.md` — **UI視覚仕様の正典**（配色トークン・タイポ・状態記号〔差分あり ±／新規 ◆／削除済み 取消線〕・ファイルタイプアイコン・ステータス右下固定・差分3モード+トグルUI・15章ビュー別5状態）
+4. `C:\dev\pika_editor\docs\ui-mock.html` — モック実体
+5. `C:\dev\pika_editor\CLAUDE.md` — プロジェクト指示（設計原則の優先順位・確定済み判断）
+6. `C:\dev\pika_editor\dev-core-2026-06-16\spec.md` / `report.md` — **前回（コア層）run-dev の到達点**。何が実装・テスト済みかの基準（土台）
 
 設計原則の優先順位（CLAUDE.md / design.md 1章。スプリント設計はこれに従う）:
 **データを失わない ＞ 固まらない ＞ 軽い ＞ 足さない ＞ 速く作る**
@@ -17,135 +19,167 @@
 
 ## 目的
 
-Windows 11 x64 向けの超軽量 Markdown/HTML エディタ「pika」を作る。AIエージェントが生成・編集した
-テキストファイルを、人間が即時に確認・差分レビューしながら軽く修正するための伴走ツール。VS Code/IDE の
-代替ではなく「見る・確認する・少し直す」に集中する。UI言語は日本語のみ、CLIコマンド名は `pika`。
+Windows 11 x64 向けの超軽量 Markdown/HTML エディタ「pika」の **UI層・アプリケーション層・プラットフォーム層**を
+実装する。前回 run-dev で wx 非依存のコアサービス層（`src/core/` ＋ `src/util`）は決定論的に固まった
+（gtest 373 件 PASS）。本フェーズはそのコア API の上に、ユーザーが直接触る GUI と、それを駆動する
+アプリケーション層（controller / ViewModel / 状態機械）、および Win32 I/O 実体（プラットフォーム層）を積む。
 
-中心体験（最優先で貫通させる縦切り。design.md 14章）:
-1. AIエージェントがファイルを生成・編集する
-2. エディタが外部変更を即時反映し、変更ファイルをツリー上に未読表示する
-3. Markdown/HTML をリアルタイムプレビューする
-4. 前回確認時点からの累積差分（既読モデル）を赤/緑で確認し、確認済みにする
-5. 必要に応じて人間が軽く修正して保存する
-
----
-
-## 機能一覧（requirements.md の章に対応。スプリント化対象）
-
-- **ビルド基盤**（design.md 12章）: CMake + vcpkg manifest、ターゲット分割 `pika_core`（wx非依存・`core/`＋`util`）/ `pika`（GUI exe）/ `pika.com`（コンソールスタブ）/ `pika_tests`（gtest）。Debug/Release、`/W4`・警告エラー扱い・Release は `/MT`・`/O2`・LTCG
-- **CLI（エージェント向けAPI / req 3章）**: `pika <パス>...`、引数なし=前回状態復元、`pika -g <file>:<行>[:<桁>]`（VS Code互換・ドライブレターのコロン非分割）、`--help`/`--version`。シングルインスタンス（名前付きパイプ `\\.\pipe\pika-<SID>`・DACL＋`PIPE_REJECT_REMOTE_CLIENTS`・JSON引数転送）。終了コード（0=受理、非0=エラー）。相対パスはクライアント側で絶対パス正規化
-- **ファイルツリーと未読表示（req 4章）**: フォルダ先行・自然順ソート、既定除外（`.git`/`node_modules`）、未読バッジ（ファイル自身／子孫伝播を区別）、自己保存は未読化しない（保存後ハッシュ一致が必須条件）、リネーム/移動での未読・ベースライン・退避の引き継ぎ、セッション跨ぎ保持
-- **エディタ・タブ・検索・保存（req 5章）**: Scintilla（wxStyledTextCtrl）、タブ/スペース原文維持・保存時非正規化、エンコーディング自動判定（BOM優先→UTF-8/Shift_JIS妥当性検査）と往復維持、表現不能文字の保存中断、混在改行の維持、複数タブ（未読/未保存/削除済みの重畳表示優先順位）、検索（PCRE2・後方参照/キャプチャ参照/Unicode文字クラス）・置換、巨大ファイル段階制（10MB/200MB/2GB）・行長ガード
-- **プレビュー（req 6章）**: 4モード（プレビューのみ/分割/ソースのみ/差分）、md4c GFM、Mermaid/KaTeX/コードハイライト同梱・遅延読み込み・オフライン、ローカル画像・壊れた参照プレースホルダ、リモートリソース既定オフ（オプトイン）、ホワイトリスト方式サニタイズ＋CSP（`script-src https://app.pika` のみ）、HTMLプレビューは JS無効・仮想ホスト `doc.pika` 経由・`file:///` 直開き禁止、JS検知時の「既定のブラウザで開く」導線
-- **外部変更の反映と衝突処理（req 7章）**: `ReadDirectoryChangesW` 監視＋デバウンス100ms・イベント合成、自己保存抑制（ハッシュ一致主条件・ワンショット・時刻窓は補助）、アトミック置換（rename）検知、確定読み（静穏期間＋mtime/サイズ安定）、バッファオーバーフロー再同期、監視不能環境のポーリングフォールバック（5秒）＋F5、クリーン時自動リロード（単一Undo境界・dirtyにしない）、衝突時の退避（conflict/incoming）・通知バー、退避不能ガード（既定ブロック）、自動マージなし
-- **差分表示と既読（req 8章）**: 既読ベースライン（初回オープン=全既読、確認済みで更新）、累積差分（前回確認時点→現在）、dtl（Myers）行差分＋単語/文字単位ハイライト、LF正規化後の照合（改行のみの差は出さない）、unified（インライン）表示・+/- 記号併用（色非依存）、確認済み操作・「すべて確認済み」（baseline-replace 退避・一括取消）・ファイル単位の巻き戻し（rollback 退避）、差分は読み取り専用・ワーカー計算・10MB以上自動オフ
-- **スナップショット（req 9章）**: データルート配下 `snapshots\<wsKey>\`（`index.json` ＋ `objects\<hash>` zstd圧縮・XXH3重複排除）、ワークスペースを汚さない（`.pika` 等を一切作らない）、機密ファイル（`.env`/`*.key`/`*.pem`/`*secret*`）はハッシュのみ記録、退避の自己記述メタ（index破損時に objects 走査で復元待ち一覧）、容量管理（件数LRU・容量GC500MB・90日GC・未復元退避14日保護・mark-and-sweep）、起動時未読判定（mtime+サイズ→不一致のみハッシュ）、ACL（本人のみ）
-- **状態復元・最近使った項目・設定（req 10章）**: `state.json`（窓・タブ・カーソル・スクロール・モード・ツリー展開・テーマ現在値・最近20件）、引数なし起動で完全復元、消失タブの安全遷移、`settings.toml`（`%APPDATA%\pika\`・読み取り専用＝pikaは書き戻さない・即時反映・不正値は既定フォールバック＋警告）、ジャンプリスト
-- **UI構成（req 11章）**: メニュー/左ツリー/タブバー/通知バー（最大3本＋「他N件」・優先順位・集約）/メイン領域/ステータスバー、ツールバーなし、ショートカット初期割当（カスタマイズなし）、テーマ（ライト/ダーク/システム追従・HTMLプレビューは非適用）、アクセシビリティ（色非依存・F6フォーカス移動・ハイコントラスト・スクリーンリーダ）
-- **エッジケース・エラー処理（req 12章）**: 読み取り専用/権限なし/シンボリックリンク循環/ネットワークドライブ/クラウドプレースホルダ（オフライン属性除外）/フォルダ削除/クラッシュ耐性（アトミック書き込み）/ロック残留、画像簡易ビュー（wxImage・WebView2不使用・ピクセル数ガード）、診断ログ（内容を書かない）
-- **配布・インストール（req 13章）**: ユーザー単位インストーラー（Inno Setup）＋ポータブルzip、データルート解決（`portable.txt` で `./pika-data/` 切替・既定 `%LOCALAPPDATA%\pika\`）、エクスプローラー統合（`HKCU\Software\Classes`・オプトアウト・ポータブルは非登録）、state/index の version 単調増加・未知versionは安全側、サードパーティライセンス同梱、コード署名なし（SmartScreen回避手順）、自動更新なし
+中心体験（最優先で貫通させる縦切り。design.md 14章2）:
+1. **開く** — フォルダ/ファイルを開き、ツリーに表示・タブで開く（CLI `pika <path>` / 単一インスタンス転送）
+2. **外部変更を反映** — AIエージェントの編集を `ReadDirectoryChangesW` 監視で即時反映し、ツリーに差分あり（未読）マーク
+3. **差分** — 前回確認時点からの累積差分を WebView2 で赤/緑＋記号表示（3モード × 差分トグル直交）
+4. **確認済みにする** — ベースラインを更新して差分マークを解除（退避が最後の砦）
+5. 必要に応じて人間が軽く修正して保存する（Scintilla 編集・エンコーディング往復・衝突退避）
 
 ---
 
-## 非対象（初期版でやらないこと。req 14章＋minimal-plan.md 14章。スプリント対象外として保全）
+## 検証戦略（本フェーズの核。verify 二系統 — 補完判断1で根拠を詳述）
 
-スプリント化しないが、要望に含まれていた要素を情報落ちさせないためここに残す。実装中にこれらを
-足したくなったら、実装せず要件改訂を提案する（design.md 15章・CLAUDE.md 設計原則「足さない」）。
+ユーザーの明示方針「ビジュアルは最後に回す／可能な範囲でゲートをチェック」を次の二系統に具体化する。
 
-- IDE機能 / Gitクライアント / Git差分・Git状態管理 / 内蔵AI / AIチャット / プロジェクト管理 /
-  ビルド・実行・デバッグ / 本格コード編集 / 複雑な履歴管理・永続的バージョン管理 / 自動バックアップ
-- 任意JavaScript実行（ユーザー文書由来のJS。pika同梱の信頼済みJS〔Mermaid/KaTeX/ハイライト〕は別扱い）
-- プラグイン機構（公式・外部とも。取捨選択は内部モジュール＋設定トグルで実現）
-- WYSIWYG編集（ソース編集＋リアルタイムプレビューを優先）
-- フォルダ横断検索（grep）
-- ホットエグジット（未保存のまま終了・復元）
-- GUI設定画面（settings.toml 直編集で代替）
-- 自動更新
-- サイドバイサイド差分 / レンダリング済みプレビュー上の差分
-- 「次の未読ファイルへ」ジャンプ
-- 複数ウィンドウ・複数フォルダ同時オープン
-- CLI の `--wait` オプション
-- キーボードショートカットのカスタマイズ
-- 永続Undo
-- 画像の編集・変換
-- 日本語以外のUI言語（文言リソース一元管理で将来対応の余地のみ確保）
-- ARM64ネイティブビルド（x64エミュレーションでの動作は妨げない／検証対象外）
-- 外部 `.css` ファイルの読み込み・反映（資料用途AI生成HTMLは自己完結が規約のため）
-- セクション（見出し）単位の既読 / ハンク単位の採用・却下のような高度レビュー / ハンク採否
-- サンドボックス付きJS実行 / MCP等のプロトコル連携 / セクション単位既読（いずれも将来検討）
+### 系統A：決定論ゲート（各スプリントの **must verify**・主要品質シグナル）
 
----
+UI に依存しないアプリケーション層ロジック（controller / ViewModel / 状態機械）を **wx 非依存のユニット**として
+`src/controller/` に切り出し、`pika_core`（wx 非依存静的lib）に含めて `pika_tests`（gtest）から検証する。
+対象例（design.md 2章・10章・ui-design.md 5/8章から導出）:
 
-## 補完した判断（元ドキュメントの不足・現状制約に対し、推測せず planner が明示した判断）
+- **タブモデル / TabManager 状態機械** — 重畳状態の表示優先（削除済み ＞ 未保存 ＞ 差分あり。ui-design 5章）、
+  タブ追加/削除/アクティブ遷移、消失タブの安全遷移（design 5.1手順4）
+- **通知バー集約 ViewModel** — 最大3本＋「他N件」、優先順位（衝突 ＞ 設定エラー ＞ 外部リソース ＞ JS検知 ＞ 巨大ファイル）、
+  同一ファイル・同一種別の最新集約、タブ固有/グローバルの切替（design 10章 J1）
+- **テーマ解決** — ライト/ダーク/システム追従の解決結果・トークン解決（ui-design 2/12章）、`state.json.theme.current` への保持
+- **差分モード状態機械** — (モード∈{ソース,分割,プレビュー}) × (差分ON/OFF) の直交組合せ、占有世代 (タブ,モード,diffOn) の算定、
+  巨大ファイル/WebView2不在/ベースライン未取得での差分トグル自動無効化＋理由（ui-design 8章・design 6章）
+- **ツリー → ViewModel 変換** — `build_tree()`/`UnreadSet` の結果を状態マーク（±/◆/取消線・伝播 ±淡）と種別アイコン分類へ写像（ui-design 5/6章）
+- **状態復元の組み立て** — `state.json` の AppState からタブ/ツリー展開/モード/差分/ペイン収納を再構成（design 7章・5.1）
+- **ショートカット割当表** — フォーカス別ディスパッチ表（Ctrl+Enter＝差分/プレビュー時、Ctrl+Shift+Enter＝エディタ時、Ctrl+Alt+Enter＝一括。design 10章 J3）
+- **CLI/データルート解決ロジック** — `portable.txt` 検出によるデータルート分岐（純粋関数化。design 5.1・7章 K1）
 
-正典ドキュメントは「どう作るか」までは定めるが、**スプリント分割と verify 手段の確定は次フェーズ**
-（design.md 14章「スプリント分割は次フェーズで行う」）。本仕様で以下を補完する。後からのドリフト追跡用に
-根拠を残す。
+→ **must verify**: `ctest --preset x64-core-test`（exit 0 で合格）。ループが進むほど合否判定が決定論側に寄る担保。
 
-1. **現状リポジトリには実装基盤が存在しない**。実在するのは `docs/`・`CLAUDE.md`・`.claude/`・
-   `.github/`・`.clang-format`・`.gitattributes`・`.gitignore` のみで、`CMakeLists.txt`・`vcpkg.json`・
-   `vcpkg-configuration.json`・`src/`・`tests/` はいずれも未作成（Glob で確認済み）。したがって
-   **sprint 1 はビルド基盤の整備から始める**（design.md 12章のターゲット分割・vcpkg manifest を実体化し、
-   最小の `pika_core`＋`pika_tests` が ctest で通る最小構成を作る）。これは design.md 14章の「技術リスク
-   スパイク」より前に必要な前提であり、リスクスパイクは sprint 2 以降に置く。
+### 系統B：GUI 配線ビルドゲート（GUI スプリントの **must verify**・ユニットテスト不能部分）
 
-2. **重量依存（wxWidgets/WebView2）の vcpkg 初回ビルドは run-dev の verify timeout（15分/コマンド）を
-   超えるリスクが高い**。そこで verify を二系統に分ける（design.md 13章「自動単体テストの対象は core/・
-   util」「UIの自動テストは初期版では持たない」と整合）:
-   - **core-test 系（各スプリントの必須 verify）**: wx非依存の `pika_core`＋`util` と `pika_tests`（gtest）
-     を対象にした軽量プリセット `x64-core-test` を用意し、`ctest --preset x64-core-test` を必須 verify と
-     する。依存は md4c・dtl・pcre2・zstd・xxhash・toml11・gtest のみ（いずれも小サイズの C/C++ ライブラリ
-     で wx/WebView2 を含まない）。これが「ループが進むほど合否判定が決定論側に寄る」担保。
-   - **full 系（GUI スプリント。verify 必須に含めない）**: wx を含む `x64-release` プリセットでの
-     `pika` exe ビルドは、初回の重量依存ビルドが timeout を超えうるため **acceptance_criteria の must に
-     しない**。GUI 実機確認は should、または `docs/acceptance.md` の手動チェックリスト側へ寄せる。
-   - sprint 1 の verify には full ビルド到達性を **should** に留め、必須は core-test の成立とする。
+wx/Scintilla/WebView2 の実配線（`src/ui/`・`src/app/` の wx 依存部）はユニットテストできないため、
+**コンパイル＋リンク成立**（`/W4`・警告エラー扱い）をゲートにする。wx・WebView2 は vcpkg 導入済み・ビルド済み
+（`build/x64-release` に `pika.exe` 生成済み・依存1.5GBキャッシュ済み）のため増分ビルドは高速で、verify timeout（15分/コマンド）に収まる。
 
-3. **技術リスク3点のスパイク（design.md 14章: (a) wx＋Scintilla＋WebView2 共存と起動500ms・
-   `TrySuspend` 再表示300ms、(b) watcher のイベント合成・自己保存抑制・バッファオーバーフロー再同期、
-   (c) WebView2 の仮想ホスト＋サニタイズ＋JS有効/無効の高速切替の順序保証）は、verify を「該当コア
-   ロジックの gtest が通る」「UI非依存で単体テスト可能」に寄せる**。(b)（watcher）と (c) のサニタイズ・
-   検知判定（`HtmlInspector`・`MarkdownRenderer`）・CSP組み立ては wx非依存のコアに切り出せるため
-   `pika_tests` で決定論検証できる（must）。(a) と (c) のうち WebView2 実機での順序保証・Resume
-   レイテンシは GUI 実機が要るため should / 手動チェックリスト側へ（補完判断2に従う）。
+→ **must verify（GUI 配線スプリントのみ）**: `cmake --build --preset x64-release`（exit 0＝コンパイル＋リンク成功）。
+必須の構成成立確認には `cmake --preset x64-release` も併用する。
 
-4. **verify コマンドは Windows/PowerShell・Bash 双方から実行されうる**。CMake プリセット
-   （`cmake --preset` / `cmake --build --preset` / `ctest --preset`）はシェル非依存で同一に動くため
-   これを採用する（.claude/settings.json で既に allow 済み）。既存の `.github/workflows/ci.yml` も
-   `x64-release` プリセット・`pika_core`/`pika_tests` 分割を前提にしているため、本スプリント設計は
-   それと整合する（CI 雛形の `build-test` ジョブの `if: false` を将来外せる構成にする）。
+### 系統C：視覚・挙動の手動確認（must verify に載せない。should / 最終スプリント手動項目）
 
-5. **編集直後の post-edit hook 制約**: JSON は `JSON.parse`、C++ は `clang-format --dry-run --Werror`
-   で検査される（`.claude/hooks/post-edit-check.mjs`）。生成する C++ は `.clang-format`（Microsoft 基点・
-   ColumnLimit 100・IndentWidth 4・UseTab Never）に整形済みであること、JSON は厳密 JSON（コメント不可）
-   であることをスプリント実装の前提とする。
-
----
-
-## 検証手段
+ウィンドウ描画・Scintilla 編集・WebView2 実描画・ライブリロード実動・起動500ms・TrySuspend 再表示300ms 等は
+GUI 実機が要るため、**フェーズ最後に `docs/acceptance.md` の手動チェックリストへ集約**する（design 13章「UI自動テストは初期版で持たない」）。
 
 ### use_playwright: false
 
-**根拠**: pika はネイティブ GUI（wxWidgets）アプリであり、外部公開される **Web UI を持たない**。
-プレビュー/差分は WebView2 を内部利用するが、これは外部公開 Web アプリではなく、Playwright の対象に
-ならない。したがって `use_playwright: false` を `sprints.json` にも明記する。
-GUI/プレビューの実機確認は `docs/acceptance.md` の手動チェックリストで代替する（design.md 13章
-「UIの自動テストは初期版では持たない」）。
+**根拠**: pika はネイティブ GUI（wxWidgets）アプリで、外部公開される **Web UI を持たない**。プレビュー/差分は
+WebView2 を内部利用するが外部公開 Web アプリではなく Playwright の対象外。`sprints.json` にも `use_playwright: false` を明記する。
+
+---
+
+## 機能一覧（requirements.md の章に対応。本フェーズでスプリント化する範囲）
+
+- **アプリ起動・CLI・単一インスタンス・データルート（req 3章 / design 5.1）**: `main_gui.cpp`（現570B/22行スタブ）を実体化。
+  データルート解決（`portable.txt`）、CLI `-g` 受領（コア `parse_argv` 利用）、名前付きパイプ `\\.\pipe\pika-<SID>` の
+  実 I/O（`CreateNamedPipe` を原子的ロックに・敗者はクライアント転送）、表示前のサーバー公開で TOCTOU 回避
+- **メインウィンドウ・レイアウト・テーマ（req 11章 / design 2.1・10章 / ui-design 2/7/12章）**: `MainFrame`（メニュー/左ツリー/タブバー/通知バー/メイン/ステータス右下固定）、
+  テーマ適用（ライト/ダーク/システム追従・`wxSysColourChangedEvent` 再適用）、文言の単一メッセージ定義（ID→日本語）
+- **ファイルツリーと未読表示（req 4章 / design 10章 / ui-design 5/6章）**: `wxDataViewCtrl` 第一候補（種別アイコン＋状態マーク共存）、
+  逐次追加列挙、シンボリックリンク循環検出、状態マーク（±/◆/取消線・伝播 ±淡）、種別アイコン（lucide 線・`wxBitmapBundle`）、Delete＝ごみ箱（`IFileOperation`）
+- **エディタ・タブ・検索・保存（req 5章 / design 5.3・5.7・10章）**: Scintilla（`wxStyledTextCtrl`）配線、`wxAuiNotebook`＋カスタム `wxAuiTabArt`（状態記号描画）、
+  エンコーディング/改行の往復維持（コア結果を UI 反映）、保存（衝突検知→incoming退避→アトミック置換）、検索/置換 UI（コア `SearchEngine` 配線）
+- **プレビュー（req 6章 / design 6章 / ui-design 8/11章）**: 共有1枚 WebView2、仮想ホスト `app.pika`/`doc.pika`（カスタムリソースハンドラ）、
+  CSP/サニタイズ（コア `render_markdown`/`HtmlInspector` 配線）、JS有効/無効の直列切替、ナビゲーションインターセプト、スクロール同期、TrySuspend アイドル回収
+- **外部変更の反映と衝突処理（req 7章 / design 5.2）**: Win32 監視スレッド（`ReadDirectoryChangesW`→`RawEvent`→コア `WatcherCore`）、
+  ポーリングフォールバック・F5、クリーン時自動リロード（単一Undo）、衝突時の退避・通知バー
+- **差分表示と既読（req 8章 / design 5.4・8章 / ui-design 8/11章）**: 差分HTML 表示（コア `DiffEngine`＋`PreviewBuilder` 配線）、
+  3モード×差分トグル、確認済み・すべて確認済み・巻き戻し（コア `ReviewFlow` 配線）
+- **状態復元・最近使った項目・設定（req 10章 / design 5.1・5.6・7章）**: 起動時 `state.json` 復元、消失タブ安全遷移、
+  `settings.toml` 監視反映（コア `core/settings` 配線。読み取り専用）、ジャンプリスト、フォルダ切替
+- **エッジケース・画像簡易ビュー（req 12章 / design 10章）**: ラスター画像の `wxImage` 簡易ビュー（WebView2 不使用・ピクセル数ガード）、
+  読み取り専用/権限/ネットワークドライブ/クラウドプレースホルダ（オフライン属性除外）の縮退表示、診断ログ（内容を書かない）
+
+---
+
+## 非対象（本フェーズで実装しないもの。情報落ち防止のため保全）
+
+### コアは完了済み（再計画・再実装しない）
+
+`src/core/`（document/workspace/watcher/diff/snapshot/render/search/settings/state/ipc）と `src/util` は
+前回 run-dev で完了（gtest 373 PASS）。本フェーズはその上に積むのみ。コアの公開 API（`Result<T>` 方式・
+コールバック/イベントキュー I/F）を呼ぶ側を作る。コアのロジック自体は触らない。
+
+### 要件14章「やらないこと」（足さない。実装したくなったら要件改訂を提案）
+
+IDE機能 / Gitクライアント / 内蔵AI・AIチャット / プロジェクト管理 / ビルド・実行・デバッグ / 本格コード編集 /
+任意JavaScript実行（ユーザー文書由来。同梱 Mermaid/KaTeX/ハイライトは別扱い）/ プラグイン機構 / WYSIWYG編集 /
+フォルダ横断検索（grep）/ ホットエグジット / GUI設定画面（settings.toml 直編集で代替）/ 自動更新 /
+サイドバイサイド差分・レンダリング済みプレビュー上の差分 / 「次の未読ファイルへ」ジャンプ /
+複数ウィンドウ・複数フォルダ同時オープン / CLI `--wait` / ショートカットのカスタマイズ / 永続Undo /
+画像の編集・変換 / 日本語以外のUI言語 / ARM64ネイティブビルド / 外部 `.css` 読み込み / セクション単位既読・ハンク採否。
+
+### 本フェーズの自動 verify に載せない（GUI 実機が要る・系統C へ寄せる）
+
+- 起動500ms・`TrySuspend` 再表示300ms 等の性能ゲート（design 11章。各スプリント末に計測・最終スプリントで `docs/acceptance.md` 化）
+- WebView2 実描画・JS有効/無効切替の順序保証の実機確認・Scintilla 実編集・ライブリロード実動・画像簡易ビュー実描画
+- 性能ソークテスト（8時間稼働）・配布インストーラー（Inno Setup）・エクスプローラー統合の実機検証
+
+---
+
+## 補完した判断（元ドキュメントの不足・現状制約に対し、推測せず planner が明示）
+
+正典は「どう作るか」までを定めるが、**UI フェーズのスプリント分割と verify 手段の確定は本フェーズの planner の責務**
+（design 14章「スプリント分割は次フェーズで行う」）。後からのドリフト追跡用に根拠を残す。
+
+1. **verify 二系統の根拠**。重量依存ビルド（wx/WebView2）は既に済んでおり増分は高速だが、GUI 配線は wx 依存で
+   ユニットテストできない。そこで (A) wx 非依存に切り出せるアプリ層ロジックは `ctest --preset x64-core-test`（gtest）で
+   決定論検証＝**must**、(B) wx 依存の配線は `cmake --build --preset x64-release`（/W4・警告エラー）の**コンパイル＋リンク成立**で
+   ＝**must（GUI 配線スプリントのみ）**、(C) 視覚・実挙動は **手動（should / 最終スプリント手動項目）** とする。
+   ユーザー明示方針「決定論ゲートを最大化／ビジュアルは最後」と design 13章「UI自動テストは持たない＝controller を厚くする」に整合。
+
+2. **controller を gtest 対象にする構成変更が前提**。現状 `src/controller/` は存在しない。これを新規作成し、
+   wx 非依存ロジックを `pika_core` 静的lib（`PIKA_BUILD_GUI` の影響下に置かない）に含め、`pika_tests` からリンクできるよう
+   `src/CMakeLists.txt`・`tests/CMakeLists.txt` を更新する。`pika_core` の include は既に `src/` 全体 PUBLIC のため相互参照は可能
+   （調査で確認）。この構成整備自体を sprint 1 に含める。
+
+3. **プラットフォーム層は「設計済み・実 I/O 配線待ち」**。調査で確認した現状（実コード）:
+   - `core/watcher` は `RawEvent` 入力 I/F（`WatcherCore::on_raw`）まで実装済みだが、`ReadDirectoryChangesW` を回して
+     `FILE_NOTIFY_INFORMATION`→`RawEvent` へ変換する**監視スレッド実体は未配線**（`src/ui` or `src/app` のプラットフォーム層が担当）。
+   - `core/ipc` は SDDL/ACL・パイプ名生成・メッセージスキーマ・検証まで実装済みだが、`CreateNamedPipe`/`ReadFile` の
+     **実パイプ I/O は未配線**（`src/app` が担当）。
+   - `main_console.cpp`（110行）は実装完了（CLI 検証・終了コード）。`main_gui.cpp`（22行）はスタブ。
+   未配線分を本フェーズのスプリントに含める。これらの I/O 実体は実 FS/実 OS が要りユニットテスト不能なため系統B（ビルド成立）＋系統C（手動）で検証する。
+
+4. **持ち越し high（前回 report.md）への目配り**。前回 report の持ち越し未解消 facet（#5 object削除と index.json 保存の
+   非原子性＝ジャーナリング要・#1 watcher 読取失敗の保留種別）は **コア層の構造変更**であり本フェーズのスコープ外（コア再実装しない）。
+   ただし退避結合フロー（`ReviewFlow`×`SnapshotStore`）を controller から呼ぶ際は、その戻り値（`Result<T>`）を握り潰さず
+   通知バー/ログへ変換することを controller 側の must criteria に含め、「データを失わない」最上位原則の UI 側での毀損を防ぐ。
+
+5. **編集直後 post-edit hook 制約**。生成する C++ は `.clang-format`（Microsoft 基点・ColumnLimit 100・IndentWidth 4・UseTab Never）に
+   整形済み、JSON は厳密 JSON（コメント不可）であること。verify には重ねない（hook が即時実施）。
+
+6. **review-profile の調整**。UI フェーズは frontend-ui・ux の比重が上がる（GUI/ViewModel/状態機械を毎スプリント触る）。
+   WebView2 のサニタイズ/CSP 配線では security、起動・200ms 非ブロック・TrySuspend では performance、状態永続化・退避結合では data が効く。
+   コスト最適化のため `always` は作らず conditional 中心に倒すが、ローカル個人ネイティブツールの性格（公開 API なし→backend-api=off）は維持する。
+   詳細は `dev/review-profile.json` に記す。
+
+---
+
+## 検証手段（まとめ）
+
+### use_playwright: false（上記「検証戦略」参照）
 
 ### 自動検証（各スプリントの verify）
 
-- **必須（決定論・足切り）**: `ctest --preset x64-core-test`（`pika_tests` の gtest。exit code 0 で合格）。
-  対象は `core/`＋`util`（wx非依存）。重点は design.md 13章のとおり diff・watcher（イベント合成/自己保存
-  抑制/オーバーフロー再同期）・snapshot（退避と容量管理・index破損復元）・エンコーディング往復・render の
-  サニタイズ。
-- **構成チェック（軽量）**: `cmake --preset x64-core-test`（core-test プリセットの構成が通ること。
-  vcpkg manifest の解決＋CMake 構成成立で合格）。
-- **整形（編集直後 hook ＋ CI format ジョブ）**: `clang-format --dry-run --Werror`（C++）・JSON syntax。
-  これは hook が即時に行うため verify に重ねない。
+- **必須・決定論（系統A）**: `ctest --preset x64-core-test`（`pika_tests` の gtest。exit 0 で合格）。controller/ViewModel/状態機械の wx 非依存ユニットが対象。
+- **必須・GUI 配線（系統B。GUI 配線スプリントのみ）**: `cmake --build --preset x64-release`（/W4・警告エラー扱い。exit 0＝コンパイル＋リンク成功）。
+- **構成成立（軽量）**: `cmake --preset x64-core-test`（core-test 構成成立）。GUI スプリントでは `cmake --preset x64-release` も。
+- **整形（編集直後 hook）**: `clang-format --dry-run --Werror`（C++）・JSON syntax。hook が即時実施するため verify に重ねない。
 
-### 手動検証（should / acceptance.md 側）
+### 手動検証（系統C。should / `docs/acceptance.md` 側）
 
-- wx＋Scintilla＋WebView2 の共存・起動500ms・`TrySuspend` 再表示300ms（性能ゲート。design.md 11章）。
-- プレビュー/差分の WebView2 実機表示・JS有効/無効切替の順序保証の実機確認。
+- wx＋Scintilla＋WebView2 共存・起動500ms・`TrySuspend` 再表示300ms（性能ゲート。design 11/14章）。
+- プレビュー/差分の WebView2 実描画・JS有効/無効切替の順序保証・ライブリロード実動・画像簡易ビュー実描画。
 - requirements.md 各章「受け入れ基準」を `docs/acceptance.md` のチェックリストへ写経し、リリース前に実施。
-- 性能（起動時間・メモリ）は各スプリント末に計測し劣化を即検知（design.md 14章3）。
+- 性能（起動時間・メモリ）は各スプリント末に計測し劣化を即検知（design 14章3）。

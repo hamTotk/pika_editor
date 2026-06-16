@@ -4,10 +4,10 @@
     "security": "conditional",
     "performance": "conditional",
     "data": "conditional",
-    "frontend-ui": "conditional",
+    "frontend-ui": "always",
     "ux": "conditional",
     "backend-api": "off",
     "product": "conditional"
   },
-  "rationale": "pika はローカル個人向けの Windows ネイティブ GUI ツール(wxWidgets)であり、外部公開 API を持たず(IPC は単一インスタンス用の内部のみ)、UI 自動テストも初期版では持たない方針(design.md 13章)。この性格上、レビュアは過剰起動を避けコスト優先で conditional に倒す。backend-api=off: 外部から呼ばれる公開 API 契約が無いため(内部 IPC のみ)。frontend-ui=conditional: GUI はあるがネイティブで Web ではなく、UI 自動テストを持たないため GUI/描画系スプリント(WebView2 プレビュー/差分・ツリー/タブ描画)を触った時のみ。data=conditional: index.json/objects/snapshot 等の永続化スキーマと退避は設計原則1『データを失わない』が最優先で、永続化を触るスプリント(snapshot・state/index・退避結合)で起動。security=conditional: プレビューのサニタイズ/CSP・JS有効無効切替・機密ファイルのハッシュのみ記録・外部リソース取得既定オフを扱うがローカル個人ツールのため always にはせず、render/IPC/機密まわりのスプリントで起動。performance=conditional: 起動500ms・200msブロック禁止・軽量性が核だが各スプリント末計測で足り、性能影響のあるスプリントで起動。ux=conditional: CLI(pika -g・--help・終了コード)＋GUI を人が直接操作するため CLI/UI 挙動を触った時に起動。product=conditional: 『足さない／要件14章にない機能は作らない』判断が重要なため、機能追加を伴うスプリントで要件逸脱を確認する。"
+  "rationale": "UI実装フェーズ向けに前回(コア層)の profile を調整した。pika はローカル個人向け Windows ネイティブ GUI ツール(wxWidgets)で外部公開 API を持たず(IPC は単一インスタンス用の内部のみ)、UI 自動テストは初期版で持たない(design 13章)。本フェーズは UI層/アプリケーション層/プラットフォーム層を毎スプリント触るため frontend-ui の比重が最も上がる。frontend-ui=always: 全スプリントで GUI/ViewModel/状態機械(タブ・通知バー集約・テーマ解決・差分モード状態機械・ツリー ViewModel・5状態)を実装するため常時起動し、視覚仕様(ui-design.md)との整合・状態記号の色非依存弁別・wxDataViewCtrl/wxAuiTabArt 描画方針を継続監視する。ux=conditional: CLI(-g・--help・終了コード)と GUI を人が直接操作するため、中心体験(開く→外部変更反映→差分→確認済み)の操作フロー・縮退時の次の一手提示・キーボード完結・通知バー優先順位を触るスプリントで起動。security=conditional: WebView2 のサニタイズ/CSP・JS有効無効の直列切替・仮想ホスト doc.pika のパストラバーサル遮断・名前付きパイプの DACL/PIPE_REJECT_REMOTE_CLIENTS・機密ファイル扱いを配線する render/preview/ipc スプリント(主に sprint3・5)で起動。data=conditional: 『データを失わない』が最上位原則。退避結合(ReviewFlow×SnapshotStore)の Result 握り潰し防止・state.json/index.json の version 安全側・確認済み/巻き戻し/保存衝突 incoming 退避・自己保存トークン照合を触るスプリント(sprint4・6・7)で起動し、UI 側でのデータ毀損を捕捉する。performance=conditional: 起動500ms・200msブロック禁止・TrySuspend アイドル回収・差分/プレビューのワーカー実行・逐次列挙を触るスプリント(sprint3・4・5)で起動。各スプリント末の手動計測(acceptance.md)で性能ゲートを補完する。product=conditional: 『足さない/要件14章にない機能は作らない』判断が重要なため、機能追加を伴うスプリントで要件逸脱(サイドバイサイド差分・レンダリング差分・任意JS実行・GUI設定画面等の混入)を確認する。backend-api=off: 外部から呼ばれる公開 API 契約が無いため(内部 IPC のみ)。コスト最適化のため frontend-ui 以外は conditional に倒し、決定論ルーティング(route-reviewers)が criteria のキーワード照合で起動を確定する。前回 report の routing 隙間対策として、本フェーズの criteria は『退避/version/サニタイズ/CSP/パストラバーサル/未読/状態機械/直交/握り潰さない』等のキーワードを意識して記述した。"
 }
