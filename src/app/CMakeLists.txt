@@ -1,18 +1,51 @@
 # GUI 本体（pika）と コンソールスタブ（pika.com）。
 # PIKA_BUILD_GUI=ON のときのみ構成される（wxWidgets/WebView2 を含む重量パス）。
 #
-# sprint 1 では「ターゲットが design.md 12章どおり分割定義されている」ことを満たすための
-# 最小スタブ。中身（CLI -g パース・シングルインスタンス・ウィンドウ生成）は後続スプリント。
+# sprint3（中心体験①『開く』の GUI/プラットフォーム配線）:
+# - main_gui を実体化（データルート/CLI 受領→単一インスタンス判定→サーバー公開→MainFrame 表示→列挙）
+# - pipe_server: CreateNamedPipe の原子的ロック・敗者クライアント転送（実 I/O。系統B/C）
+# - dir_enumerator: 実 FS の逐次列挙（controller::normalize_entries へ供給）
+# - src/ui: MainFrame・FileTreePanel（wxDataViewCtrl）・EditorPanel（wxStyledTextCtrl）・ui_messages
+# 判断ロジックは controller/core（wx 非依存・gtest 済み）に置き、ここは実配線に徹する。
 
 find_package(wxWidgets CONFIG REQUIRED)
+
+# ---- pika_ui: wx 依存の UI 層（MainFrame・ツリー・エディタ・文言）----
+# main_gui（app）と将来のテスト/別 exe から再利用できるよう静的lib に切り出す。
+add_library(pika_ui STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/editor_panel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/editor_panel.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/file_tree_panel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/file_tree_panel.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/main_frame.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/main_frame.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/ui_messages.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/ui_messages.h
+    # プラットフォーム層（実 FS/OS I/O。MainFrame が直接呼ぶ列挙）。
+    dir_enumerator.cpp
+    dir_enumerator.h
+)
+target_link_libraries(pika_ui
+    PUBLIC
+        pika_core
+        wx::core
+        wx::base
+        wx::aui
+        wx::stc
+    PRIVATE
+        pika_warnings
+)
 
 # ---- pika: GUI exe（WIN32 サブシステム）----
 add_executable(pika WIN32
     main_gui.cpp
+    pipe_server.cpp
+    pipe_server.h
 )
 target_link_libraries(pika
     PRIVATE
         pika_warnings
+        pika_ui
         pika_core
         wx::core
         wx::base
