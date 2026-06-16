@@ -1,0 +1,21 @@
+{
+  "reviewer": "security",
+  "sprint_id": 4,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "untrusted-buffer-parse / DoS耐性",
+      "message": "FILE_NOTIFY_INFORMATION の走査ループ(watch_thread.cpp:180-197)が、OSが埋めた64KBバッファの header と FileName を読む際に境界検証をしていない。offset は 0 から開始し NextEntryOffset の加算のみで進み(NextEntryOffset==0 だけが終了条件)、各反復前に『offset + sizeof(FILE_NOTIFY_INFORMATION) <= bytes』および『offset + FileNameLength部 <= bytes』を確認していない。info->FileNameLength は utf16_to_utf8 にそのまま長さとして渡る(:186)。通常運用では ReadDirectoryChangesW が返す bytes 内に整形済みレコードが収まる保証があるため実害は出ないが、ドライバ/再パース層の異常・将来の bytes 取り違えに対して境界外読み取りに無防備で、典型的な untrusted-buffer-parse のハードニング不足。bytes を上限にした offset 範囲チェック(offset+FIELD_OFFSET(...,FileName)<=bytes、FileNameLength<=bytes-offset-ヘッダ)を入れ、外れたら resync へ退避すべき。security の探索術『信頼できない入力(カーネル充填バッファ)が下流の長さ/読み取り操作へ検証なしで届く』に該当。critical 定義(injection/RCE 到達・認可バイパス・機密ハードコード)には当たらないため medium。",
+      "location": "src/app/watch_thread.cpp:180"
+    },
+    {
+      "severity": "low",
+      "area": "パストラバーサル(多層防御)",
+      "message": "normalize_watch_rel_path(watch_event_map.cpp:28-48)は '\\'→'/' 置換と先頭/末尾区切りの除去のみで、'..' セグメントを拒否・正規化しない。この相対パスは下流で root + \"/\" + rel として連結され content_hash_lf のファイル読み取りに使われる(main_frame.cpp:184)。ReadDirectoryChangesW が返すパスは監視ルート相対で OS が '..' 越境を生成しないため実トラバーサル経路にはならず(構造的に subtree に閉じる)、本 sprint では脆弱性ではない。ただし sprint5 以降 doc.pika リソースハンドラ等で同種の rel→絶対パス連結を行う際に '..' 遮断を各所で再実装するとドリフトしやすい。区切り正規化の単一定義点である本関数に '..'/絶対パス混入の拒否を寄せ、許可リスト方式(ルート配下のみ)を 1 箇所に閉じることを将来の多層防御として推奨。現状は実害なしのため low。",
+      "location": "src/controller/watch_event_map.cpp:28"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint4(外部変更の反映: WorkspaceController・ReadDirectoryChangesW 監視スレッド・FILE_NOTIFY_INFORMATION→RawEvent 写像)を security 観点でレビュー。critical は 0。本 sprint はローカル単一ユーザー GUI のファイル監視配線で、認証/認可・ネットワーク受信・SQL/shell/HTML injection sink・機密のハードコードはいずれも存在せず(WebView2 の CSP/サニタイズは sprint5)、critical 定義(未検証外部入力の injection/RCE 到達・認可バイパス・機密ハードコード)に該当する欠陥はない。信頼境界の入口はカーネル充填の FILE_NOTIFY_INFORMATION バッファと監視フォルダ由来のファイル名。検出したのは (1) その走査ループの境界未検証(untrusted-buffer-parse のハードニング不足=medium)と (2) 区切り正規化が '..' を拒否しない多層防御の余地(本 sprint は OS が subtree 限定で実害なし=low)。自己保存抑制のハッシュ照合・rename 引き継ぎは整合性/正確性の仕組みであり security 境界ではないため finding にしない。いずれもリリースを妨げず、次ターン generator が feedback_structured 経由で対応すれば十分。"
+}

@@ -1,0 +1,16 @@
+CHANGED:
+src/app/CMakeLists.txt
+src/CMakeLists.txt
+src/ui/main_frame.cpp
+src/ui/main_frame.h
+src/ui/ui_messages.cpp
+src/ui/ui_messages.h
+tests/CMakeLists.txt
+src/app/watch_thread.cpp
+src/app/watch_thread.h
+src/controller/watch_event_map.cpp
+src/controller/watch_event_map.h
+src/controller/workspace_controller.cpp
+src/controller/workspace_controller.h
+tests/controller/watch_event_map_test.cpp
+tests/controller/workspace_controller_test.cpp

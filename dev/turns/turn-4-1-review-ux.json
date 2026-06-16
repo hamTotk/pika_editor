@@ -1,0 +1,33 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 4,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "フィードバック/システム状態の可視化",
+      "message": "F5(再読み込み)に即時の受領フィードバックと完了フィードバックの両方が欠ける。on_refresh(main_frame.cpp:370-377)は watch_thread_->request_resync() を呼んで即 return するだけで、押下直後に『再同期中』のステータスやカーソル変化など『受け付けた』合図が一切出ない。『再同期中...』(StatusSyncing)は監視スレッドが後で on_resync(Manual) を投げ on_resync_needed(243-265) が UI スレッドで走ったときに初めて設定されるため、押下→表示に監視スレッド往復ぶんの遅延があり、しかも resync の結果 events が空(=変更なし。F5 の最頻ケース)だと apply_fs_events(267-273)が早期 return し直後の update_status() で『再同期中...』が即座に通常表示へ戻るだけで、『最新の状態です/変更はありませんでした』のような完了確認が出ない。結果ユーザーは『F5 が効いたのか・取りこぼしが回復したのか』を判別できない(Nielsen #1 可視性。design 10章 F3『F5/再同期中はその旨を表示』は『中』は満たすが受領と完了が弱い)。critical でないのは、変更があれば未読マーク更新でフィードバックは得られ、主要タスク(外部変更の反映)自体は完了不能ではないため。",
+      "location": "src/ui/main_frame.cpp:370-377"
+    },
+    {
+      "severity": "medium",
+      "area": "フィードバック/現実世界との一致",
+      "message": "クリーンな(未保存編集のない)タブで開いているファイルが外部変更された場合、ツリーには差分あり(±)/新規(◆)マークが付くのにエディタ本文は古いまま差し替えられず、本文が陳腐化していることの告知も出ない。apply_fs_events(main_frame.cpp:267-285)は UnreadMarked を refresh_tree()/update_status() でツリーと未読件数へ反映するが、開いているエディタ本文への反映経路がない(PathRemoved のみ TabManager::mark_path_missing(279)へ橋渡し。Modified/Created は本文非連動)。本フェーズの中心体験②は『AIエージェントの編集を即時反映』であり、ユーザーは目の前のエディタ本文を信頼して読むため、ツリーは更新・本文は陳腐という不整合は『今ディスクで何が起きているか』の誤認を生む(Nielsen #1/#2)。generator 報告と spec(sprint4 should・系統C)どおりクリーンタブ自動リロード(単一 Undo)の実反映は後続/acceptance.md 委ねで本 sprint must 範囲外のため high でなく medium。後続が遅れる場合、せめてアクティブタブが未読化したら通知バー/ステータスで『ファイルが外部で変更されました(再読み込み可)』を出す導線を先に塞ぐべき。",
+      "location": "src/ui/main_frame.cpp:267-285"
+    },
+    {
+      "severity": "low",
+      "area": "システム状態の可視化/エラー回復",
+      "message": "ステータスの『監視中/定期確認中(監視不可)』表示が、監視ハンドル開始の最初の成否(WatchThread::open_dir)に固定され、稼働中に監視からポーリングへ転落した場合に追従しない。WatchThread::run(watch_thread.cpp:113-204)では issue_read 失敗時に watching_=false へ落とすが、MainFrame の update_status(346-368)は watch_thread_->watching() をその瞬間に問い合わせるだけで、転落イベントを UI へ通知するコールバックがない。結果、実際にはポーリングに転落しているのにステータスは『変更を監視中』のまま残りうる(Nielsen #1 可視性。監視不可になった事実と『F5 で手動再同期できる』回避策が伝わらない)。本 sprint は監視配線の骨格で、転落は実 OS 依存(系統C・acceptance.md)・通知バー集約は sprint7 計画のため low。",
+      "location": "src/ui/main_frame.cpp:346-368"
+    },
+    {
+      "severity": "low",
+      "area": "ヘルプ/文言の磨き込み",
+      "message": "ポーリングフォールバックのステータス文言『変更を定期確認中（監視不可）』(ui_messages.cpp:36-37)は状態は伝わるが、なぜ監視できないか(ネットワークドライブ/UNC/一部クラウド等)と次の一手(F5 で今すぐ確認できる)が示されず、ユーザーは『監視不可』に不安を抱いても回避策へ辿り着きにくい(Nielsen #9 回復支援・#10 ヘルプ)。文言1箇所の磨き込みであり機能上の欠陥ではないため low。例: 末尾に『（F5 で手動更新）』を添える等。",
+      "location": "src/ui/ui_messages.cpp:36-37"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint4(中心体験②『外部変更を反映』のアプリ層+Win32監視配線)の ux 観点。反映判断を WorkspaceController(FsEvent→未読/rename/削除)と watch_event_map(Action写像・区切り正規化)へ wx/Win32 非依存で切り出し gtest 観測している分離は良好で、削除イベントは TabManager::mark_path_missing がバッファを保持したまま削除済み表示へ安全遷移する(本文・未保存編集を失わない)ため、ux critical の核心『誤操作でデータ喪失(確認/取り消しなし)』『主要タスクが完了不能な導線破綻』には該当しない=has_critical:false。外部変更の主要導線(検知→未読マーク→件数表示)は通る。指摘は (1) F5 の受領・完了フィードバック欠如(押下直後の合図なし・変更なし時の『最新です』確認なし=Nielsen#1)medium、(2) クリーンタブで開いているファイルの外部変更がツリーには出るが本文に反映されず陳腐化が無告知(中心体験②の即時反映期待と不整合だが自動リロード実反映は sprint4 should/系統C委ね)medium、(3) 稼働中の監視→ポーリング転落をステータスが追従せず『監視中』のまま残りうる low、(4) ポーリング文言に回避策(F5)案内なし low。critical を盛らないのは、(1)(2)は後続スプリント/acceptance.md に明確計画済みで本 sprint must 範囲外であり、本文喪失や完了不能には至らないため(確信が持てないものは high 以下とする方針)。なお sprint3 で記録済みの『未保存タブを閉じる/終了する際の確認なし(sprint6 計画)』は本 sprint で変更がなく既出のため重複計上しない(観点内の継続課題として申し送り)。frontend-ui 観点(状態マーク描画・配色・a11y アクセシブルネーム)とは重複させていない。"
+}

@@ -1,0 +1,39 @@
+{
+  "reviewer": "data",
+  "sprint_id": 4,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "再同期/状態整合",
+      "message": "F5・ポーリング tick・オーバーフロー回復の resync 経路が空ベースラインで動く。MainFrame::on_resync_needed は resync(workspace_, workspace_ctl_.baseline()) を呼ぶが、本 sprint では set_baseline を呼ぶ供給元（core/snapshot 結線=sprint6）がまだ無く baseline は常に空。resync は空 BaselineMap に対して全実在ファイルを Created として返す（resync.cpp:100-108）ため、監視不能環境の5秒ポーリングや F5 を踏むたびにワークスペースの全ファイルが未読(◆新規)としてフラッディングされ、未読集合・ステータス未読件数・ツリーマークが実態と乖離する。再同期は『取りこぼし回復』のはずが『全件誤未読化』に化ける。データ破損・不可逆ではない（未読は確認操作で解消でき、ベースライン供給は sprint6 に明示的に繰り延べ）ため critical ではないが、中心体験②の状態正しさを構造的に損なう実害バグ。最低限、baseline 未確立時は resync 経路を抑止する／空ベースライン resync の Created 一括化を未読化しないガードを controller 側に置くべき。",
+      "location": "src/ui/main_frame.cpp:262 (on_resync_needed の resync 呼び出し) / src/core/watcher/resync.cpp:100-108"
+    },
+    {
+      "severity": "high",
+      "area": "rename 引き継ぎ/状態整合",
+      "message": "WorkspaceController::apply_events の Renamed 分岐が core/workspace::apply_renames の戻り値のうち states しか使わず、reevaluate（短時間往復 A→B→A=対応付け確定不能で『最終ディスク内容で再判定せよ』の指示）と orphaned（引き継ぎ失敗で旧キー孤立保全）を握り潰している（workspace_controller.cpp:88-92）。CarryResult はこの2リストを UI 側が再差分/通知へ写すために意図的に公開している（workspace_model.h:113-116 のコメント）にもかかわらず、controller も MainFrame も両者を消費していない（grep で参照ゼロを確認）。結果、往復 rename 後に古い相対パス→旧ベースライン/未読の対応が再判定されないまま残り、ユーザーが確認していない内容を旧ベースライン基準で差分表示する等の状態取り違えに繋がりうる。データ破損ではないが『状態を取り違えない』設計意図の欠落で high。reevaluate のパスは未読/ベースラインを暫定無効化し再差分対象として返す、orphaned はログ/通知へ流すべき。",
+      "location": "src/controller/workspace_controller.cpp:86-101"
+    },
+    {
+      "severity": "medium",
+      "area": "ベースライン整合",
+      "message": "WorkspaceController::set_baseline は baseline の各エントリを states_ へ加法的に書き込むだけで（workspace_controller.cpp:19-24）、前回 baseline に在って今回 baseline から落ちたファイルの states_[rel].has_baseline=true / baseline_hash を解消しない。再同期後に縮小したベースラインで set_baseline を呼ぶ運用（sprint6 でのベースライン更新時）に入ると、もう追跡対象でないパスが has_baseline=true のまま残り、new_files()（=ベースライン無し未読）の弁別や Modified→±/◆ 判定が古い残骸に引きずられうる。現状は起動時1回想定で実害は限定的だが、ベースライン更新サイクルが入る前に set_baseline を『差し替え（既存 baseline 由来エントリのリセット）』意味へ正すか、不変条件を明記すべき。",
+      "location": "src/controller/workspace_controller.cpp:14-25"
+    },
+    {
+      "severity": "medium",
+      "area": "削除/未読整合",
+      "message": "resync 経由の Removed と監視経由の Removed が同じ apply_events の Removed 分岐に入り unread_.clear(path) する（workspace_controller.cpp:74）。ベースライン在り・未読のファイルが一時的に列挙不能（権限・ネットワークドライブ瞬断・クラウドプレースホルダの recall 失敗）になると resync は実在集合から漏れて Removed を発行し、未読マークが消える。design 5.2 の『削除は孤立保全』に沿って states_ は残るものの、未読(レビュー未完)シグナルが外的I/O揺らぎで失われる点は『データ（=未確認状態）を失わない』最上位原則に照らすと弱い。enumerate が列挙不能時に空を返す（resync.cpp:48-50）安全側設計と相まって、空列挙→全件 Removed の最悪ケースも空ベースライン前提では顕在化しないが、ベースライン確立後（sprint6）に効いてくる。Removed の未読解除はツリー消滅と確実に同期した時のみ行う／列挙不能時 resync 結果を不採用にするガードを検討すべき。",
+      "location": "src/controller/workspace_controller.cpp:70-79 / src/core/watcher/resync.cpp:43-50,142-155"
+    },
+    {
+      "severity": "low",
+      "area": "状態フラグ二重管理",
+      "message": "未読状態が unread_（UnreadSet）と states_[rel].unread の2か所で表現され、両者の同期が apply 経路ごとに手書きされている（touch_unread は両方を立て、mark_confirmed は両方を倒すが、Removed 分岐は unread_.clear のみで states_[rel].unread は立ったまま=孤立保全の仕様上は許容だが二者の意味が分岐する）。現状テストは通るが、真偽の単一情報源を unread_ に寄せ states_.unread は導出にする等で取り違えリスクを下げられる。命名/設計の軽微改善。",
+      "location": "src/controller/workspace_controller.cpp:27-33,70-79,109-117"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint4『外部変更を反映』の状態反映ロジックを data 観点（ベースラインを照合鍵とする再同期整合・rename 引き継ぎの状態保全・未読という不可逆シグナルの取り扱い）でレビューした。critical（データ破損・不可逆マイグレーション相当）は無し。永続スキーマやトランザクションを伴わないメモリ状態モデルのため不可逆損失には至らない。ただし (1) baseline 未供給のまま resync を回す経路が空ベースラインで全件誤未読化する、(2) apply_renames の reevaluate/orphaned を握り潰し往復 rename 後の再判定指示を失う、の2点は中心体験の状態正しさを構造的に損なう high 級欠陥。いずれもベースライン供給(sprint6)と組み合わさると実害が拡大するため、controller 側のガード（空/未確立ベースライン時の resync 抑止、reevaluate の再差分化、orphaned の通知化）を次ターンで対応すべき。set_baseline の加法性・Removed の未読解除と外的I/O揺らぎの結合は medium、未読フラグ二重管理は low。"
+}

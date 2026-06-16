@@ -44,6 +44,10 @@ find_path(DTL_INCLUDE_DIR NAMES dtl/dtl.hpp REQUIRED)
 # editor_view_model（Settings→Scintilla 配線パラメータ写像・タブ見出し抽出）と
 # dir_lister（実 FS 列挙フルパス→workspace::Entry 正規化・除外適用・root 越境遮断）。
 # wx 依存の MainFrame/ツリー/Scintilla/パイプ実 I/O は src/app・src/ui 側（系統B）が担う。
+# sprint4（外部変更の反映）では、その反映判断のうち wx/Win32 非依存に切り出せる部分を controller に足す：
+# workspace_controller（FsEvent→未読集合・引き継ぎ状態の更新・rename 追従・削除安全遷移・新規/差分弁別）と
+# watch_event_map（FILE_NOTIFY_INFORMATION の Action コード→RawAction 写像・区切り正規化）。
+# wx/Win32 依存の監視スレッド実体（watch_thread）は src/app 側（系統B/C）が担う。
 add_library(pika_core STATIC
     controller/app_controller.cpp
     controller/app_controller.h
@@ -59,6 +63,10 @@ add_library(pika_core STATIC
     controller/tree_view_messages.h
     controller/tree_view_model.cpp
     controller/tree_view_model.h
+    controller/watch_event_map.cpp
+    controller/watch_event_map.h
+    controller/workspace_controller.cpp
+    controller/workspace_controller.h
     core/diff/cancel_token.h
     core/diff/diff_engine.cpp
     core/diff/diff_engine.h

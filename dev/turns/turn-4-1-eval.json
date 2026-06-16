@@ -1,0 +1,38 @@
+{
+  "score": 90,
+  "plan_implementation": {
+    "overall": 100,
+    "notes": "sprint4 must 全5件充足。(1)WorkspaceController が FsEvent(Created/Modified/Removed/Renamed)を未読集合・引き継ぎ状態・ツリーViewModelへ反映、自己保存トークン照合の消し込みは WatcherCore::poll->apply_events の統合点で観測。(2)rename 追従は core/workspace::apply_renames で relPath 付け替え、rename後の未読引き継ぎをテスト観測。(3)ReadDirectoryChangesW 監視スレッド実体(watch_thread.cpp)が FILE_NOTIFY_INFORMATION->UTF-8/スラッシュ正規化->RawEvent->on_raw を配線(系統Bビルド成立で検証)。(4)ポーリング(既定5秒)・F5・オーバーフロー(ERROR_NOTIFY_ENUM_DIR)が同一 on_resync->resync 経路へ収束。(5)ctest と cmake --build がともに exit 0。should は『監視スレッドは合成して積むだけ』充足、『監視/F5進捗のステータス表示』は status バーで部分充足だが通知バー未配線・F5受領フィードバック弱(ux#1)、『クリーンタブ自動リロード単一Undo』は acceptance.md/系統C へ繰り越しで未実装。should 充足率約0.5。"
+  },
+  "quality": {
+    "overall": 90,
+    "breakdown": {"d_verify": 100, "d_accept": 100, "d_quality": 85},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[合格] sprint4『外部変更を反映』。verify 2系統(ctest x64-core-test / cmake --build x64-release)ともに exit 0、4レビュワー(security/data/frontend-ui/ux)とも critical=0、must 全5件充足、テスト改竄なし(DISABLED/SKIP/緩和なし・新規テストは実アサーションで挙動観測)。wx非依存ロジック(WorkspaceController/watch_event_map)を切り出し gtest で決定論検証、Win32 監視スレッドは合成して積むだけの薄い実装で design.md 4章に整合。 [high(次ターン対応・passedはブロックしない)] (1)data: F5/ポーリング/オーバーフローの resync が空ベースラインで走る — set_baseline の供給源(core/snapshot 結線)は sprint6 のため baseline() は常に空で resync が全実在ファイルを Created=◆ としてフラッディングしうる。空/未確立ベースライン時の resync 抑止ガードを controller 側に置くべき。(2)data: apply_events の Renamed 分岐が apply_renames の戻り値 reevaluate(往復rename再判定指示)と orphaned(引き継ぎ失敗の孤立保全)を握り潰している。reevaluate は再差分対象へ orphaned は通知/ログへ流すべき。(3)frontend-ui: 消失タブが『削除済み』表示へ遷移しない(display_mark の結果が MainFrame 未結線=削除見落とし)。(4)frontend-ui: ツリーのアクセシブルネームに state_mark_label が入らずスクリーンリーダーに記号のみ。(5)frontend-ui: ツリーで削除済みの取消線属性(GetAttr)未適用で弁別経路欠落。high(3)〜(5)は controller 側素材が gtest 済みで UI 結線のみ欠落。 [medium] data: set_baseline の加法性残骸・Removed の未読解除が外的I/O揺らぎで未読シグナルを失いうる/ security: FILE_NOTIFY_INFORMATION 走査ループの境界未検証(untrusted-buffer-parse のハードニング不足・通常運用は実害なし)/ frontend-ui: 種別アイコン未描画・EmptyNoFolder 文言デッド/ ux: F5 受領・完了フィードバック欠如・クリーンタブ本文陳腐化の無告知。 [low] security: normalize_watch_rel_path が dotdot を拒否しない多層防御余地/ data: 未読フラグ二重管理/ frontend-ui: 通知バー・テーマトークン未配線(sprint7/8)/ ux: 監視->ポーリング転落のステータス追従なし・ポーリング文言に回避策案内なし。",
+  "feedback_structured": {
+    "high": [
+      {"area": "再同期/状態整合 (data)", "message": "F5/ポーリング tick/オーバーフロー回復の resync が空ベースラインで動く。MainFrame::on_resync_needed は resync(workspace_, workspace_ctl_.baseline()) を呼ぶが set_baseline の供給源(core/snapshot 結線=sprint6)が未配線で baseline() は常に空。空 BaselineMap に対し resync は全実在ファイルを Created=◆ として返すため、5秒ポーリングや F5 のたびに全ファイルが未読フラッディングし未読集合・未読件数・ツリーマークが実態と乖離する。空/未確立ベースライン時の resync 抑止ガードを controller 側に置くべき。location: src/ui/main_frame.cpp:262 / src/core/watcher/resync.cpp:100-108"},
+      {"area": "rename 引き継ぎ/状態整合 (data)", "message": "WorkspaceController::apply_events の Renamed 分岐が apply_renames の戻り値 reevaluate(往復 rename で対応付け不能=最終ディスク内容で再判定の指示)と orphaned(引き継ぎ失敗で旧キー孤立保全)を握り潰している(workspace_controller.cpp:88-92。参照ゼロ)。CarryResult はこの2リストを UI が再差分/通知へ写すため意図的に公開している。往復 rename 後に古い相対パスから旧ベースライン/未読が再判定されず未確認内容を旧ベースライン基準で差分表示する取り違えに繋がりうる。reevaluate は未読/ベースライン暫定無効化し再差分へ orphaned はログ/通知へ流すべき。location: src/controller/workspace_controller.cpp:86-101"},
+      {"area": "状態の網羅/ビジュアル一貫性 (frontend-ui)", "message": "外部削除で消失したタブが『削除済み』表示へ遷移しない。apply_fs_events は mark_path_missing() で path_missing を立て display_mark()(gtest済)は Deleted を返せるが MainFrame がその結果を SetPageText/SetPageBitmap で使っていない(UI 側呼び出しゼロ)。ui-design 5章の重畳状態タブ表示が反映されず中心体験②で削除を見落とす。location: src/ui/main_frame.cpp:267-285,331"},
+      {"area": "アクセシビリティ (frontend-ui)", "message": "ファイルツリーのアクセシブルネームに状態ラベルが入らない。FileTreeModel::GetValue は記号+表示名のみで state_mark_label()(『差分あり』『新規』『削除済み』『配下に差分あり』。gtest済)を使っていない。ヘッダコメントは状態ラベルを含めると明言するが実装が追随せず UIA/MSAA で読まれる名は記号のみ=ui-design 13章『色だけに依存しない』未達。location: src/ui/file_tree_panel.cpp:43-54"},
+      {"area": "状態の網羅(色だけに依存しない弁別) (frontend-ui)", "message": "ツリー上で削除済みが視覚的に弁別不能。state_mark_symbol(Deleted) は空文字(取消線で表現する設計)だが FileTreeModel が GetAttr をオーバーライドせず取消線属性(SetStrikethrough 相当)を適用しないため削除済みファイルが通常ファイルと完全同一表示になる。StateMark を TreeRowVm が保持済みで GetAttr 実装は局所的。location: src/ui/file_tree_panel.cpp:31-54"}
+    ],
+    "medium": [
+      {"area": "ベースライン整合 (data)", "message": "set_baseline が baseline 各エントリを states_ へ加法的に書き込むだけで前回 baseline に在り今回落ちたパスの has_baseline/baseline_hash を解消しない(workspace_controller.cpp:19-24)。sprint6 のベースライン更新サイクル(縮小ベースラインで set_baseline)に入ると追跡外パスが has_baseline=true のまま残り new_files()/Modified 判定が残骸に引きずられる。差し替え意味へ正すか不変条件を明記すべき。"},
+      {"area": "削除/未読整合 (data)", "message": "resync 経由の Removed と監視経由の Removed が同じ Removed 分岐で unread_.clear する(workspace_controller.cpp:74)。ベースライン在り未読のファイルが一時的に列挙不能(権限/ネットワークドライブ瞬断/クラウド recall 失敗)になると resync が Removed を発行し未読マークが消える。未読シグナルを外的I/O揺らぎで失う点は『データを失わない』に照らし弱い。列挙不能時 resync 結果を不採用にするガードを検討すべき(ベースライン確立後=sprint6 で効く)。"},
+      {"area": "untrusted-buffer-parse/DoS耐性 (security)", "message": "FILE_NOTIFY_INFORMATION 走査ループ(watch_thread.cpp:180-197)が OS 充填 64KB バッファの header/FileName を読む際に bytes 上限の境界検証をしていない。offset は NextEntryOffset 加算のみで進み各反復前に offset+FIELD_OFFSET(...,FileName)<=bytes・FileNameLength<=bytes-offset-ヘッダ を確認していない。通常運用は実害なしだが境界外読み取りに無防備で外れたら resync へ退避すべき(critical 定義 injection/RCE 到達には当たらず medium)。"},
+      {"area": "状態の網羅(empty)/種別アイコン (frontend-ui)", "message": "フォルダ未オープンの empty 状態に中央 CTA 文言(EmptyNoFolder)が出ず左ペイン本体が真っ白(status のみ StatusNoFolder)。EmptyNoFolder は宣言済みで未使用=デッドメッセージ。また種別アイコン(lucide 線・wxDataViewIconText)がツリー未描画で ui-design 6章未達(IconCategory は TreeRowVm.icon に確定済みで結線待ち)。empty 詳細化は sprint8・アイコンは sprint3 must 範囲。"},
+      {"area": "フィードバック/システム状態の可視化 (ux)", "message": "F5 に即時の受領フィードバック(押下直後の合図)と完了フィードバック(変更なし時の『最新です』)が欠ける(on_refresh は request_resync を呼び即 return)。またクリーンタブで開くファイルの外部変更がツリーには出るがエディタ本文は陳腐化したまま無告知(自動リロード実反映は sprint4 should/系統C委ね)。後続が遅れる場合せめてアクティブタブ未読化時に『ファイルが外部で変更されました(再読込可)』導線を先に出すべき。"}
+    ],
+    "low": [
+      {"area": "パストラバーサル(多層防御) (security)", "message": "normalize_watch_rel_path(watch_event_map.cpp:28-48)は区切り置換と先頭/末尾区切り除去のみで dotdot セグメントを拒否・正規化しない。ReadDirectoryChangesW が返すパスは監視ルート相対で OS が越境を生成しないため本 sprint は実害なしだが sprint5 以降の doc.pika リソースハンドラ等で同種の連結を行う際に各所再実装するとドリフトする。区切り正規化の単一定義点へ許可リスト(ルート配下のみ)を寄せることを推奨。"},
+      {"area": "状態フラグ二重管理 (data)", "message": "未読状態が unread_(UnreadSet)と states_[rel].unread の2か所で表現され apply 経路ごとに手書き同期(Removed 分岐は unread_.clear のみで states_.unread は立ったまま)。真偽の単一情報源を unread_ に寄せ states_.unread は導出にすると取り違えリスクが下がる。"},
+      {"area": "ビジュアル一貫性/テーマ (frontend-ui)", "message": "通知バー領域が高さ0の空 wxPanel で ui-design 10章の体裁(bg-sunken+罫線・最大3本+他N件)未配線(集約 ViewModel は sprint7)。on_sys_colour_changed が Refresh() のみでカラートークン(bg-window/accent 等)の再解決・再適用なし(トークン解決は sprint7)。本 sprint の回帰ではないがフェーズ完了に向けた未達として記録。"},
+      {"area": "システム状態の可視化/文言 (ux)", "message": "稼働中の監視からポーリング転落(WatchThread::run の issue_read 失敗で watching_=false)を MainFrame の update_status が追従せず『変更を監視中』のまま残りうる(転落通知コールバックなし)。ポーリング文言『変更を定期確認中（監視不可）』に なぜ不可か・次の一手(F5)が無い。いずれも実 OS 依存(系統C)・通知バーは sprint7。"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

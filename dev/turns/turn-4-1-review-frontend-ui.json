@@ -1,0 +1,51 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 4,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "状態の網羅 / ビジュアル一貫性",
+      "message": "外部削除で消失したタブが『削除済み』表示へ遷移しない（取消線も状態記号も付かない）。apply_fs_events は tabs_.mark_path_missing() を呼んで TabState.path_missing を立て、display_mark()（gtest 済み）は Deleted を返せるが、MainFrame はその結果をどこでも使っていない（grep: SetPageText/display_mark の UI 側呼び出しゼロ）。結果、wxAuiNotebook のタブ見出しは open_file 時の素の title のままで、ui-design 5章が要求する重畳状態（削除済み＞未保存＞差分あり）のタブ表示がまったく反映されない。中心体験②『外部変更を反映』で削除を見落とす（消えたファイルを開いたまま気づけない）ため、本スプリント goal の UI 反映として欠落。修正方針: apply_fs_events / on_notebook_page_changed 等から display_mark(*tabs_.at(i)) を取り、state_mark_symbol＋（Deleted は取消線フォント wxAuiNotebook の HasFlag/SetPageBitmap 等）でページ見出しを更新する。",
+      "location": "src/ui/main_frame.cpp:267-285, src/ui/main_frame.cpp:331"
+    },
+    {
+      "severity": "high",
+      "area": "アクセシビリティ（a11y）",
+      "message": "ファイルツリーの状態がスクリーンリーダーに意味として伝わらない。file_tree_panel.cpp の GetValue は『記号（± / ◆）＋ 表示名』だけを返し、state_mark_label()（『差分あり』『新規』『削除済み』『配下に差分あり』。tree_view_messages にあり gtest 済み）を一切使っていない。ヘッダコメント（file_tree_panel.cpp:51-52）は『アクセシブルネームに状態ラベルを含める』と明言しているが実装が追随していない（コメントと実装の乖離）。UIA/MSAA で読まれるアクセシブルネームは記号 ± のみとなり、ui-design 13章『主要UIにアクセシブルネーム』『色だけに依存しない（記号＋ラベル）』を満たさない。色覚多様性・スクリーンリーダー利用者は状態を識別できない。修正方針: GetValue（または別途 a11y 用の値）で『name（状態ラベル, 種別ラベル）』の形に state_mark_label / icon_category_label を連結する。",
+      "location": "src/ui/file_tree_panel.cpp:43-54"
+    },
+    {
+      "severity": "high",
+      "area": "状態の網羅（色だけに依存しない弁別）",
+      "message": "ツリー上で『削除済み』状態が視覚的に弁別不能。state_mark_symbol(Deleted) は設計上 空文字（取消線で表現する想定。tree_view_messages.cpp:18-22）だが、FileTreeModel::GetValue はプレーンテキストを返すのみで取消線フォント属性（wxDataViewItemAttr の SetStrikethrough 相当）を一切適用せず、wxDataViewModel の GetAttr もオーバーライドしていない。記号なし＋取消線なし＝削除済みファイルが通常ファイルと完全に同一表示になる。ui-design 5章は削除済みを『取り消し線（記号なし）』で示すと規定しており、色にも記号にも依存しない弁別経路が消える。WatcherCore の Removed はツリーから消すので主に影響は『tabs_ 側で path_missing になったがツリーには残るケース』と整合させる必要がある。修正方針: FileTreeModel に GetAttr を実装し、mark==Deleted のとき取消線属性を付ける（StateMark を TreeRowVm が保持済みのため実装は局所的）。",
+      "location": "src/ui/file_tree_panel.cpp:31-54"
+    },
+    {
+      "severity": "medium",
+      "area": "状態の網羅（empty 状態）",
+      "message": "フォルダ未オープンの empty 状態に中央 CTA 文言が出ない。refresh_tree は workspace_ が空のとき空の TreeRowVm を set_root するだけで、MsgId::EmptyNoFolder（『フォルダーを開くと、ここにファイルが表示されます。』）が定義済み・status バーには StatusNoFolder が出るものの、左ペイン本体は真っ白のまま。ui-design 15章 Empty は『行き止まりにせず CTA 1つ』を求める。本スプリントは外部変更反映が主眼で empty 詳細化は sprint8 と明記されている（main_frame.cpp:159-160 のコメント）ため severity は medium だが、EmptyNoFolder 文言が宣言済みで未使用＝デッドメッセージになっている点は記録しておく。",
+      "location": "src/ui/main_frame.cpp:156-167, src/ui/ui_messages.cpp:40-41"
+    },
+    {
+      "severity": "medium",
+      "area": "アクセシビリティ / ビジュアル一貫性",
+      "message": "種別アイコンがツリーにまだ描画されていない（記号＋テキストのみ）。FileTreeModel は AppendTextColumn＋string 値で、ui-design 6章『左＝種別アイコン、右＝状態マーク』のアイコン（lucide 線・wxBitmapBundle・wxDataViewIconText）を出していない（コメント file_tree_panel.cpp:51 が『将来 wxDataViewIconText で重畳』と認める）。アイコンは補助情報でファイル名拡張子が一次情報のため致命的ではないが、ui-design 6章の視覚仕様未達。IconCategory は TreeRowVm.icon に確定済みなので結線待ち。種別アイコン結線は sprint3 must の範囲だった点も併記（本スプリントの回帰ではないが UI 完成度として未達のまま）。",
+      "location": "src/ui/file_tree_panel.cpp:139-154"
+    },
+    {
+      "severity": "low",
+      "area": "ビジュアル一貫性 / レイアウト",
+      "message": "通知バー領域が高さ0の空 wxPanel で確保されているだけで、ui-design 10章の体裁（bg-sunken＋罫線・最大3本＋他N件）は未配線（集約 ViewModel は sprint7 と明記）。本スプリントは外部変更で衝突/監視状態を通知バーに出す should があるが（spec sprint4 should『監視/F5実行中はステータス/通知バーに表示』）、進捗は status バー（StatusSyncing/StatusWatching/StatusPolling）に出しており通知バー側は未使用。should 範囲かつ status で代替できているため low。",
+      "location": "src/ui/main_frame.cpp:118-122"
+    },
+    {
+      "severity": "low",
+      "area": "ビジュアル一貫性（テーマ）",
+      "message": "on_sys_colour_changed が Refresh() を呼ぶだけで、ui-design 2/12章のカラートークン（bg-window/bg-sunken/accent 等）の再解決・再適用が無い（コメント main_frame.cpp:442 がテーマトークン再解決は sprint7 と認める）。ツリー選択背景・状態記号の accent 色など ui-design が指定する配色は現状ネイティブ既定のままで、モノトーン基調＋色は差分/強調のみという視覚原則がまだ視覚化されていない。テーマ骨格は sprint3 should・トークン解決は sprint7 のため本スプリントの回帰ではないが、フェーズ完了に向けた未達として記録。",
+      "location": "src/ui/main_frame.cpp:440-446"
+    }
+  ],
+  "has_critical": false,
+  "summary": "中心体験②『外部変更を反映』のツリー側経路（外部変更→未読化→ツリー ±/◆ 再描画→status 未読件数）は機能し、wxDataViewCtrl の標準キーボード操作で到達不能ではないため critical（主要操作不能・キーボード操作不能）には該当せず critical=0。ただし frontend-ui 観点で high が3件: (1) 消失タブが『削除済み』表示へ遷移せずタブ見出しが素のまま（display_mark の結果が UI 未結線で、削除を見落とす）、(2) ツリーのアクセシブルネームに状態ラベルが入らずスクリーンリーダーに記号 ± しか伝わらない（ヘッダコメントと実装の乖離・state_mark_label 未使用）、(3) ツリーで削除済みの取消線が未適用で色にも記号にも依存しない弁別経路が欠落。いずれも wx 非依存の controller 側（display_mark / state_mark_label / StateMark）は gtest 済みで素材は揃っており、UI 結線だけが欠けている。medium/low は種別アイコン未描画・empty 中央文言未使用・通知バー/テーマトークン未配線（多くは sprint7/8 へ明示的に後ろ倒し）。次ターン generator は feedback_structured の high 3件（タブ削除済み表示・ツリー a11y ラベル・取消線属性）を優先対応すべき。"
+}

@@ -10,12 +10,18 @@
 // 済み）にあり、本クラスは配線とイベント中継に徹する。
 #pragma once
 
+#include "app/watch_thread.h"
 #include "controller/tab_manager.h"
+#include "controller/workspace_controller.h"
 #include "core/settings/settings.h"
+#include "core/watcher/fs_event.h"
+#include "core/watcher/watcher_core.h"
 
 #include <wx/aui/auibook.h>
 #include <wx/frame.h>
+#include <wx/timer.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -29,6 +35,7 @@ class MainFrame : public wxFrame
 {
   public:
     explicit MainFrame(const core::settings::Settings& settings);
+    ~MainFrame() override;
 
     // ワークスペースフォルダを開く（ツリー列挙を表示後に開始する。design 5.1 手順4）。
     // 絶対パス。空なら「フォルダ未オープン」の空状態を表示する。
@@ -47,10 +54,21 @@ class MainFrame : public wxFrame
     void refresh_tree();
     void update_status();
 
+    // 監視配線（sprint4）。監視スレッドの生イベント/再同期合図を UI スレッドで受けて反映する。
+    void start_watching(); // ワークスペースの監視（or ポーリング）を開始する
+    void stop_watching();  // 監視を停止する（フォルダ切替・終了）
+    void on_raw_event(const core::watcher::RawEvent& ev); // 生イベント→WatcherCore（UI スレッド）
+    void on_resync_needed(app::ResyncReason reason);      // 再同期合図→resync→反映（UI スレッド）
+    void drain_watcher();                                 // WatcherCore::poll→WorkspaceController
+    // デバウンス窓経過後の確定ドレイン（バースト最後の1件を拾う）。
+    void on_debounce_timer(wxTimerEvent& evt);
+    void apply_fs_events(const std::vector<core::watcher::FsEvent>& events); // 反映共通処理
+
     void on_open_folder(wxCommandEvent& evt);
     void on_close_tab(wxCommandEvent& evt);
     void on_exit(wxCommandEvent& evt);
     void on_about(wxCommandEvent& evt);
+    void on_refresh(wxCommandEvent& evt); // F5（要件11.2）= オンデマンド再同期
     void on_tree_file_activated(const std::string& rel_path);
     void on_notebook_page_changed(wxAuiNotebookEvent& evt);
     void on_notebook_page_close(wxAuiNotebookEvent& evt);
@@ -65,6 +83,11 @@ class MainFrame : public wxFrame
     wxStatusBar* status_ = nullptr;
 
     controller::TabManager tabs_; // タブ状態機械（wx 非依存・gtest 済み）
+    // 外部変更の反映（sprint4。判断ロジックは wx 非依存・gtest 済み）。
+    controller::WorkspaceController workspace_ctl_;
+    std::unique_ptr<core::watcher::WatcherCore> watcher_; // 合成・自己保存抑制（非スレッドセーフ）
+    std::unique_ptr<app::WatchThread> watch_thread_;      // ReadDirectoryChangesW 監視スレッド
+    wxTimer debounce_timer_; // デバウンス窓経過後に poll を再実行する単発タイマー
 };
 
 } // namespace pika::ui
