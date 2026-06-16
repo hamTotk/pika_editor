@@ -33,7 +33,15 @@ find_package(pcre2 CONFIG REQUIRED)
 # PRIVATE で渡す（実装詳細として漏らさない）。
 find_path(DTL_INCLUDE_DIR NAMES dtl/dtl.hpp REQUIRED)
 
+# controller … UI とコアの仲介ロジック（ViewModel・状態機械）の wx 非依存部。
+# 系統A（決定論ゲート）の対象として pika_core に含め、PIKA_BUILD_GUI の影響下に置かない
+# （spec.md 補完判断2）。wx 依存のビュー結線は src/ui 側（GUI スプリント）が担う。
+# sprint1 では TreeViewModel（build_tree/UnreadSet → 状態マーク・種別アイコンへの写像）を実装する。
 add_library(pika_core STATIC
+    controller/tree_view_messages.cpp
+    controller/tree_view_messages.h
+    controller/tree_view_model.cpp
+    controller/tree_view_model.h
     core/diff/cancel_token.h
     core/diff/diff_engine.cpp
     core/diff/diff_engine.h

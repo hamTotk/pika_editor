@@ -4,6 +4,7 @@
 find_package(GTest CONFIG REQUIRED)
 
 add_executable(pika_tests
+    controller/tree_view_model_test.cpp
     core/diff/diff_engine_test.cpp
     core/diff/inline_diff_test.cpp
     core/diff/line_diff_test.cpp
