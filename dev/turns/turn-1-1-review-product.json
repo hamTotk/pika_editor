@@ -1,0 +1,21 @@
+{
+  "reviewer": "product",
+  "sprint_id": 1,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "スコープ/MVP判断",
+      "message": "resolve_file_mark の Deleted/Unsaved 分岐と NodeStateInput.deleted/unsaved は sprint1 で実装・テスト済みだが、これらの実入力(タブ側の削除済み・dirty)は sprint2 の TabManager 合流まで常に false で、build_tree()+UnreadSet 経路では発火しない。先取り実装に見えるが、(a) ヘッダ/コード/テストに『重畳優先解決を一元化する』根拠が明記され、(b) 要件5.3 の重畳優先(削除済み＞未保存＞差分あり)を sprint1 criteria『重畳優先がテストで観測できる』が要求しているため、独断の gold plating ではなく criteria 充足のための必要実装。記録あり・YAGNI 違反ではないと判断。指摘ではなく追跡メモ。",
+      "location": "src/controller/tree_view_model.cpp:63"
+    },
+    {
+      "severity": "low",
+      "area": "criteria の妥当性(将来の測定漏れ)",
+      "message": "classify_icon は『拡張子のみ/ファイル名/大小無視/先頭ドット(.gitignore)/末尾ドット/ベア拡張子』までテスト済みで spec の goal を正しく測れている。ただし ui-design 6章の Unknown は『generic file アイコンへフォールバック』が表示価値の本体であり、現 sprint は分類(IconCategory)までで描画は sprint3。分類の語彙が ui-design 表と1:1一致していることは確認済み(8カテゴリ・代表拡張子も一致)なので価値の連鎖は保たれている。sprint3 で『アイコン実体への写像漏れ(分類はできるが SVG が無い)』が起きないよう、種別→アセットの対応も criteria 化されることを次フェーズ planner へ申し送る提案。",
+      "location": "src/controller/tree_view_model.cpp:82"
+    }
+  ],
+  "has_critical": false,
+  "summary": "product 観点では問題なし(critical=0)。sprint1 の goal『controller を pika_core に新設し決定論ゲートに乗せる土台＋最初の ViewModel(ツリー→ViewModel変換)』は、spec の目的(系統A 決定論ゲート最大化／中心体験①開く の表示基盤)へ一直線に繋がっている。acceptance_criteria は『実装の存在』ではなく観測可能な挙動(±/◆/取消線/伝播±淡の付与・重畳優先・拡張子→カテゴリ分類・純粋関数の同一入力同一出力)を測っており、目的を取り違えていない。実装は ui-design 5/6章・要件5.3 の正典と語彙・優先順位・代表拡張子まで1:1一致し、独断解釈や spec 乖離なし。core 側 natural_less/build_tree/UnreadSet を再実装せず流用('足さない'原則順守)、表示文字列を tree_view_messages に単一定義('生文字列を散らさない' should 充足)で、過剰実装も過少実装も見当たらない。残る2件はいずれも low(将来スプリントへの追跡メモ)で、本 sprint の価値毀損ではない。"
+}

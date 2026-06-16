@@ -1,0 +1,8 @@
+CHANGED:
+src/CMakeLists.txt
+tests/CMakeLists.txt
+src/controller/tree_view_messages.cpp
+src/controller/tree_view_messages.h
+src/controller/tree_view_model.cpp
+src/controller/tree_view_model.h
+tests/controller/tree_view_model_test.cpp

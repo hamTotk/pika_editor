@@ -1,0 +1,46 @@
+{
+  "score": 100,
+  "plan_implementation": {
+    "overall": 100,
+    "notes": "must 6件すべて充足(観測可能テスト付き): (1)src/controller/ の4ソースが add_library(pika_core STATIC) に追加され if(PIKA_BUILD_GUI) ブロック外でビルド可、(2)tests/controller/tree_view_model_test.cpp が pika_core にリンクし ctest exit 0・gtest 409件PASS(既存391件非回帰+新規18件。spec の『373』は util 実装前の旧基準で、MEMORY の到達点391と整合)、(3)build_tree_view_model は純粋関数で PureFunctionSameInputSameOutput が同一入力→構造的同一出力を再帰比較で観測、(4)resolve_file_mark で重畳優先 削除済み＞未保存＞差分あり を一元化し PriorityDeletedBeatsAll/PriorityUnsavedBeatsDiff で観測、(5)classify_icon が IconCategory 全8カテゴリ(folder/code/data/config/script/image/text/unknown)を網羅し未知拡張子は Unknown フォールバック(表外/拡張子なし/先頭ドット/末尾ドット/大小無視/ベア拡張子までテスト)、(6)ファイル自身 Diff(±実心)とフォルダ伝播 DiffPropagated(±淡)を別 enum 値で区別し FileSelfDiffVsFolderPropagatedAreDistinct が EXPECT_NE で弁別を観測。should 3件すべて充足: x64-release GUI 構成成立(report で configure 確認)・記号/日本語ラベルを tree_view_messages に単一定義し TreeViewMessagesTest で写像観測・core の build_tree/has_unread_descendant/is_unread/natural_less を再利用し ViewModel 側でソート/除外/伝播を再実装せず(PreservesFolderFirstNaturalOrder で整列保持を観測)。未実装の must/should なし。"
+  },
+  "quality": {
+    "overall": 100,
+    "breakdown": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 92
+    },
+    "dimension_thresholds": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 80
+    }
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[d_verify=100] verify_results の ctest --preset x64-core-test が exit 0(2/2 ctest PASS)。run-dev の決定論ゲートを正本として採用。 [d_accept=100] must 6件すべてを観測可能テスト付きで実機確認(コード Read)。状態マーク enum は色非依存で ui-design 5章『色だけに依存しない』を担保、重畳優先・アイコン8分類・伝播±/実心±の弁別が正典(ui-design 5/6章・要件5.3)と語彙・優先順位・代表拡張子まで1:1一致。 [d_review=100] frontend-ui・product 両レビュワーとも has_critical=false。critical 未満の指摘は全て low の『sprint3 描画層への申し送り』(淡色記号の前景コントラストは text-2 以上で作る/未保存●はツリーでなくタブ閉じるボタン位置/削除済みのアクセシブルネームは state_mark_label 経由)で、本 sprint(描画なしの純ロジック)のコード欠陥ではない。 [改竄照合] 追加テスト18件に DISABLED_/GTEST_SKIP/FAIL/SUCCEED による骨抜きなし、アサーション緩和・犠牲的期待値変更なし。変更は7ファイルのみで core ロジック(workspace_model.cpp 等)・spec・sprints・ref-dev は未改変(manifest 照合)。 [d_quality=92] 既存 core の pika:: 名前空間・Result/列挙イディオムに整合。tree_view_model(変換)と tree_view_messages(文言)を1ファイル1責務で分離。コメントはコードで表せない正典契約(ui-design 章番号)の説明に限定。YAGNI: NodeStateInput の deleted/unsaved 分岐は本 sprint の build_tree+UnreadSet 経路では常に false だが、criteria『重畳優先をテストで観測』が要求するため必要実装(product reviewer も gold plating でないと確認)で、ヘッダ/report に sprint2 TabManager 合流の根拠を明記。テスト品質は純粋性・別値弁別・エッジ網羅が強い。減点8は微小: classify_icon の kExtTable サイズ注釈が array<26> だが実要素25件で不整合(コンパイルは zero 埋めで通るが将来の要素追加時に取りこぼしリスク。実害は現状なし)。 [総合] passed=true(全次元足切り以上 AND score>=90)。",
+  "feedback_structured": {
+    "high": [],
+    "medium": [],
+    "low": [
+      {
+        "area": "テスト/定数整合",
+        "message": "tree_view_model.cpp の constexpr std::array<ExtCategory, 26> kExtTable は宣言サイズ 26 に対し初期化子が 25 件で、末尾1要素が値初期化(ext=\"\", category=Folder)のゼロ埋めになっている。空文字拡張子に Folder が誤マッチする経路は classify_icon の ext.empty() 早期 return で塞がれており現状実害なし。だが将来 jpeg のような追加時にサイズ注釈とのズレで取りこぼす保守リスクがある。サイズ指定を外して {{...}} の要素数から自動推論させるか、実件数 25 に合わせるのが安全。"
+      },
+      {
+        "area": "a11y/配色の sprint3 申し送り(frontend-ui low)",
+        "message": "DiffPropagated(±淡)は ui-design 5章で text-3 指定だが、ui-design 2章自身が text-3 on bg-sunken は約2.75:1 で WCAG 1.4.3 を割ると警告。本 sprint の ViewModel は色非依存 enum しか返さず違反は未発生だが、sprint3 のツリー描画で淡色記号の前景に素朴に text-3 を当てるとコントラスト不足になる。淡さは小フォント/位置で作り前景色は text-2 以上にする(ui-design 2章指針)。"
+      },
+      {
+        "area": "状態記号の配置/アクセシブルネーム契約(frontend-ui low)",
+        "message": "未保存 ● は ui-design 5章でタブの閉じるボタン位置に置く定義であり、ツリー名右の ±/◆ とは位置で弁別する。sprint3 のツリー行描画が state_mark_symbol(Unsaved)=● をツリー側へ置くと弁別前提が崩れる。また削除済みは state_mark_symbol が空を返すため、アクセシブルネーム合成は state_mark_label(Deleted=『削除済み』)経由を徹底する(記号のみ読むとスクリーンリーダーに削除済み状態が伝わらない)。ViewModel は正しく、配置/読み上げ責務は描画層に残る。"
+      },
+      {
+        "area": "criteria の将来測定漏れ(product low)",
+        "message": "classify_icon は分類(IconCategory)までで、ui-design 6章 Unknown の本体価値『generic file アイコンへフォールバック』の描画は sprint3。種別→アセット(SVG)の対応も sprint3 で criteria 化し『分類はできるがアイコン実体が無い』取りこぼしを防ぐことを次フェーズ planner へ申し送る。"
+      }
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

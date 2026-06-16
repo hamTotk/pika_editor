@@ -1,0 +1,27 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 1,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "a11y/コントラスト(将来配線)",
+      "message": "DiffPropagated(配下に差分あり ±淡)は ui-design 5章で色=text-3 指定だが、ui-design 2章自身が『text-3 on bg-sunken は約2.75:1 で WCAG 1.4.3 を割る』と警告している。本 sprint の ViewModel は色非依存の enum しか返さないため現時点で a11y 違反は発生していないが、sprint3 のツリー描画で淡色記号(前景)に素朴に text-3 を当てると前景テキストのコントラスト不足になりうる。描画側で『淡さは小フォント/位置で作り前景色は text-2 以上』(ui-design 2章の指針)を守る必要がある旨を sprint3 へ申し送りたい。本 sprint のコード欠陥ではない。",
+      "location": "src/controller/tree_view_model.cpp:140"
+    },
+    {
+      "severity": "low",
+      "area": "状態記号の配置契約(将来配線)",
+      "message": "resolve_file_mark は Unsaved(●)を返しうるが、ui-design 5章では未保存 ● の位置は『タブの閉じるボタン位置』で、ツリー名の右に置く ±/◆ とは弁別のため別位置に出すと定義されている。state_mark_symbol(Unsaved) も ● を返すため、sprint3 のツリー行描画がこの記号をツリー側へ配置すると視覚弁別(位置で ± と区別)の前提が崩れる。ViewModel 自体は正しく、これは描画層への配置契約の注意点。テストで Unsaved の優先/記号は観測済みだが配置責務は描画側に残る。",
+      "location": "src/controller/tree_view_model.cpp:63"
+    },
+    {
+      "severity": "low",
+      "area": "アクセシブルネーム整合",
+      "message": "削除済み(取り消し線・記号なし)の a11y 名は state_mark_symbol が空を返すため、sprint3 の描画/アクセシブルネーム合成は state_mark_symbol ではなく state_mark_label(Deleted=『削除済み』を提供済み)を読む必要がある。ui-design 13章『主要UIにアクセシブルネーム(UIA/MSAA)』を満たすための前提が ViewModel 側に正しく用意されている点は良好(記号と日本語ラベルを別 API に分離している)。記号のみを読むとスクリーンリーダーに削除済み状態が伝わらないため、配線時は label 経由を徹底する申し送り。",
+      "location": "src/controller/tree_view_messages.cpp:28"
+    }
+  ],
+  "has_critical": false,
+  "summary": "frontend-ui 観点での結論: critical なし。本 sprint(1) は wx 非依存の純ロジック(TreeViewModel/状態マーク enum/アイコン分類/列挙→記号・日本語ラベル写像)であり、実描画・キーボード操作・フォーカス管理・aria 相当は sprint3 以降。よって『主要操作が不能/不可視』『キーボード操作不能』等の frontend-ui critical 条件はこのターンの成果物では構造的に発生しえない。むしろデータ層として後続 UI の正しさを良く支えている: (1) 状態マークを色非依存の enum で表現し ui-design 3/5章『色だけに依存しない』を担保、(2) 重畳優先 削除済み>未保存>差分あり を ui-design 5章どおり実装・テスト、(3) ファイル自身の ±(Diff)とフォルダ伝播 ±(DiffPropagated)を別 enum 値で区別しテストで弁別を観測、(4) アイコン分類が ui-design 6章の全8カテゴリ(folder/code/data/config/script/image/text/unknown)を網羅し未知拡張子は Unknown フォールバック・大小無視・隠しファイル/末尾ドットのエッジを網羅、(5) 記号と日本語アクセシブルラベルを別 API に分離し UIA/MSAA(ui-design 13章)の土台を先回り用意。残る指摘は全て low の『描画層(sprint3)への配置・配色・a11y 名の申し送り』であり本 sprint のコード欠陥ではない。high/medium 相当の状態欠落・レイアウト破綻・二重送信等は本 sprint の責務外(描画なし)のため該当なし。"
+}
