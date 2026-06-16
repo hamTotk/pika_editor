@@ -24,6 +24,15 @@ enum class PreviewKind
     Html,     // HTML プレビュー（JS 無効＝IsScriptEnabled=false 相当）
 };
 
+// ファイル名/拡張子からプレビュー種別を分類する純粋ロジック（JS 有効/無効の出し分け根拠）。
+// .md/.markdown は Markdown（JS 有効）、.html/.htm は Html（JS 無効）。design 6章の表。
+// 既定（差分面・分類不能）は Markdown 相当（pika 生成の信頼済み HTML）として扱う。
+PreviewKind classify_preview_kind(std::string_view name_or_path);
+
+// 差分対象になり得る種別か（.md/.markdown/.html/.htm/.svg。ui-design 8章「.md/.html/.svg」）。
+// それ以外（画像・バイナリ等）は差分トグルを出さない（DiffDisableReason::NotDiffableType の入力）。
+bool is_diffable_type(std::string_view name_or_path);
+
 // プレビュー/差分 HTML 文書の組み立て入力。表示色は持たない（CSS が色を付ける。色非依存）。
 struct PreviewDoc
 {

@@ -1,0 +1,33 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 5,
+  "iteration": 2,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "ビジュアル一貫性 / テーマ",
+      "message": "HTMLプレビュー（ユーザー文書）にも常に preview.css が適用され、文書自身のスタイルがテーマで上書きされる。ui-design 2章末・12章は『HTMLプレビュー（ユーザー文書）にはテーマを適用しない（文書自身のスタイルを尊重・要件11.3）』と明記する。build_preview_document() は doc.kind を見ず常に build_head()→<link rel=stylesheet href=app.pika/preview.css> を出力し、preview.css の `html, body { background; color; font-family; font-size; line-height }` がユーザー HTML の地色・本文色・フォントを強制的に塗り替える。kind==Html のときは pika 由来のテーマ CSS（少なくとも body 地色/文字色/フォント）を当てない（または body.preview スコープに限定して body 直下のグローバル指定を外す）構成にすべき。",
+      "location": "src/controller/preview_builder.cpp:206-215 (build_preview_document) / assets/preview.css:38-47"
+    },
+    {
+      "severity": "medium",
+      "area": "テーマ追従",
+      "message": "WebView2 側テーマが OS の prefers-color-scheme のみに追従し、pika のネイティブ選択テーマ（ライト/ダーク/システム追従の解決結果）と同期しない。ui-design 2章は『このトークンを CSS 変数として注入しネイティブ側テーマと同期する』、12章は theme.current を state.json に保持し再適用とする。@media (prefers-color-scheme) では OS 設定しか拾えず、ユーザーが pika をライト固定・OS がダークのとき（または逆）プレビュー/差分だけ配色が反転しネイティブ UI と食い違う。テーマ解決の実配線は sprint7（CSS のコメントも自認）だが、:root のトークンをネイティブ側から注入（例: 解決済みクラス body.theme-dark を付与 or CSS 変数を SetPage 時に差し込む）できる構造に寄せる必要がある。現状の純 prefers-color-scheme 依存では明示テーマ override を構造的に表現できない。",
+      "location": "assets/preview.css:22-36"
+    },
+    {
+      "severity": "medium",
+      "area": "レイアウト破綻 / オーバーフロー",
+      "message": "差分行が white-space:pre で折り返さないのに、差分コンテナ（.diff / body.diff-view / .preview-diff-grid .grid-right）に overflow-x の指定がない。長い 1 行（最小化されていない HTML・URL・日本語の長文等）が出ると水平方向にあふれ、ソース＋差分ON（差分面のみ）では body 直下にスクロールが効くか不定、grid 右ペインは .grid-right の overflow:auto が縦横とも効くため救われるが、差分面のみ/分割の差分面（body.diff-view）には横スクロールの受け皿がない。差分の横スクロールはコードビューとして許容範囲だが、受け皿（overflow-x:auto を持つ行コンテナ）を明示しないと環境次第でクリップされ末尾が見えなくなる。.diff か .diff-line に overflow 制御を入れて挙動を確定させるべき（チェックリスト『横スクロール発生がないか/オーバーフロー』）。",
+      "location": "assets/preview.css:55-78"
+    },
+    {
+      "severity": "low",
+      "area": "ビジュアル一貫性（トークン）",
+      "message": "ui-design 2章のカラートークンは差分に diff-add/del それぞれ {bg,tx,gut,word} の4サブトークンを定義するが、preview.css は gut（ガター背景）を取り込んでおらず、行頭マーカ列（.diff-marker）の地色を差分行背景（--diff-*-bg）任せにしている。canon ではガターを bg と区別する意図（#d6e6dc 等）があり、密度の高い差分で行頭列と本文列の面の差が出ない。視覚上の軽微なズレで主要操作には影響しないが、トークン正典との一貫性として gut を反映するか、canon 側で gut 不要と確定させるのが望ましい。",
+      "location": "assets/preview.css:12-19 / docs/ui-design.md:47-48"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint5（差分/WebView2 配線）の frontend-ui 観点。中核要件である差分の色非依存符号化（行頭 +/-/空白マーカ＋色非依存クラス＋行内下線の三重符号化）は実装・テストとも的確で、要件8.4/ui-design 1・5・8・11章を満たす（critical なし）。一方で『HTMLプレビュー（ユーザー文書）にはテーマを適用しない』という canon 明記ルールに反し、kind を見ず常に preview.css の body グローバル指定でユーザー HTML を塗り替える点が high。テーマ追従が OS の prefers-color-scheme 依存でネイティブ選択テーマと同期しない点、差分の横オーバーフローに受け皿がない点、ガタートークン未反映が medium/low。critical（主要操作不能・致命的 a11y）には該当しない。"
+}

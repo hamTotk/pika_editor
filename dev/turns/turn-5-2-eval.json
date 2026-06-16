@@ -1,0 +1,28 @@
+{
+  "score": 92,
+  "plan_implementation": {
+    "overall": 92,
+    "notes": "sprint5 must 全充足。must#1 差分モード状態機械(直交6組合せ・PaneLayout・占有世代)=diff_mode_model で実装/テスト済(非回帰)。must#2 差分トグル自動無効化=純粋ロジック gtest 済 + 本iter で GUI 結線(update_diff_toggle_state が evaluate_diff_toggle を呼び Enable/Check/理由ラベル・無効時 diff_on_=false 強制)。must#3 共有1枚WebView2+unified差分HTML=build_diff_body が色非依存 +/- マーカ+クラス+行内 span(diff-word)を出力、TaskRunner オフロード→apply_document で stamp/key 照合し再ナビゲート。must#4(iter1 の d_accept=0 主因)=本iter で実配線完了: apply_script_enabled が ICoreWebView2Settings::put_IsScriptEnabled を呼びナビゲート前適用+nav_in_flight_/pending で直列化、AppPikaHandler 登録(app.pika 片肺解消)、classify_preview_kind を GUI から到達(HTMLプレビュー=JS無効経路が到達可能化)、doc.pika は url_decode_once→normalize_to_absolute→under_root→content_type 許可リストでハードニング、CSP は script-src https://app.pika/base-uri 'none'/form-action 'none'/frame-ancestors 'none' を満たす。must#5 両 verify exit 0。should は TaskRunner UI非ブロック化を充足、TrySuspend は状態保持のみ・scroll同期/プレビュー内検索は系統C へ繰延べ(report 明示)。"
+  },
+  "quality": {
+    "overall": 92,
+    "breakdown": {"d_verify": 100, "d_accept": 100, "d_quality": 87},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[合格] sprint5 の must 全件が iter2 で充足。iter1 で d_accept=0 だった must#4(JS有効/無効の直列切替・app.pika 配線)が実コードで成立した: apply_script_enabled が put_IsScriptEnabled を navigate 前に適用し nav_in_flight_/pending で直列化(前モード残留を防止)、AppPikaHandler 登録、classify_preview_kind が GUI から到達し HTMLプレビュー=JS無効経路が実到達、doc.pika/app.pika は URLデコード1回+..遮断+content_type 許可リストでトラバーサルを多層防御。CSP は要求ディレクティブ(script-src https://app.pika・base-uri/form-action/frame-ancestors 'none')を満たす。must#2 の差分トグル無効化が GUI に結線され(update_diff_toggle_state)、WebView2不在/ベースライン未取得で無言の空差分を出さなくなった。must#3 は行内 span の HTML 出力が加わり(色+記号+行内下線の三重符号化)、TaskRunner で render/diff をワーカー化し占有世代照合で stale 結果を破棄。テスト改竄なし(DISABLED/skip/緩和なし。preview_builder 15件・diff_mode_model 17件は観測可能な挙動を検証、行内 span/エスケープ/範囲外 span 堅牢化も新規検証)。frontend-ui レビュワーは has_critical=false=d_review 100。 [HIGH/frontend-ui] build_preview_document が doc.kind を見ず常に preview.css の html,body グローバル指定(背景/文字色/フォント)を出力し、HTMLプレビュー(ユーザー文書)の自前スタイルを上書きする。ui-design 2章末/12章『HTMLプレビュー(ユーザー文書)にはテーマを適用しない(文書自身のスタイルを尊重・要件11.3)』に反する。critical(主要操作不能/致命的a11y)ではないため passed はブロックしないが、次ターンで kind==Html のとき body グローバル指定(地色/文字色/フォント)を当てない(body.preview スコープに限定)構成へ寄せること。 [MEDIUM] WebView2 テーマが prefers-color-scheme のみ依存でネイティブ選択テーマ(ライト/ダーク/システム追従)と非同期。テーマ実配線は sprint7 だが :root トークンをネイティブから注入できる構造(body.theme-dark 付与 or CSS変数差し込み)へ寄せる必要。 [MEDIUM] 差分行 white-space:pre に対し body.diff-view/.diff に overflow-x の受け皿がなく、長い1行が環境によりクリップされ得る。.diff か .diff-line に overflow 制御を明示すること。 [LOW] ui-design 2章の diff gut(ガター背景)サブトークンが preview.css 未反映(.diff-marker 地色が行背景任せ)。トークン正典との一貫性として gut を反映するか canon 側で不要確定を。 [品質] controller=純粋関数/ui=wx配線の責務分離が既存パターンと整合、占有世代の適用前照合・CSP+IsScriptEnabled+パス許可リストの多層防御・TaskRunner オフロードは設計原則(データを失わない>固まらない)に沿う。YAGNI 順守。",
+  "feedback_structured": {
+    "high": [
+      {"area": "frontend-ui/HTMLプレビューへのテーマ上書き", "message": "build_preview_document(preview_builder.cpp:206-215)が doc.kind を見ず、常に build_head→<link app.pika/preview.css> を出力する。preview.css の html,body{background;color;font-family;font-size;line-height}(38-47)がユーザー HTML 文書の地色/本文色/フォントを強制上書きし、ui-design 2章末/12章『HTMLプレビュー(ユーザー文書)にはテーマを適用しない(要件11.3)』に反する。critical ではない(passed 非ブロック)が、kind==Html のとき pika 由来テーマ CSS(少なくとも body 地色/文字色/フォント)を当てない、または body.preview スコープへ限定し body 直下グローバル指定を外す構成にすべき。"}
+    ],
+    "medium": [
+      {"area": "テーマ追従の非同期", "message": "preview.css の WebView2 側テーマが @media prefers-color-scheme(OS設定)のみ依存で、pika のネイティブ選択テーマ(ライト固定/ダーク固定/システム追従の解決結果)と同期しない。ユーザーが pika をライト固定・OS がダーク(または逆)のときプレビュー/差分だけ配色が反転する。テーマ実配線は sprint7 だが、:root トークンをネイティブから注入できる構造(解決済み body.theme-dark 付与 or SetPage 時の CSS 変数差し込み)へ寄せる必要がある。"},
+      {"area": "差分の横オーバーフロー受け皿欠如", "message": "差分行が white-space:pre で折り返さないのに body.diff-view/.diff に overflow-x 指定がない。長い1行(最小化 HTML・URL・日本語長文)で、ソース+差分ON(差分面のみ)や分割の差分面は横スクロールの受け皿がなく環境次第で末尾がクリップされ得る。.diff か .diff-line に overflow 制御を入れて挙動を確定させる。"}
+    ],
+    "low": [
+      {"area": "ガタートークン未反映", "message": "ui-design 2章は diff-add/del に {bg,tx,gut,word} の4サブトークンを定義するが preview.css は gut(ガター背景)を取り込んでおらず .diff-marker 地色を行背景任せにしている。視覚上の軽微なズレ(主要操作に影響なし)。トークン正典との一貫性として gut を反映するか、canon 側で gut 不要と確定させるのが望ましい。"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

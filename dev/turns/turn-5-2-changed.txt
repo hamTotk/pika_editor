@@ -1,0 +1,10 @@
+CHANGED:
+src/app/CMakeLists.txt
+src/controller/preview_builder.cpp
+src/controller/preview_builder.h
+src/ui/main_frame.cpp
+src/ui/main_frame.h
+src/ui/preview_view.cpp
+src/ui/preview_view.h
+tests/controller/preview_builder_test.cpp
+assets/preview.css

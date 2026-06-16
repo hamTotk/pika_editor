@@ -1,0 +1,15 @@
+{
+  "reviewer": "frontend-ui",
+  "project_dir": "C:/dev/pika_editor",
+  "spec": "C:/dev/pika_editor/dev/spec.md",
+  "sprints": "C:/dev/pika_editor/dev/sprints.json",
+  "sprint_id": 5,
+  "iteration": 2,
+  "changed_files": "C:/dev/pika_editor/dev/turns/turn-5-2-changed.txt",
+  "use_playwright": false,
+  "turns_dir": "C:/dev/pika_editor/dev/turns",
+  "output_contract": {
+    "findings_file": "C:/dev/pika_editor/dev/turns/turn-5-2-review-frontend-ui.json",
+    "schema": "~/.claude/skills/assign-dev-reviewer/review-schema.json"
+  }
+}

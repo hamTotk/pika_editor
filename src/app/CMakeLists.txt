@@ -70,6 +70,16 @@ target_link_libraries(pika
         wx::base
 )
 
+# 同梱アセット（preview.css 等）を exe 隣の assets/ へ配置する（app.pika 仮想ホストの配信元。
+# design 6章 C6・sprint5）。MainFrame::asset_dir() が exe ディレクトリ＋"assets" を解決するため、
+# ビルド後に同期しておく（系統C の WebView2 実描画でスタイルが当たる）。
+add_custom_command(TARGET pika POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/assets"
+            "$<TARGET_FILE_DIR:pika>/assets"
+    COMMENT "Copy bundled assets (preview.css) next to pika.exe for app.pika virtual host"
+)
+
 # ---- pika.com: コンソールサブシステムの薄いスタブ ----
 # 名前を pika.com にして、エクスプローラー/シェルが pika より先に解決できるようにする
 # （--help/--version・引数検証・終了コードをコンソールで返す。design.md 12章・要件3章）。

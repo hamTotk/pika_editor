@@ -17,6 +17,7 @@
 #include "core/settings/settings.h"
 #include "core/watcher/fs_event.h"
 #include "core/watcher/watcher_core.h"
+#include "util/task_runner.h"
 
 #include <wx/aui/auibook.h>
 #include <wx/frame.h>
@@ -25,6 +26,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+class wxMenuItem;
 
 namespace pika::ui
 {
@@ -79,10 +82,14 @@ class MainFrame : public wxFrame
     void on_toggle_diff(wxCommandEvent& evt);
     // 現モード×差分トグルから描画面を解決し、共有 WebView2 へ再ナビゲートする（占有世代照合）。
     void update_preview();
+    // 差分トグルの可否を再評価し、メニュー項目の Enable/Check とステータス文言へ反映する。
+    void update_diff_toggle_state();
     // プレビュー内リンクの振り分け（相対 .md/.html はタブ・他は既定ブラウザ。design 6章）。
     void on_preview_navigate(const std::string& url);
     // アクティブタブのエディタ（無ければ nullptr）。
     EditorPanel* active_editor() const;
+    // アクティブタブのファイル絶対パス（無ければ空文字。プレビュー種別/差分可否の分類に使う）。
+    std::string active_file_path() const;
     void on_tree_file_activated(const std::string& rel_path);
     void on_notebook_page_changed(wxAuiNotebookEvent& evt);
     void on_notebook_page_close(wxAuiNotebookEvent& evt);
@@ -107,6 +114,10 @@ class MainFrame : public wxFrame
     std::unique_ptr<core::watcher::WatcherCore> watcher_; // 合成・自己保存抑制（非スレッドセーフ）
     std::unique_ptr<app::WatchThread> watch_thread_;      // ReadDirectoryChangesW 監視スレッド
     wxTimer debounce_timer_; // デバウンス窓経過後に poll を再実行する単発タイマー
+
+    // 重い変換（render_markdown・差分計算）を UI スレッドから外すワーカー（design 4章）。
+    util::TaskRunner tasks_;
+    wxMenuItem* diff_item_ = nullptr; // 差分トグル項目（Enable/Check を更新するため保持）
 };
 
 } // namespace pika::ui

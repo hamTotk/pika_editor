@@ -1,0 +1,137 @@
+/* pika プレビュー/差分の同梱スタイル（https://app.pika/preview.css から配信）。
+ * ui-design.md 2章カラートークン・8/11章差分視覚仕様の正典に従う。
+ * 色だけに依存させない（差分は +/- 記号＋行背景＋行内下線で冗長符号化。要件8.4 / ui-design 1章）。
+ * ライト/ダークは prefers-color-scheme で追従する（ネイティブ側テーマと同期。design 10章）。 */
+
+:root {
+    --bg: #fafafb;
+    --fg: #26262b;
+    --fg-2: #5a5a62;
+    --border-1: #dcdce0;
+    --accent: #4f74a8;
+    /* 差分追加（背景/記号/ガター/行内）。ui-design 2章。 */
+    --diff-add-bg: #e9f2ec;
+    --diff-add-tx: #2f6b41;
+    --diff-add-word: #bbddc6;
+    /* 差分削除。 */
+    --diff-del-bg: #f6ebec;
+    --diff-del-tx: #a4423c;
+    --diff-del-word: #e7bebb;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #212126;
+        --fg: #d9d9df;
+        --fg-2: #97979f;
+        --border-1: #2b2b31;
+        --accent: #7d9ec9;
+        --diff-add-bg: #18271d;
+        --diff-add-tx: #6fb585;
+        --diff-add-word: #2f5b3d;
+        --diff-del-bg: #271a1c;
+        --diff-del-tx: #d18b86;
+        --diff-del-word: #5f3535;
+    }
+}
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Segoe UI", "Yu Gothic UI", system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+body.preview {
+    padding: 16px 24px;
+}
+
+/* ---- 差分（unified。行頭マーカ＋行背景＋行内下線で色非依存。ui-design 8章） ---- */
+
+body.diff-view,
+.diff {
+    font-family: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre;
+}
+
+.diff-line {
+    display: flex;
+    padding: 0 8px;
+}
+
+.diff-marker {
+    flex: 0 0 1.5em;
+    color: var(--fg-2);
+    text-align: center;
+    user-select: none;
+}
+
+.diff-text {
+    flex: 1 1 auto;
+}
+
+.diff-add {
+    background: var(--diff-add-bg);
+}
+
+.diff-add .diff-marker {
+    color: var(--diff-add-tx);
+}
+
+.diff-del {
+    background: var(--diff-del-bg);
+}
+
+.diff-del .diff-marker {
+    color: var(--diff-del-tx);
+}
+
+/* 行内強調（変更語）。色＋下線で冗長化（色非依存。ui-design 8章「色＋記号＋行内下線」）。 */
+.diff-add .diff-word {
+    background: var(--diff-add-word);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.diff-del .diff-word {
+    background: var(--diff-del-word);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.diff-truncated {
+    padding: 16px;
+    color: var(--fg-2);
+}
+
+/* プレビュー＋差分ON＝1枚WebView2内に左プレビュー・右差分を grid（独立スクロール。design 6章）。 */
+body.preview-diff-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    height: 100vh;
+    margin: 0;
+}
+
+.preview-diff-grid .grid-left,
+.preview-diff-grid .grid-right {
+    overflow: auto;
+    height: 100vh;
+    box-sizing: border-box;
+}
+
+.preview-diff-grid .grid-left {
+    padding: 16px 24px;
+    border-right: 1px solid var(--border-1);
+}
+
+/* 空/エラーの最小フォールバック本文（ui-design 15章 Empty/Error。白紙にしない）。 */
+.pika-placeholder {
+    padding: 24px;
+    color: var(--fg-2);
+}
