@@ -64,6 +64,17 @@ struct InstanceContext
 {
     bool pipe_acquired = false;
     std::string user_sid;
+    // セキュアな単一インスタンス保護（per-user パイプ名＋作成者のみ許可する
+    // owner-only DACL）を構築できたか。false の条件＝
+    //  (1) 自プロセス SID を取得できない（OpenProcessToken/GetTokenInformation
+    //      失敗・制限トークン）→ per-user パイプ名も owner-only SDDL も作れない
+    //  (2) owner-only DACL の SECURITY_DESCRIPTOR を構築できずパイプを未作成にした
+    //      （pipe_server 第2層の fail-closed）
+    // いずれも owner-less パイプを公開してはならず、ユーザー別分離も失われる。
+    // このとき IPC を一切張らずスタンドアロン起動（主インスタンスとして開く・
+    // 転送しない）へ縮退する必要があるため、decide_instance はこのフラグを最優先で
+    // 見る（要件3.2 の fail-closed・要件12.3）。
+    bool secure_isolation_available = true;
 };
 
 // 単一インスタンス判定の結果。role がクライアントのとき、転送すべきパイプ名と 1 行 JSON が埋まる。
@@ -78,8 +89,12 @@ struct InstanceDecision
 };
 
 // 単一インスタンスの役割を決め、クライアントなら転送 JSON を組み立てる純粋関数。
-// - pipe_acquired=true → Server（pipe_name のみ）。
-// - pipe_acquired=false → Client（pipe_name ＋ plan を IpcRequest 化した transfer_json）。
+// - secure_isolation_available=false → Server（スタンドアロン縮退。pipe_acquired は無視し、
+//   転送しない＝transfer_json は空）。セキュアなパイプを作れない以上、敗者クライアントとして
+//   存在しない/owner-less なサーバーへ転送しに行く経路には絶対に落とさない（fail-closed）。
+// - secure_isolation_available=true かつ pipe_acquired=true → Server（pipe_name のみ）。
+// - secure_isolation_available=true かつ pipe_acquired=false →
+//   Client（pipe_name ＋ plan を IpcRequest 化した transfer_json）。
 //   転送するのは plan の絶対パス化済み対象のみ（サーバー CWD 非依存。要件3.2）。
 InstanceDecision decide_instance(const InstanceContext& inst, const OpenPlan& plan);
 

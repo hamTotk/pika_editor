@@ -25,6 +25,7 @@
 #include "core/ipc/pipe_security.h"
 #include "core/settings/settings.h"
 #include "ui/main_frame.h"
+#include "util/logger.h"
 
 #include <wx/app.h>
 #include <wx/filename.h>
@@ -123,6 +124,17 @@ std::vector<std::string> collect_args(int argc, wxChar** argv)
     return args;
 }
 
+// 診断ログ（要件12.3）。本フェーズはファイルログ未配線のため、Win32 のデバッグ出力チャンネル
+// （OutputDebugStringA）へ流す。Logger の API はユーザー内容を渡せない形（op/path/detail のみ）
+// なので、内容混入は構造的に起きない（要件12.3「ファイル内容を書かない」）。
+pika::util::Logger make_diag_logger()
+{
+    return pika::util::Logger([](pika::util::LogLevel, const std::string& line) {
+        const std::string out = "pika: " + line + "\n";
+        OutputDebugStringA(out.c_str());
+    });
+}
+
 // 受理された OpenPlan からファイル対象の絶対パス列を取り出す（タブで開く対象）。
 std::vector<std::string> file_paths(const pika::controller::OpenPlan& plan)
 {
@@ -161,14 +173,44 @@ class PikaApp : public wxApp
 
         // 2. 単一インスタンス判定（design 5.1 手順2）。SID→パイプ名→CreateNamedPipe
         // の原子的ロック。
+        pika::util::Logger diag = make_diag_logger();
         const std::string sid = pika::app::current_user_sid();
         ctl::InstanceContext inst;
         inst.user_sid = sid;
-        const std::string pipe_name = ipc::make_pipe_name(sid);
-        const std::string owner_sddl = ipc::make_owner_only_sddl(sid);
 
-        pipe_ = std::make_unique<pika::app::PipeServer>();
-        inst.pipe_acquired = pipe_->try_acquire(pipe_name, owner_sddl);
+        // fail-closed（要件3.2）: SID を取得できない（OpenProcessToken/GetTokenInformation
+        // 失敗・制限トークン等）と、per-user パイプ名も owner-only DACL も作れない。owner-less な
+        // 既定 DACL のパイプを公開する fail-open へは決して落とさず、IPC を一切張らずスタンドアロン
+        // 起動（主インスタンスとして開く・転送しない）へ縮退する。診断は内容を書かない（要件12.3）。
+        if (sid.empty())
+        {
+            diag.warn("single-instance", "n/a", "sid-unavailable; security disabled; standalone");
+            inst.secure_isolation_available = false;
+            pipe_.reset(); // パイプは作らない（try_acquire を呼ばない）。
+        }
+        else
+        {
+            const std::string pipe_name = ipc::make_pipe_name(sid);
+            const std::string owner_sddl = ipc::make_owner_only_sddl(sid);
+
+            pipe_ = std::make_unique<pika::app::PipeServer>();
+            const pika::app::AcquireResult acq = pipe_->try_acquire(pipe_name, owner_sddl);
+            if (acq == pika::app::AcquireResult::InsecureNotCreated)
+            {
+                // 第2層 fail-closed: owner-only DACL を構築できずパイプ未作成。owner-less パイプは
+                // 公開されていない（存在しない）。スタンドアロン縮退として扱う（転送しに行かない）。
+                diag.warn("single-instance", "n/a",
+                          "owner-dacl-failed; security disabled; standalone");
+                inst.secure_isolation_available = false;
+                pipe_.reset();
+            }
+            else
+            {
+                inst.secure_isolation_available = true;
+                inst.pipe_acquired = (acq == pika::app::AcquireResult::Server);
+            }
+        }
+
         const ctl::InstanceDecision decision = ctl::decide_instance(inst, plan);
 
         if (decision.role == ctl::InstanceRole::Client)
@@ -190,20 +232,25 @@ class PikaApp : public wxApp
         // フローは非活性＝退避先未確定で破壊的操作を始めない。設計原則1）。
         const std::string data_root = resolve_data_root_path();
         frame_ = new pika::ui::MainFrame(settings, data_root);
-        pipe_->start_listening([this](const std::string& line) {
-            // パイプスレッドから来る。UI スレッドへ渡す（CallAfter）。
-            pika::core::ipc::IpcRequest req;
-            if (!pika::core::ipc::parse_request(line, req))
-            {
-                return; // 信頼境界: スキーマ不一致は破棄。
-            }
-            std::vector<std::string> files;
-            for (const auto& t : req.targets)
-            {
-                files.push_back(t.path);
-            }
-            CallAfter([this, files]() { frame_->apply_open_targets(files); });
-        });
+        // スタンドアロン縮退時（pipe_ が null）はサーバーを公開しない（セキュアなパイプを作れない
+        // ＝IPC を張らない。受信リスナーも起動しない）。サーバーになれたときのみ公開する。
+        if (pipe_)
+        {
+            pipe_->start_listening([this](const std::string& line) {
+                // パイプスレッドから来る。UI スレッドへ渡す（CallAfter）。
+                pika::core::ipc::IpcRequest req;
+                if (!pika::core::ipc::parse_request(line, req))
+                {
+                    return; // 信頼境界: スキーマ不一致は破棄。
+                }
+                std::vector<std::string> files;
+                for (const auto& t : req.targets)
+                {
+                    files.push_back(t.path);
+                }
+                CallAfter([this, files]() { frame_->apply_open_targets(files); });
+            });
+        }
 
         // 5. MainFrame 生成・表示（最短経路。design 5.1 手順3）。
         SetTopWindow(frame_);
