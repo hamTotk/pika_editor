@@ -8,6 +8,9 @@
 #include "controller/tree_view_model.h"
 #include "core/diff/diff_engine.h"
 #include "core/render/markdown_renderer.h"
+#include "core/snapshot/sensitive.h"
+#include "core/snapshot/snapshot_store.h"
+#include "core/snapshot/snapshot_types.h"
 #include "core/watcher/fs_probe.h"
 #include "core/watcher/resync.h"
 #include "core/workspace/workspace_model.h"
@@ -17,6 +20,7 @@
 #include "ui/ui_messages.h"
 #include "util/atomic_file.h"
 #include "util/encoding.h"
+#include "util/hash.h"
 
 #include <wx/accel.h>
 #include <wx/dirdlg.h>
@@ -31,6 +35,7 @@
 #include <wx/stdpaths.h>
 #include <wx/utils.h>
 
+#include <ctime>
 #include <optional>
 
 namespace pika::ui
@@ -40,12 +45,16 @@ namespace
 {
 
 // 表示メニューの項目 ID（モード排他＝ラジオ、差分＝チェック。ui-design 8章）。
+// 確認/保存/巻き戻し（design 5.3・5.4・10章 J3/J6）の ID もここに集約する。
 enum
 {
     ID_MODE_SOURCE = wxID_HIGHEST + 1,
     ID_MODE_SPLIT,
     ID_MODE_PREVIEW,
     ID_TOGGLE_DIFF,
+    ID_CONFIRM,
+    ID_CONFIRM_ALL,
+    ID_ROLLBACK,
 };
 
 wxString u8(const std::string& s)
@@ -93,9 +102,9 @@ std::string asset_dir()
 
 } // namespace
 
-MainFrame::MainFrame(const core::settings::Settings& settings)
+MainFrame::MainFrame(const core::settings::Settings& settings, const std::string& data_root)
     : wxFrame(nullptr, wxID_ANY, u8(MsgId::AppTitle), wxDefaultPosition, wxSize(1100, 720)),
-      settings_(settings)
+      settings_(settings), data_root_(data_root)
 {
     build_menu();
     build_layout();
@@ -103,6 +112,8 @@ MainFrame::MainFrame(const core::settings::Settings& settings)
     // デバウンス窓経過後に poll を再実行し、バースト最後のイベントを確定させる（単発タイマー）。
     debounce_timer_.SetOwner(this);
     Bind(wxEVT_TIMER, &MainFrame::on_debounce_timer, this, debounce_timer_.GetId());
+    // フォーカス別ショートカット（Ctrl+Enter 等）を全体で 1 か所に集約して捌く（design 10章 J3）。
+    Bind(wxEVT_CHAR_HOOK, &MainFrame::on_char_hook, this);
 }
 
 MainFrame::~MainFrame()
@@ -116,10 +127,18 @@ void MainFrame::build_menu()
 
     auto* file_menu = new wxMenu();
     file_menu->Append(wxID_OPEN, u8(MsgId::MenuOpenFolder));
+    file_menu->Append(wxID_SAVE, u8(MsgId::MenuSave));
     file_menu->Append(wxID_CLOSE, u8(MsgId::MenuClose));
     file_menu->AppendSeparator();
     file_menu->Append(wxID_EXIT, u8(MsgId::MenuExit));
     menu_bar->Append(file_menu, u8(MsgId::MenuFile));
+
+    // レビュー（中心体験④）：確認済み/すべて確認済み/巻き戻し（design 5.4・10章 J6）。
+    auto* review_menu = new wxMenu();
+    review_menu->Append(ID_CONFIRM, u8(MsgId::MenuConfirm));
+    review_menu->Append(ID_CONFIRM_ALL, u8(MsgId::MenuConfirmAll));
+    review_menu->Append(ID_ROLLBACK, u8(MsgId::MenuRollback));
+    menu_bar->Append(review_menu, "レビュー(&R)");
 
     auto* view_menu = new wxMenu();
     // 再読み込み（F5）。監視不能環境/取りこぼし時のオンデマンド再同期（要件11.2・design 5.2）。
@@ -140,10 +159,14 @@ void MainFrame::build_menu()
     SetMenuBar(menu_bar);
 
     Bind(wxEVT_MENU, &MainFrame::on_open_folder, this, wxID_OPEN);
+    Bind(wxEVT_MENU, &MainFrame::on_save, this, wxID_SAVE);
     Bind(wxEVT_MENU, &MainFrame::on_close_tab, this, wxID_CLOSE);
     Bind(wxEVT_MENU, &MainFrame::on_exit, this, wxID_EXIT);
     Bind(wxEVT_MENU, &MainFrame::on_about, this, wxID_ABOUT);
     Bind(wxEVT_MENU, &MainFrame::on_refresh, this, wxID_REFRESH);
+    Bind(wxEVT_MENU, &MainFrame::on_confirm, this, ID_CONFIRM);
+    Bind(wxEVT_MENU, &MainFrame::on_confirm_all, this, ID_CONFIRM_ALL);
+    Bind(wxEVT_MENU, &MainFrame::on_rollback, this, ID_ROLLBACK);
     Bind(wxEVT_MENU, &MainFrame::on_set_mode_source, this, ID_MODE_SOURCE);
     Bind(wxEVT_MENU, &MainFrame::on_set_mode_split, this, ID_MODE_SPLIT);
     Bind(wxEVT_MENU, &MainFrame::on_set_mode_preview, this, ID_MODE_PREVIEW);
@@ -388,6 +411,12 @@ void MainFrame::open_file(const std::string& file_abs)
         const auto cfg = controller::make_editor_config(settings_, text.newline);
         editor->apply_config(cfg);
         editor->set_text_utf8(text.content);
+        // 保存衝突判定の素材（読み込み時点のハッシュ・エンコーディング）を記録する（design 5.3）。
+        DocMeta meta;
+        meta.last_loaded_hash = util::xxh3_64_lf_hex(text.content);
+        meta.encoding = text.encoding;
+        meta.has_bom = text.has_bom;
+        doc_meta_[file_abs] = meta;
     }
     else
     {
@@ -486,6 +515,317 @@ std::string MainFrame::active_file_path() const
     }
     const controller::TabState* st = tabs_.at(active);
     return st ? st->path : std::string{};
+}
+
+std::string MainFrame::rel_path_for(const std::string& abs) const
+{
+    // workspace_ 配下のファイルのみ確認済み/退避の対象（'/' 区切りの相対パス）。範囲外は空を返す。
+    if (workspace_.empty() || abs.size() <= workspace_.size())
+    {
+        return {};
+    }
+    if (abs.compare(0, workspace_.size(), workspace_) != 0 || abs[workspace_.size()] != '/')
+    {
+        return {};
+    }
+    return abs.substr(workspace_.size() + 1);
+}
+
+core::document::FileContentClass MainFrame::active_content_class() const
+{
+    // 退避可否の種別（要件9.2）。機密（.env 等）と 10MB 以上は内容 object を持てない＝退避不能。
+    core::document::FileContentClass cls;
+    const std::string abs = active_file_path();
+    const std::string rel = rel_path_for(abs);
+    cls.sensitive = !rel.empty() && core::snapshot::is_sensitive_default(rel);
+    if (EditorPanel* editor = active_editor())
+    {
+        cls.content_object_allowed = editor->text_utf8().size() < core::snapshot::kContentSizeLimit;
+    }
+    return cls;
+}
+
+controller::FocusContext MainFrame::current_focus() const
+{
+    // 入力フォーカスを持つウィンドウからショートカット文脈を判定する（design 10章 J3・F6 循環）。
+    // IsDescendant が非 const ポインタを要求するため focused も非 const で受ける（読み取りのみ）。
+    wxWindow* focused = FindFocus();
+    if (focused == nullptr)
+    {
+        return controller::FocusContext::Other;
+    }
+    if (dynamic_cast<const EditorPanel*>(focused) != nullptr)
+    {
+        return controller::FocusContext::Editor;
+    }
+    if (preview_ != nullptr && (focused == preview_ || preview_->IsDescendant(focused)))
+    {
+        // 共有 1 枚 WebView2 は差分とプレビューを兼ねる。現在の差分トグルで文脈を弁別する。
+        return diff_on_ ? controller::FocusContext::DiffView : controller::FocusContext::Preview;
+    }
+    if (tree_ != nullptr && (focused == tree_ || tree_->IsDescendant(focused)))
+    {
+        return controller::FocusContext::Tree;
+    }
+    return controller::FocusContext::Other;
+}
+
+void MainFrame::on_char_hook(wxKeyEvent& evt)
+{
+    // フォーカス別ショートカットは controller::dispatch_shortcut が決める（wx 非依存・gtest
+    // 済み）。 ここはキーイベントを KeyChord
+    // へ写し、結果のアクションを実ハンドラへ振り分けるだけにする。
+    controller::KeyChord chord;
+    chord.ctrl = evt.ControlDown();
+    chord.shift = evt.ShiftDown();
+    chord.alt = evt.AltDown();
+    chord.enter = (evt.GetKeyCode() == WXK_RETURN || evt.GetKeyCode() == WXK_NUMPAD_ENTER);
+
+    switch (controller::dispatch_shortcut(current_focus(), chord))
+    {
+    case controller::ShortcutAction::Confirm: {
+        wxCommandEvent e(wxEVT_MENU, ID_CONFIRM);
+        on_confirm(e);
+        return; // 既定動作（改行挿入等）を奪う＝確認に消費した。
+    }
+    case controller::ShortcutAction::ConfirmAll: {
+        wxCommandEvent e(wxEVT_MENU, ID_CONFIRM_ALL);
+        on_confirm_all(e);
+        return;
+    }
+    case controller::ShortcutAction::None:
+        break; // 割当なし＝既定動作へ委ねる（エディタの改行挿入等を奪わない）。
+    }
+    evt.Skip();
+}
+
+void MainFrame::on_save(wxCommandEvent&)
+{
+    // 保存・衝突退避（design 5.3）。判断は controller::DocumentController（wx 非依存・gtest
+    // 済み）に 委ね、ここは index の load→操作→save と実ディスク I/O・通知だけを担う。
+    EditorPanel* editor = active_editor();
+    const std::string abs = active_file_path();
+    const std::string rel = rel_path_for(abs);
+    if (editor == nullptr || abs.empty() || data_root_.empty())
+    {
+        return;
+    }
+
+    const std::string snapshots_root = data_root_ + "\\snapshots";
+    // 退避結合の対象キー。ワークスペース配下なら workspace_key、単体ファイルは file_key
+    // で同じ仕組みへ。
+    const std::string ws_key =
+        rel.empty() ? core::snapshot::file_key(abs) : core::snapshot::workspace_key(workspace_);
+    core::snapshot::SnapshotStore store(snapshots_root, ws_key);
+    controller::DocumentController doc(store);
+
+    auto loaded = store.load();
+    core::snapshot::SnapshotIndex index =
+        loaded.is_ok() ? loaded.value() : core::snapshot::SnapshotIndex{};
+
+    controller::SaveContext ctx;
+    ctx.rel_path = rel.empty() ? abs : rel;
+    ctx.buffer_content = editor->text_utf8();
+    // 現ディスクの実内容を再読込してハッシュ再計算する（キャッシュ値を使わない。design 5.3
+    // 手順1）。
+    const auto disk = util::read_all(abs);
+    ctx.disk_content = disk.is_ok() ? disk.value() : std::string{};
+    const auto mit = doc_meta_.find(abs);
+    ctx.last_loaded_hash = mit != doc_meta_.end() ? mit->second.last_loaded_hash : std::string{};
+    ctx.encoding = mit != doc_meta_.end() ? mit->second.encoding : util::Encoding::Utf8;
+    ctx.cls = active_content_class();
+    ctx.time = static_cast<std::int64_t>(::time(nullptr));
+
+    const controller::SavePlan plan = doc.prepare_save(index, ctx);
+    if (!plan.ok())
+    {
+        // 退避結合の Result を握り潰さず通知へ変換する（データを失わない。design 1章）。
+        MsgId mid = MsgId::NotifyStashFailed;
+        if (plan.decision == controller::SaveDecision::BlockedEncoding)
+        {
+            mid = MsgId::NotifyBlockedEncoding;
+        }
+        else if (plan.decision == controller::SaveDecision::BlockedUnstashable)
+        {
+            mid = MsgId::NotifyBlockedUnstashable;
+        }
+        wxMessageBox(u8(mid), u8(MsgId::AppTitle), wxOK | wxICON_WARNING, this);
+        return;
+    }
+
+    // 退避が取れた（または衝突なし）＝アトミック置換に進む。エンコーディング/改行は読み込み時の記録
+    // どおりに復元する（design 5.3 手順5。原文維持）。表現可能性は prepare_save で検査済み。
+    const bool with_bom = mit != doc_meta_.end() && mit->second.has_bom;
+    const auto encoded = util::encode(ctx.buffer_content, ctx.encoding, with_bom);
+    if (encoded.is_err())
+    {
+        wxMessageBox(u8(MsgId::NotifyBlockedEncoding), u8(MsgId::AppTitle), wxOK | wxICON_WARNING,
+                     this);
+        return;
+    }
+    const auto written = util::write_atomic(abs, encoded.value());
+    if (written.is_err())
+    {
+        return; // I/O 失敗。旧内容は破壊しない（write_atomic の不変条件）。
+    }
+
+    // incoming 退避が起きていれば index を保存しておく（退避 object のダングリングを防ぐ）。
+    if (!plan.stash_hash.empty())
+    {
+        store.save(index);
+    }
+
+    // 保存後の状態を更新する（次回保存の衝突基準を保存内容へ。自己保存抑制は watcher 側で済む）。
+    if (mit != doc_meta_.end())
+    {
+        mit->second.last_loaded_hash = util::xxh3_64_lf_hex(ctx.buffer_content);
+    }
+    tabs_.set_unsaved(abs, false);
+    status_->SetStatusText(plan.conflict ? u8(MsgId::NotifyConflict) : u8(MsgId::StatusSaved), 0);
+}
+
+void MainFrame::on_confirm(wxCommandEvent&)
+{
+    // 「確認済みにする」（design 5.4）。現ディスク内容でベースラインを更新し未読を解除する。退避結合の
+    // Result を握り潰さず、失敗時は未読を維持して通知へ変換する（DocumentController が判断する）。
+    const std::string abs = active_file_path();
+    const std::string rel = rel_path_for(abs);
+    if (abs.empty() || rel.empty() || data_root_.empty())
+    {
+        return;
+    }
+
+    const std::string snapshots_root = data_root_ + "\\snapshots";
+    core::snapshot::SnapshotStore store(snapshots_root, core::snapshot::workspace_key(workspace_));
+    controller::DocumentController doc(store);
+    auto loaded = store.load();
+    core::snapshot::SnapshotIndex index =
+        loaded.is_ok() ? loaded.value() : core::snapshot::SnapshotIndex{};
+
+    // 確認済みにする内容はディスクの実内容（確定直前に再読込。design 5.4 E2「見ていない内容を
+    // ベースライン化しない」のための再照合の素材）。
+    const auto disk = util::read_all(abs);
+    if (disk.is_err())
+    {
+        return;
+    }
+    core::document::ReviewTarget target;
+    target.rel_path = rel;
+    target.content = disk.value();
+    target.mtime = static_cast<std::int64_t>(::time(nullptr));
+    target.cls = active_content_class();
+
+    auto out = doc.confirm(index, workspace_ctl_.unread_mut(), target);
+    if (out.is_err())
+    {
+        // 退避/更新失敗。未読は維持され、通知へ変換する（データを失わない）。
+        wxMessageBox(u8(MsgId::NotifyStashFailed), u8(MsgId::AppTitle), wxOK | wxICON_WARNING,
+                     this);
+        return;
+    }
+    store.save(index);
+    // ツリー/タブのマーク解除（未読集合から外れた）。
+    tabs_.set_unread(abs, false, /*has_baseline*/ true);
+    refresh_tree();
+    update_status();
+    status_->SetStatusText(u8(MsgId::StatusConfirmed), 0);
+}
+
+void MainFrame::on_confirm_all(wxCommandEvent&)
+{
+    // 「すべて確認済みにする」（design 5.4・J6）。開始時点の未読集合をフリーズして一括処理する。退避
+    // 失敗/並行変化でスキップしたファイルは未読のまま残る（DocumentController
+    // が握り潰さず分類する）。
+    if (workspace_.empty() || data_root_.empty())
+    {
+        return;
+    }
+    const std::string snapshots_root = data_root_ + "\\snapshots";
+    core::snapshot::SnapshotStore store(snapshots_root, core::snapshot::workspace_key(workspace_));
+    controller::DocumentController doc(store);
+    auto loaded = store.load();
+    core::snapshot::SnapshotIndex index =
+        loaded.is_ok() ? loaded.value() : core::snapshot::SnapshotIndex{};
+
+    // 開始時点の未読集合をフリーズしてターゲット列を作る（freeze_hash＝現ディスク内容で並行変化検知）。
+    std::vector<core::document::ReviewTarget> targets;
+    for (const std::string& rel : workspace_ctl_.unread().items())
+    {
+        const auto disk = util::read_all(workspace_ + "/" + rel);
+        if (disk.is_err())
+        {
+            continue; // 読めないファイルは確認しない（縮退）。
+        }
+        core::document::ReviewTarget t;
+        t.rel_path = rel;
+        t.content = disk.value();
+        t.mtime = static_cast<std::int64_t>(::time(nullptr));
+        t.cls.sensitive = core::snapshot::is_sensitive_default(rel);
+        t.freeze_hash = util::xxh3_64_lf_hex(disk.value());
+        targets.push_back(std::move(t));
+    }
+
+    const std::string batch_id = "batch-" + std::to_string(::time(nullptr));
+    controller::ConfirmAllOutcome out =
+        doc.confirm_all(index, workspace_ctl_.unread_mut(), targets, batch_id,
+                        static_cast<std::int64_t>(::time(nullptr)));
+    store.save(index);
+    refresh_tree();
+    update_status();
+    (void)out; // skipped は通知バー集約 ViewModel（sprint7）でまとめて提示する。
+    status_->SetStatusText(u8(MsgId::StatusConfirmed), 0);
+}
+
+void MainFrame::on_rollback(wxCommandEvent&)
+{
+    // 「確認済み時点に戻す」（design 5.4）。現ディスク内容を rollback
+    // 退避し、ベースライン内容で上書き
+    // する（退避が先＝失われる内容を必ず残す）。退避を取れない対象は Unsupported を通知へ変換する。
+    const std::string abs = active_file_path();
+    const std::string rel = rel_path_for(abs);
+    if (abs.empty() || rel.empty() || data_root_.empty())
+    {
+        return;
+    }
+    const std::string snapshots_root = data_root_ + "\\snapshots";
+    core::snapshot::SnapshotStore store(snapshots_root, core::snapshot::workspace_key(workspace_));
+    controller::DocumentController doc(store);
+    auto loaded = store.load();
+    core::snapshot::SnapshotIndex index =
+        loaded.is_ok() ? loaded.value() : core::snapshot::SnapshotIndex{};
+
+    const auto disk = util::read_all(abs);
+    if (disk.is_err())
+    {
+        return;
+    }
+    core::document::ReviewTarget target;
+    target.rel_path = rel;
+    target.content = disk.value();
+    target.mtime = static_cast<std::int64_t>(::time(nullptr));
+    target.cls = active_content_class();
+
+    auto rolled = doc.rollback(index, target);
+    if (rolled.is_err())
+    {
+        wxMessageBox(u8(MsgId::NotifyBlockedUnstashable), u8(MsgId::AppTitle),
+                     wxOK | wxICON_WARNING, this);
+        return;
+    }
+    store.save(index);
+    // ベースライン内容でディスクを上書きしてバッファを再読込する（design 5.4）。
+    if (util::write_atomic(abs, rolled.value()).is_ok())
+    {
+        if (EditorPanel* editor = active_editor())
+        {
+            editor->set_text_utf8(rolled.value());
+        }
+        auto mit = doc_meta_.find(abs);
+        if (mit != doc_meta_.end())
+        {
+            mit->second.last_loaded_hash = util::xxh3_64_lf_hex(rolled.value());
+        }
+    }
 }
 
 void MainFrame::update_diff_toggle_state()

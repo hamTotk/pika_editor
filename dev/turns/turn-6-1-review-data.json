@@ -1,0 +1,39 @@
+{
+  "reviewer": "data",
+  "sprint_id": 6,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "トランザクション境界 / 永続化コミット",
+      "message": "確認済み・一括確認・巻き戻し・衝突保存の各ハンドラで store.save(index) の戻り値(Result<void>)を全箇所で握り潰している(main_frame.cpp:675, 726, 772, 815)。SnapshotStore は add_stash/revert_batch/set_baseline で in-memory index を更新する過程で不要 object を即座に物理削除する(mark-and-sweep)が、index.json のディスク反映は save に委ねる設計(snapshot_store.h:8-15 の保存順序不変条件)。save が I/O 失敗した場合、(a) object は既に物理削除済み・(b) index.json は旧状態のまま、となり旧 index がダングリング参照を持つ窓が残る(restore_* が次回起動時に silent NotFound)。さらに on_confirm では in-memory で未読解除済み・ベースライン更新済みなのに index.json 未反映のため、次回起動で確認状態が巻き戻る不整合になる。spec 補完判断4 と sprint6 must『退避結合の Result を握り潰さず通知/ログへ変換』の趣旨は業務 Result(confirm の退避失敗)については controller がカバーしテストもあるが、コミットに相当する store.save の Result はこのスコープの GUI 配線で誰もカバーしていない。これはコア既知の窓(report.md 持ち越し #5・将来 DocumentController で load→操作→save を原子化して塞ぐ前提)であり、save 失敗時に少なくとも通知/診断ログへ変換し未読維持側へ倒すことで毀損を抑えられる。critical ではなく high とする根拠: save 失敗は稀な I/O 異常系、退避 object 自体はディスク put 済みでサイドカー走査(recover_pending_stashes)で原理的に復元可能、コアが既知窓として残し将来塞ぐ前提のもの(sprint6 新規導入の欠陥ではない)。",
+      "location": "src/ui/main_frame.cpp:675,726,772,815"
+    },
+    {
+      "severity": "high",
+      "area": "整合性 / 不可逆操作のエラー握り潰し",
+      "message": "巻き戻し(on_rollback)で store.save(index)→write_atomic(abs, rolled.value()) の順に実行するが、write_atomic の戻り値を .is_ok() ガード(main_frame.cpp:817)で握り潰している。rollback 退避と index.json は既にコミット済み(815行)なのにディスク書き戻しが失敗した場合、ユーザーには『巻き戻したつもりがディスク・エディタは現内容のまま、退避だけ消費された』silent failure になる。失われる内容(現ディスク内容)は rollback 退避に保存済みなのでデータ損失そのものではないが、巻き戻し操作の半端完了で『見た目とディスクの不整合』が残り、ユーザーが気付けない。write_atomic 失敗時は通知へ変換すべき(on_save:667-670 はガードしているが巻き戻しは握り潰し、扱いが非一貫)。",
+      "location": "src/ui/main_frame.cpp:817"
+    },
+    {
+      "severity": "medium",
+      "area": "整合性 / 確認確定前の再照合欠落",
+      "message": "on_confirm はディスクを read_all して即 doc.confirm へ渡す(main_frame.cpp:707-718)。spec should と design 5.4 E2『確認済み確定直前に mtime/ハッシュを再照合し不一致なら中断・再差分する(ユーザーが見ていない内容をベースライン化しない)』に対応する再照合がハンドラ内にない。confirm_all は freeze_hash で並行変化を検知してスキップする保護があるが、単体 confirm にはその基準が無く(ReviewTarget.freeze_hash 未設定)、表示中の差分とディスクの現内容が乖離したまま確認するとユーザー未確認の内容をベースライン化しうる。should 範囲かつ単一ファイル操作で並行書き込みの確率は低いため medium。",
+      "location": "src/ui/main_frame.cpp:707-718"
+    },
+    {
+      "severity": "medium",
+      "area": "容量管理 / 退避ストアの GC・破損復元 未配線",
+      "message": "SnapshotStore の enforce_capacity(per-file 10件 LRU・全体500MB・90日GC・14日保護)・sweep_unreferenced_objects・recover_pending_stashes(index.json 破損時の退避サイドカー復元=D1)・purge が src/ui・src/app から一切呼ばれていない(grep で配線ゼロ)。本フェーズで退避を生成する経路(confirm_all の baseline-replace・incoming・rollback)を sprint6 で配線したことで退避 object が蓄積し始めるが、回収・容量上限・破損時復元の配線が無い。sprint6 のスコープ(確認・保存・衝突退避の結線)からは外れ後続スプリント/系統C 寄りであり、退避は『最後の砦』として残る方向(=データを失わない側)の未配線なので medium。ただし recover_pending_stashes 未配線は index.json 破損時に退避が到達不能になる経路で、上記 high の save 握り潰しと組み合わさるとリスクが上がる点を後続スプリントで併せて配線することを推奨。",
+      "location": "src/ui/main_frame.cpp"
+    },
+    {
+      "severity": "low",
+      "area": "整合性 / 操作ごとの SnapshotStore 再生成",
+      "message": "on_save/on_confirm/on_confirm_all/on_rollback の各ハンドラが毎回ローカルに SnapshotStore を構築し store.load()→操作→store.save() を完結させている。1 操作 1 トランザクションとして閉じる設計自体は妥当(load→操作→save をまとめる snapshot_store.h の規約に沿う)が、同一ワークスペースに対する操作が異なる SnapshotStore インスタンス経由で行われるため、将来複数操作を同一トランザクションにまとめたい(原子化窓を塞ぐ持ち越し #5 対応)際にこの構造が制約になる。現状は機能的に正しく data 整合性を壊さないため low。",
+      "location": "src/ui/main_frame.cpp:602-829"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint6 のデータ整合性の核(退避結合 Result の握り潰し防止)は controller 層(DocumentController)が正しく実装し gtest でも観測している(confirm/confirm_all/rollback/prepare_save の失敗時に未読維持・ベースライン非更新・Result 伝播を検証)。コア層(ReviewFlow/SnapshotStore)の退避先行・mark-and-sweep・一括取消保証も既存設計どおり健全。critical 該当(データ破損を招くスキーマ/トランザクション欠陥・不可逆操作)はなし。一方で本スプリントで新たに GUI へ降りた『コミットに相当する store.save の Result』と巻き戻しの write_atomic の Result が全箇所で握り潰されており(high×2)、これは退避結合 Result の握り潰し防止という must の趣旨が controller の外(GUI)で達成されていない穴。コアが既知窓として残す持ち越し #5 と同根のため critical ではなく high。確認確定直前の再照合欠落(medium)・容量GC/破損復元の未配線(medium)は data の不整合・到達不能リスクとして後続スプリントでの対応を推奨。"
+}

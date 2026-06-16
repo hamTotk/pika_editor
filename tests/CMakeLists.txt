@@ -8,8 +8,10 @@ add_executable(pika_tests
     controller/data_root_test.cpp
     controller/diff_mode_model_test.cpp
     controller/dir_lister_test.cpp
+    controller/document_controller_test.cpp
     controller/editor_view_model_test.cpp
     controller/preview_builder_test.cpp
+    controller/shortcut_table_test.cpp
     controller/tab_manager_test.cpp
     controller/tree_view_model_test.cpp
     controller/watch_event_map_test.cpp

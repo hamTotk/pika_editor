@@ -15,8 +15,11 @@
 #endif
 #include <windows.h>
 
+#include <shlobj.h>
+
 #include "app/pipe_server.h"
 #include "controller/app_controller.h"
+#include "controller/data_root.h"
 #include "core/ipc/cli_parser.h"
 #include "core/ipc/ipc_message.h"
 #include "core/ipc/pipe_security.h"
@@ -24,6 +27,8 @@
 #include "ui/main_frame.h"
 
 #include <wx/app.h>
+#include <wx/filename.h>
+#include <wx/stdpaths.h>
 #include <wx/string.h>
 
 #include <memory>
@@ -63,6 +68,48 @@ std::string current_working_dir()
     WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), out.data(), n, nullptr,
                         nullptr);
     return out;
+}
+
+// %LOCALAPPDATA%（通常版のデータルート親。UTF-8・末尾区切りなし）。取得不能なら空。
+std::string local_app_data_dir()
+{
+    PWSTR path = nullptr;
+    if (SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path) != S_OK || path == nullptr)
+    {
+        if (path != nullptr)
+        {
+            CoTaskMemFree(path);
+        }
+        return std::string();
+    }
+    std::wstring w(path);
+    CoTaskMemFree(path);
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0,
+                                nullptr, nullptr);
+    std::string out(static_cast<std::size_t>(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), out.data(), n, nullptr,
+                        nullptr);
+    return out;
+}
+
+// exe が置かれているディレクトリ（UTF-8・末尾区切りなし）。ポータブル判定・./pika-data の親。
+std::string exe_dir()
+{
+    wxFileName exe(wxStandardPaths::Get().GetExecutablePath());
+    std::string out(exe.GetPath().ToUTF8().data());
+    return out;
+}
+
+// データルートを解決する（design 5.1 手順1）。判断は controller::resolve_data_root（純ロジック・
+// gtest 済み）に委ね、ここは実 FS（portable.txt の有無・既知フォルダ取得）を注入するだけにする。
+std::string resolve_data_root_path()
+{
+    pika::controller::DataRootProbe probe;
+    probe.exe_dir = exe_dir();
+    probe.local_app_data = local_app_data_dir();
+    probe.portable_marker_present = path_is_file(probe.exe_dir + "\\portable.txt");
+    const pika::controller::DataRoot dr = pika::controller::resolve_data_root(probe);
+    return dr.resolved ? dr.path : std::string();
 }
 
 // argv（wx が渡す引数）を UTF-8 std::string 列へ（プログラム名は除く）。
@@ -139,7 +186,10 @@ class PikaApp : public wxApp
         // 4. サーバー公開（受信リスナー起動）を**ウィンドウ表示の前に**完了する（TOCTOU 回避。
         //    design 5.1 手順2「サーバー公開はウィンドウ表示前」）。受信は UI
         //    スレッドへマーシャリング。
-        frame_ = new pika::ui::MainFrame(settings);
+        // データルート（退避・ベースラインの保存先）を解決して渡す（design 5.1 手順1。空なら退避
+        // フローは非活性＝退避先未確定で破壊的操作を始めない。設計原則1）。
+        const std::string data_root = resolve_data_root_path();
+        frame_ = new pika::ui::MainFrame(settings, data_root);
         pipe_->start_listening([this](const std::string& line) {
             // パイプスレッドから来る。UI スレッドへ渡す（CallAfter）。
             pika::core::ipc::IpcRequest req;

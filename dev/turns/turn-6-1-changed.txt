@@ -1,0 +1,15 @@
+CHANGED:
+src/app/main_gui.cpp
+src/CMakeLists.txt
+src/controller/workspace_controller.h
+src/ui/main_frame.cpp
+src/ui/main_frame.h
+src/ui/ui_messages.cpp
+src/ui/ui_messages.h
+tests/CMakeLists.txt
+src/controller/document_controller.cpp
+src/controller/document_controller.h
+src/controller/shortcut_table.cpp
+src/controller/shortcut_table.h
+tests/controller/document_controller_test.cpp
+tests/controller/shortcut_table_test.cpp

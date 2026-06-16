@@ -1,0 +1,80 @@
+{
+  "score": 94,
+  "plan_implementation": {
+    "overall": 94,
+    "notes": "must 全5件充足。must#1(DocumentController×SnapshotStore 結線・confirm/confirm_all/rollback で未読除去/マーク解除)・must#2(退避結合 Result を握り潰さず失敗時はベースライン非更新・未読維持・エラー伝播)・must#3(prepare_save の表現可能性/衝突検知/incoming退避/退避不能ブロックの4判定)・must#4(shortcut_table のフォーカス別ディスパッチ全分岐)を controller の wx 非依存純粋ロジックとして実装し gtest 22件で観測。must#5(verify 二系統)は exit 0。should は 3件中: 巻き戻し/一括確認のメニュー起動=済(ツリー右クリックは sprint8 系統C 繰延)・確認確定直前の再照合=confirm_all は freeze_hash で並行変化検知済(単体confirmの中断/再差分ループは差分UI結線依存で繰延)・ReplaceFile アトミック書込=util::write_atomic で配線済。充足率およそ 2/3。未充足/繰延はいずれも GUI 実描画依存(系統C)で spec.md の検証戦略どおり report.md に理由明記。"
+  },
+  "quality": {
+    "overall": 94,
+    "breakdown": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 88
+    },
+    "dimension_thresholds": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 80
+    }
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[合格] sprint6『確認済みにする・保存・衝突退避の結線』は中心体験④の判断ロジックを controller 層(DocumentController・shortcut_table)へ正しく切り出し、退避結合の Result を握り潰さない『データを失わない』最上位原則の UI 側ガードを gtest で観測している。verify 二系統(ctest x64-core-test / cmake build x64-release)とも exit 0、d_verify=100。must 全5件充足で d_accept=100。多角レビュー3観点(data/frontend-ui/ux)とも critical=0 で d_review=100。テスト改竄なし(22件すべて実フォールト注入で挙動を観測、skip/緩和/犠牲的期待値なし)。[high — 次ターンで対応推奨] (1) GUI コミット層(store.save × 4箇所・on_rollback の write_atomic)の Result を握り潰している(main_frame.cpp:675,726,772,815,817)。controller 層の業務 Result はテスト済みだが I/O 失敗が無通知で確認状態の巻き戻り/silent failure の窓が残る(コア既知窓#5 と同根のため critical でなく high)。(2) 保存の write_atomic 失敗が無言 return で『保存した』誤認に直結。(3) confirm_all の skipped 破棄で一律完了表示=誤認。(4) タブ状態記号が display_mark を持ちながら未描画で本 sprint のタブ状態が不可視。(5) 確認メニューの Ctrl+Enter アクセラレータが J3 のフォーカス別ディスパッチと衝突しうる(MSW 実機要確認)。[medium] 単体 confirm の確定直前再照合(E2)欠落・退避ストアの GC/破損復元(recover_pending_stashes)未配線・操作可否のメニュー Enable/理由提示なし・ステータス slot0 文言競合・rollback 無フィードバック/失敗文言未分岐/破壊操作の確認なし。これらは後続スプリント/系統C 寄りで passed をブロックしない。",
+  "feedback_structured": {
+    "high": [
+      {
+        "area": "永続化コミットの Result 握り潰し(data/ux/frontend-ui 共通)",
+        "message": "on_save/on_confirm/on_confirm_all で store.save(index) の Result<void> を握り潰し(main_frame.cpp:675,726,772)、on_rollback では store.save と write_atomic の両方を握り潰す(815,817)。SnapshotStore は in-memory で object 物理削除・ベースライン更新済みなのに index.json コミットが I/O 失敗すると、確認状態の巻き戻り/ダングリング参照の窓が残る。controller 層の業務 Result はテスト済みだが GUI コミット層は誰もカバーしていない。コアの既知窓(持ち越し#5)と同根のため critical でなく high。少なくとも通知/診断ログへ変換し未読維持側へ倒すこと。"
+      },
+      {
+        "area": "保存 I/O 失敗の無通知(ux)",
+        "message": "on_save の write_atomic 失敗が無言 return(666-670)し、ユーザーは『保存した』と誤認する。表現不能/退避不能/退避失敗は wxMessageBox で通知するのに、最も起きうる書込失敗(権限/読取専用/ネットワーク断)だけ無通知で一貫性も欠く。失敗を通知し再試行/別名保存の次の一手を示すこと。"
+      },
+      {
+        "area": "confirm_all の skipped 破棄(ux)",
+        "message": "on_confirm_all が confirm_all の戻り値を破棄し(769-776)、skipped の有無に関わらず一律『確認済みにしました』を表示。退避失敗/並行変化スキップがあっても全件完了と誤認させる。集約は sprint7 でも、skipped>0 のとき最低限『N件スキップ』を即時提示すること。"
+      },
+      {
+        "area": "タブ状態記号の描画欠落(frontend-ui)",
+        "message": "TabManager::display_mark(削除済み>未保存>差分あり)を実装済みなのに main_frame は AddPage で素のタイトルを設定するだけで SetPageText/SetPageBitmap/カスタム wxAuiTabArt を呼ばず、本 sprint が更新するタブ状態(set_unsaved/set_unread/mark_path_missing)が常に不可視。ツリー側は記号表示あり。色非依存記号で状態を伝える ui-design 5章の意図がタブで満たされていない。"
+      },
+      {
+        "area": "Ctrl+Enter アクセラレータと J3 の衝突懸念(frontend-ui)",
+        "message": "確認メニューに Ctrl+Enter のアクセラレータ文字列を付与(ui_messages.cpp:23)するとフレーム全体のアクセラレータテーブルにフォーカス非依存で登録され、エディタの Ctrl+Enter=改行(on_char_hook が None で Skip)を後段が拾って on_confirm を発火しうる。J3 のフォーカス別ディスパッチ単一テーブル化が実機で破れる懸念。確認系はメニューラベルからアクセラレータを外し dispatch_shortcut に一本化すべき。wx CHAR_HOOK/アクセラレータの発火順はコード Read 推論で MSW 実機要確認。"
+      }
+    ],
+    "medium": [
+      {
+        "area": "確認確定直前の再照合欠落(data)",
+        "message": "on_confirm がディスクを read_all して即 doc.confirm へ渡す(707-718)。design 5.4 E2『確定直前に mtime/ハッシュ再照合し不一致なら中断・再差分』に対応する再照合が単体 confirm に無い(ReviewTarget.freeze_hash 未設定)。confirm_all は freeze_hash で保護される。ユーザー未確認の内容をベースライン化しうるが単一操作で確率低のため medium。"
+      },
+      {
+        "area": "退避ストアの GC/破損復元 未配線(data)",
+        "message": "SnapshotStore の enforce_capacity/sweep_unreferenced_objects/recover_pending_stashes(index.json 破損時のサイドカー復元 D1)/purge が src/ui・src/app から一切呼ばれていない。本 sprint で退避生成経路(confirm_all baseline-replace/incoming/rollback)を配線したことで退避 object が蓄積し始める。後続スプリントで GC・容量上限・破損復元を配線すること。recover_pending_stashes 未配線は上記 high の save 握り潰しと組み合わさるとリスクが上がる。"
+      },
+      {
+        "area": "操作可否フィードバックの欠如(frontend-ui/ux)",
+        "message": "保存/確認/すべて確認済み/巻き戻しメニューは常に活性のまま、ハンドラ冒頭で前提不成立(active_file_path 空・ワークスペース外・data_root 空)なら無言 return(609,693,739,786)。差分トグルは update_diff_toggle_state で可否/理由を提示する仕組みを持つので、レビュー/保存系も Enable(false) かステータス理由提示で一貫させるべき。"
+      },
+      {
+        "area": "ステータス文言の競合・上書き(frontend-ui)",
+        "message": "slot0 を update_preview/保存/確認/再同期が取り合い(342,684,731,857)、タブ切替で update_preview が走ると『確認済みにしました』『保存しました』が即上書きされ結果文言を読めない。一過性の結果通知は通知バー領域(sprint7)か別スロットへ分離すべき。"
+      },
+      {
+        "area": "rollback の無フィードバック・失敗文言未分岐・破壊操作の確認なし(ux/frontend-ui)",
+        "message": "on_rollback は成功時にステータス/通知を一切出さない(815-828)。失敗時は原因を問わず一律 NotifyBlockedUnstashable(『10MB以上・画像・機密』)を表示するが rollback は退避 I/O 失敗等も返しうるため原因が誤って伝わる(save は Unsupported/StashFailed を弁別済で非一貫)。さらに破壊的 rollback に確認プロンプト・復元導線の明示がない(退避先行でデータは守られるため medium)。"
+      }
+    ],
+    "low": [
+      {
+        "area": "操作ごとの SnapshotStore 再生成(data)",
+        "message": "各ハンドラが毎回ローカルに SnapshotStore を構築し load→操作→save を完結する。1 操作 1 トランザクション設計は妥当だが、将来複数操作を同一トランザクションに束ねたい(原子化窓を塞ぐ持ち越し#5 対応)際に制約になる。現状は機能的に正しく整合性を壊さないため low。"
+      },
+      {
+        "area": "暫定 UI の明示・回復の次の一手(frontend-ui/ux)",
+        "message": "wxMessageBox による退避失敗/エンコーディング/退避不能通知(652,662,722,811)は sprint7 通知バー集約へ寄せる前提の暫定 UI。恒久 UI との区別をコメントで残すと良い。データ保全文言(NotifyStashFailed 等)は『何が起きたか+失われていない安心+中止』を平易に伝え良好だが『次にどうすればよいか』(再試行/容量確保/別名保存)の一文を添えると Nielsen #9 をより満たす。"
+      }
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

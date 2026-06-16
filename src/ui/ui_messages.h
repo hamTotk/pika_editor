@@ -21,6 +21,10 @@ enum class MsgId
     MenuOpenFolder,  // 「フォルダーを開く...」
     MenuClose,       // 「閉じる」
     MenuExit,        // 「終了」
+    MenuSave,        // 「保存」（Ctrl+S。design 5.3）
+    MenuConfirm,     // 「確認済みにする」（Ctrl+Enter / Ctrl+Shift+Enter。design 5.4・10章 J3）
+    MenuConfirmAll,  // 「すべて確認済みにする」（Ctrl+Alt+Enter。design 5.4・10章 J6）
+    MenuRollback,    // 「確認済み時点に戻す」（巻き戻し。design 5.4）
     MenuView,        // 「表示」
     MenuRefresh,     // 「再読み込み」（F5）
     MenuModeSource,  // 「ソース」（表示モード。ui-design 8章）
@@ -35,8 +39,14 @@ enum class MsgId
     StatusWatching,  // 監視中（ReadDirectoryChangesW）
     StatusPolling,   // ポーリングフォールバック中（監視不能環境）
     StatusSyncing,   // 再同期実行中（F5/オーバーフロー回復。進捗表示。design 10章 F3）
-    EmptyNoFolder,   // 中央: フォルダ未オープンの空状態
-    NotificationArea // 通知バー領域のアクセシブルネーム
+    StatusConfirmed, // 確認済みにした旨（未読解除）
+    StatusSaved,     // 保存完了
+    NotifyConflict,  // 衝突: 外部内容を退避して上書きした旨（要件7.3。警告色運用）
+    NotifyBlockedEncoding,    // 表現不能文字で保存中断（要件5.2・G2）
+    NotifyBlockedUnstashable, // 退避不能で保存/巻き戻しをブロック（要件7.3・D3）
+    NotifyStashFailed,        // 退避 I/O 失敗で上書き/確認をブロック（データを失わない）
+    EmptyNoFolder,            // 中央: フォルダ未オープンの空状態
+    NotificationArea          // 通知バー領域のアクセシブルネーム
 };
 
 // ID → 日本語文言（UTF-8）。未定義 ID は空文字を返さず ID 名を返さない（網羅を保つ）。

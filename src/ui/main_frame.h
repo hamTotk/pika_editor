@@ -12,17 +12,23 @@
 
 #include "app/watch_thread.h"
 #include "controller/diff_mode_model.h"
+#include "controller/document_controller.h"
+#include "controller/shortcut_table.h"
 #include "controller/tab_manager.h"
 #include "controller/workspace_controller.h"
+#include "core/document/review_flow.h"
 #include "core/settings/settings.h"
 #include "core/watcher/fs_event.h"
 #include "core/watcher/watcher_core.h"
+#include "util/encoding.h"
 #include "util/task_runner.h"
 
 #include <wx/aui/auibook.h>
+#include <wx/event.h>
 #include <wx/frame.h>
 #include <wx/timer.h>
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,7 +45,9 @@ class PreviewView;
 class MainFrame : public wxFrame
 {
   public:
-    explicit MainFrame(const core::settings::Settings& settings);
+    // data_root はデータルートの絶対パス（snapshots\<wsKey> の親。退避・ベースラインの保存先）。
+    // 空のときは確認済み/退避フローを非活性にする（退避先が無いと破壊的操作を始めない。設計原則1）。
+    MainFrame(const core::settings::Settings& settings, const std::string& data_root);
     ~MainFrame() override;
 
     // ワークスペースフォルダを開く（ツリー列挙を表示後に開始する。design 5.1 手順4）。
@@ -86,6 +94,22 @@ class MainFrame : public wxFrame
     void update_diff_toggle_state();
     // プレビュー内リンクの振り分け（相対 .md/.html はタブ・他は既定ブラウザ。design 6章）。
     void on_preview_navigate(const std::string& url);
+
+    // 中心体験④『確認済みにする』と保存・衝突退避（sprint6。判断は
+    // controller::DocumentController）。
+    void on_save(wxCommandEvent& evt);        // Ctrl+S（design 5.3 保存・衝突退避）
+    void on_confirm(wxCommandEvent& evt);     // 確認済みにする（design 5.4）
+    void on_confirm_all(wxCommandEvent& evt); // すべて確認済みにする（design 5.4・J6）
+    void on_rollback(wxCommandEvent& evt);    // 確認済み時点に戻す（巻き戻し。design 5.4）
+    // フォーカス別ショートカット（Ctrl+Enter 等）を dispatch_shortcut で振り分ける（design 10章
+    // J3）。
+    void on_char_hook(wxKeyEvent& evt);
+    // 現在の入力フォーカスの文脈を判定する（ショートカット・ディスパッチの入力。design 10章 J3）。
+    controller::FocusContext current_focus() const;
+    // アクティブタブのファイルの退避可否種別（10MB以上・画像・機密で退避不能。要件9.2）。
+    core::document::FileContentClass active_content_class() const;
+    // ワークスペース相対パス（workspace_ 配下のファイルのみ確認済み/退避の対象。空＝対象外）。
+    std::string rel_path_for(const std::string& abs) const;
     // アクティブタブのエディタ（無ければ nullptr）。
     EditorPanel* active_editor() const;
     // アクティブタブのファイル絶対パス（無ければ空文字。プレビュー種別/差分可否の分類に使う）。
@@ -118,6 +142,18 @@ class MainFrame : public wxFrame
     // 重い変換（render_markdown・差分計算）を UI スレッドから外すワーカー（design 4章）。
     util::TaskRunner tasks_;
     wxMenuItem* diff_item_ = nullptr; // 差分トグル項目（Enable/Check を更新するため保持）
+
+    // 退避・ベースラインの保存先（データルート絶対パス。空＝退避先未確定で確認済み/退避フロー非活性）。
+    std::string data_root_;
+    // タブごとの保存衝突判定の素材（design 5.3）。読み込み時点の内容ハッシュ・エンコーディングを保持し、
+    // 保存前に現ディスク内容ハッシュと突き合わせて衝突を検知する。キーはファイル絶対パス。
+    struct DocMeta
+    {
+        std::string last_loaded_hash;                   // 読み込み時点の LF 正規化ハッシュ
+        util::Encoding encoding = util::Encoding::Utf8; // 保存に使うエンコーディング
+        bool has_bom = false;                           // BOM の有無（保存時に復元）
+    };
+    std::map<std::string, DocMeta> doc_meta_;
 };
 
 } // namespace pika::ui

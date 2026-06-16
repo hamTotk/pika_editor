@@ -1,0 +1,45 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 6,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "ビジュアル状態の描画欠落",
+      "message": "sprint6 はタブの状態フラグを操作する（on_save→tabs_.set_unsaved、on_confirm→tabs_.set_unread、apply_fs_events→tabs_.mark_path_missing）が、その状態をタブ上に一切描画していない。TabManager::display_mark（削除済み ＞ 未保存 ＞ 差分あり の記号畳み込み・ui-design 5章）は実装されているのに、main_frame.cpp は AddPage で素のタイトルを 1 度設定するだけで、SetPageText / SetPageBitmap / カスタム wxAuiTabArt のいずれも呼ばず display_mark() を一切使っていない。結果、保存しても未読が付いても外部削除でタブが消失扱いになっても、タブの見た目は変わらない。ツリー側は file_tree_panel が mark_prefix で記号を出すため refresh_tree() で更新されるが、タブ側だけ状態記号が常に不可視。色だけでなく記号でも状態を伝える ui-design 5章の意図がタブで満たされていない。確認済み/保存の主操作は menu とステータスバー文言で代替できているため critical ではないが、状態の可視化欠落として high。",
+      "location": "src/ui/main_frame.cpp:427,683,728,369"
+    },
+    {
+      "severity": "high",
+      "area": "キーボード操作の意味衝突",
+      "message": "「確認済みにする」メニュー項目に \tCtrl+Enter のアクセラレータ文字列を付けている（ui_messages.cpp:23 / build_menu の Append）ため、wx がフレーム全体のアクセラレータテーブルに Ctrl+Enter→ID_CONFIRM を登録する。一方 design 10章 J3 の意図は『エディタにフォーカスがあるとき Ctrl+Enter は改行挿入（確認しない）、確認は Ctrl+Shift+Enter』であり、on_char_hook は FocusContext::Editor + Ctrl+Enter で ShortcutAction::None を返し evt.Skip() している。CHAR_HOOK が evt を消費せず Skip すると、後段のメニューアクセラレータが Ctrl+Enter を拾って on_confirm を発火しうる（フォーカス非依存に登録されているため）。これはエディタでの Ctrl+Enter=改行という J3 の核心と食い違い、フォーカス別ディスパッチをテーブルで一元化した設計が実機で破れる懸念がある。修正案: 確認系（Ctrl+Enter / Ctrl+Alt+Enter）はアクセラレータ文字列を menu ラベルから外し on_char_hook の dispatch_shortcut に一本化する（表示用ヒントだけ残すなら別表記にする）。なお use_playwright:false かつネイティブ wx GUI のため Playwright での実機確認は対象外で、wx の CHAR_HOOK とアクセラレータの厳密な発火順序はコード Read による推論である旨を明記する（MSW 実機での要確認）。",
+      "location": "src/ui/ui_messages.cpp:23, src/ui/main_frame.cpp:138,573-600"
+    },
+    {
+      "severity": "medium",
+      "area": "操作可否のフィードバック欠如",
+      "message": "保存/確認済み/すべて確認済み/巻き戻しの各メニューは常に有効表示のまま、ハンドラ先頭で前提不成立（active_file_path 空・rel_path_for 空＝ワークスペース外・data_root_ 空）なら無言で return する（on_save:609, on_confirm:693, on_confirm_all:739, on_rollback:786）。ユーザーはメニューを選べてしまうのに何も起きずフィードバックも無いため、操作が効かない理由が分からない（frontend-ui の『操作可能に見えて何もしない』アンチパターン）。MainFrame は diff_item_ のように項目ポインタを保持して Enable/Check を更新する手段を既に持つので、確認/保存系も前提に応じて Enable(false) するか、不可時にステータス/通知へ理由を出すのが望ましい。主操作自体は前提が揃えば動くため medium。",
+      "location": "src/ui/main_frame.cpp:602-829"
+    },
+    {
+      "severity": "medium",
+      "area": "ステータス文言の競合・上書き",
+      "message": "ステータスバー左スロット(0)に複数の意味の文言が同一スロットを取り合う。update_preview()→update_diff_toggle_state() が無効化理由を slot0 に書き（main_frame.cpp:857）、保存(684)/確認(731)/再同期(342)も slot0 に書く。タブ切替のたびに update_preview() が走るため、直前の『確認済みにしました』『保存しました』が差分無効化理由やステータス既定文言で即上書きされ、ユーザーが結果文言を読み取れないことがある。一過性の結果通知（確認済み/保存完了）は通知バー領域（sprint7 の集約 ViewModel）か別スロットへ分離し、恒常ステータス（監視中/未読件数）と混在させない設計が望ましい。",
+      "location": "src/ui/main_frame.cpp:342,684,731,857"
+    },
+    {
+      "severity": "medium",
+      "area": "アクセシビリティ（破壊的操作の確認・代替手段）",
+      "message": "on_rollback（確認済み時点に戻す）はエディタ内容をベースライン内容で上書きしバッファを再読込する破壊的操作だが、確認ダイアログが無くメニュー/ショートカット一発で実行される。退避が先行する設計でデータ自体は守られるものの、UI としては誤操作で見えている編集が即消える。また確認系のキーボード到達は on_char_hook（Ctrl+Enter 系）に依存し、rollback にはアクセラレータ/フォーカス別キー割当が無い（menu からのみ）。キーボードのみ運用（ui-design 13章 F6 循環）での rollback 到達は menu バーのキーボード操作に依存する点も含め、破壊的操作の取り消し可能性・到達性の明示が望ましい。データ保全は退避で担保されるため high ではなく medium。",
+      "location": "src/ui/main_frame.cpp:779-829"
+    },
+    {
+      "severity": "low",
+      "area": "アクセシビリティ（アイコンボタン/領域のラベル）",
+      "message": "ポジティブ事例として、通知バー領域に SetName(MsgId::NotificationArea) でアクセシブルネームを付与し（main_frame.cpp:190）、ツリーの状態記号は色非依存の記号テキスト（±/◆/取消線）で表現している点は frontend-ui 観点で適切。一方 wxMessageBox による退避失敗/エンコーディング/退避不能の通知（652,662,722,811）はモーダルで読み上げ可能だが、本来 sprint7 の通知バー集約に寄せる前提の暫定 UI である旨をコメントで残すと、恒久 UI と暫定 UI の区別が明確になる。指摘というより polish。",
+      "location": "src/ui/main_frame.cpp:190,652,722,811"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint6 の confirm/save/rollback フローと shortcut_table は controller 側（wx 非依存・gtest 済み）に判断を集約し、ui_messages による文言の単一定義・色非依存の状態記号・通知領域のアクセシブルネームなど frontend-ui の基礎は押さえられている。critical（主要操作の不能/不可視・キーボードで主操作に到達不能）は無い：確認/保存はメニューと Ctrl+(Alt/Shift)+Enter のキーボードで到達でき、結果はステータス文言で返る。ただし (1) タブ状態記号（削除済み/未保存/差分あり）が display_mark を持ちながら一切描画されず、sprint6 が更新するタブ状態が不可視、(2) 確認メニューの Ctrl+Enter アクセラレータが J3 のフォーカス別ディスパッチ（エディタの Ctrl+Enter=改行）と衝突しうる、の 2 点を high とする。前者は状態可視化の欠落、後者はキーボード意味の一貫性破れの懸念（wx の発火順はコード Read による推論で MSW 実機要確認）。操作可否のフィードバック欠如・ステータス文言の競合・破壊的 rollback の確認/到達性は medium。"
+}
