@@ -20,12 +20,15 @@
 
 #include <wx/accel.h>
 #include <wx/dirdlg.h>
+#include <wx/filename.h>
 #include <wx/menu.h>
+#include <wx/menuitem.h>
 #include <wx/msgdlg.h>
 #include <wx/panel.h>
 #include <wx/sizer.h>
 #include <wx/splitter.h>
 #include <wx/statusbr.h>
+#include <wx/stdpaths.h>
 #include <wx/utils.h>
 
 #include <optional>
@@ -70,6 +73,24 @@ core::workspace::TreeNode enumerate_shallow_tree(const std::string& root_abs,
     return core::workspace::build_tree(entries, settings.exclude);
 }
 
+// 同梱アセット（preview.css 等）のディレクトリ＝exe 隣の assets/（UTF-8 絶対パス・'/' 区切り）。
+// app.pika 仮想ホストの配信元になる（ユーザーのワークスペースではなく pika インストール領域）。
+std::string asset_dir()
+{
+    wxFileName exe(wxStandardPaths::Get().GetExecutablePath());
+    wxFileName dir(exe.GetPath(), wxEmptyString);
+    dir.AppendDir("assets");
+    std::string p(dir.GetPath().ToUTF8().data());
+    for (char& c : p)
+    {
+        if (c == '\\')
+        {
+            c = '/';
+        }
+    }
+    return p;
+}
+
 } // namespace
 
 MainFrame::MainFrame(const core::settings::Settings& settings)
@@ -109,7 +130,7 @@ void MainFrame::build_menu()
     view_menu->AppendRadioItem(ID_MODE_SPLIT, u8(MsgId::MenuModeSplit));
     view_menu->AppendRadioItem(ID_MODE_PREVIEW, u8(MsgId::MenuModePreview));
     view_menu->AppendSeparator();
-    view_menu->AppendCheckItem(ID_TOGGLE_DIFF, u8(MsgId::MenuToggleDiff));
+    diff_item_ = view_menu->AppendCheckItem(ID_TOGGLE_DIFF, u8(MsgId::MenuToggleDiff));
     menu_bar->Append(view_menu, u8(MsgId::MenuView));
 
     auto* help_menu = new wxMenu();
@@ -166,6 +187,8 @@ void MainFrame::build_layout()
 
     preview_ = new PreviewView(main_split);
     preview_->set_on_navigate([this](const std::string& url) { on_preview_navigate(url); });
+    // app.pika の同梱アセット（preview.css 等）の配信元＝exe 隣の assets/（design 6章 C6）。
+    preview_->set_asset_dir(asset_dir());
 
     // 既定はソースモード（差分OFF）。プレビューは隠す（初回要求まで WebView2 を作らない）。
     main_split->SplitVertically(notebook_, preview_, -360);
@@ -454,12 +477,56 @@ void MainFrame::on_toggle_diff(wxCommandEvent& evt)
     update_preview();
 }
 
+std::string MainFrame::active_file_path() const
+{
+    const std::size_t active = tabs_.active_index();
+    if (active == controller::TabManager::kNoActive)
+    {
+        return {};
+    }
+    const controller::TabState* st = tabs_.at(active);
+    return st ? st->path : std::string{};
+}
+
+void MainFrame::update_diff_toggle_state()
+{
+    if (!diff_item_)
+    {
+        return;
+    }
+    // 差分トグルの可否は controller::evaluate_diff_toggle が決める（wx 非依存・gtest 済み）。
+    // ここは「現在状況を集めて渡し、結果を Enable/Check と理由文言へ反映する」だけにする。
+    const std::string path = active_file_path();
+    EditorPanel* editor = active_editor();
+    controller::DiffToggleContext ctx;
+    ctx.diffable_type = !path.empty() && controller::is_diffable_type(path);
+    ctx.webview_available = PreviewView::webview_available();
+    // ベースライン（前回確認時点）の供給は core/snapshot 結線（sprint6）。現状は未取得。
+    ctx.has_baseline = false;
+    ctx.content_bytes = editor ? editor->text_utf8().size() : 0;
+
+    const controller::DiffDisableReason reason = controller::evaluate_diff_toggle(ctx);
+    const bool enabled = (reason == controller::DiffDisableReason::None);
+    diff_item_->Enable(enabled);
+    if (!enabled)
+    {
+        // 無効化されたら強制オフにし、無言の空差分を出さない（ui-design 15章 Partial）。
+        diff_on_ = false;
+        diff_item_->Check(false);
+        // 理由を左ステータスへ提示する（単一メッセージ定義経由。design 10章 K9・J1）。
+        status_->SetStatusText(u8(std::string(controller::diff_disable_reason_label(reason))), 0);
+    }
+}
+
 void MainFrame::update_preview()
 {
     if (!preview_)
     {
         return;
     }
+    // 差分トグルの可否を先に評価する（不可なら diff_on_ を落とす＝無言の空差分を防ぐ）。
+    update_diff_toggle_state();
+
     // 描画面構成は controller::diff_mode_model が決める（wx 非依存・gtest 済み）。ここは結線のみ。
     const controller::PaneLayout layout = controller::resolve_pane_layout(view_mode_, diff_on_);
     auto* main_split = dynamic_cast<wxSplitterWindow*>(notebook_->GetParent());
@@ -494,44 +561,68 @@ void MainFrame::update_preview()
 
     EditorPanel* editor = active_editor();
     const std::string source = editor ? editor->text_utf8() : std::string{};
+    // ファイル種別で JS 有効/無効を切替える（.html=JS無効・他=JS有効。design 6章 C5）。
+    const std::string path = active_file_path();
+    const controller::PreviewKind kind =
+        path.empty() ? controller::PreviewKind::Markdown : controller::classify_preview_kind(path);
 
     // 占有鍵（タブ, モード, 差分ON）。タブが無ければ tab_id=0。design 4章の占有世代に対応。
     const auto tab_id = static_cast<std::uint64_t>(notebook_->GetSelection() + 1);
     const controller::OccupancyKey key{tab_id, view_mode_, diff_on_};
+    // 要求時点で占有して stamp を確定する（ワーカー投入前。design 5.5 手順3）。
+    const std::uint64_t stamp = preview_->request_occupy(key);
 
-    // プレビュー本文 HTML（サニタイズ済み）はコア render_markdown が作る（wx 非依存・gtest 済み）。
-    controller::PreviewDoc doc;
-    doc.kind = controller::PreviewKind::Markdown;
-    const auto rendered = core::render::render_markdown(source);
-    doc.body_html = rendered.is_ok() ? rendered.value() : std::string{};
+    const bool show_diff = layout.show_diff;
+    const bool grid = layout.preview_diff_grid;
 
-    if (layout.show_diff)
-    {
-        // 差分は前回確認時点（ベースライン）と現内容の累積差分（コア DiffEngine・色非依存 +/-）。
-        // ベースライン供給は core/snapshot 結線（後続）。本結線は旧側を空で渡し骨格を成立させる。
-        const core::diff::DiffEngine engine;
-        const core::diff::DiffResult diff =
-            engine.compute(/*old*/ std::string_view{}, /*new*/ source);
-        if (layout.preview_diff_grid)
+    // 重い変換（render_markdown・差分計算）をワーカーで実行し UI をブロックしない（design 4章）。
+    // 完了後 UI スレッドへ戻し、stamp/key がまだ最新なら apply_document でナビゲートする。
+    tasks_.submit([this, stamp, key, source, kind, show_diff, grid]() {
+        // ワーカースレッド: コア（wx 非依存・スレッドセーフな純変換）だけを呼ぶ。
+        controller::PreviewDoc doc;
+        doc.kind = kind;
+        const auto rendered = core::render::render_markdown(source);
+        // 本文生成失敗時は白紙にせず最小フォールバック本文を出す（ui-design 15章 Error）。
+        doc.body_html = rendered.is_ok()
+                            ? rendered.value()
+                            : "<p class=\"pika-placeholder\">プレビューを生成できませんでした</p>";
+
+        std::string full_html;
+        if (show_diff)
         {
-            preview_->show_preview_diff_grid(key, doc, diff); // プレビュー＋差分ON＝grid
+            // 前回確認時点（ベースライン）と現内容の累積差分（コア DiffEngine・色非依存 +/-）。
+            // ベースライン供給は core/snapshot 結線（sprint6）。今は旧側を空で渡す。
+            const core::diff::DiffEngine engine;
+            const core::diff::DiffResult diff =
+                engine.compute(/*old*/ std::string_view{}, /*new*/ source);
+            full_html = grid ? controller::build_preview_diff_grid_document(doc, diff)
+                             : controller::build_diff_document(
+                                   diff, core::render::RemoteResourcePolicy::Blocked);
         }
         else
         {
-            preview_->show_diff(key, diff, core::render::RemoteResourcePolicy::Blocked);
+            full_html = controller::build_preview_document(doc);
         }
-    }
-    else
-    {
-        preview_->show_preview(key, doc); // プレビューのみ/分割の右ペイン
-    }
+        // 差分面は pika 生成の信頼済み HTML（JS 有効＝Markdown 相当）。プレビューは種別どおり。
+        const controller::PreviewKind js_kind =
+            show_diff && !grid ? controller::PreviewKind::Markdown : kind;
+        CallAfter([this, stamp, key, full_html, js_kind]() {
+            preview_->apply_document(stamp, key, full_html, js_kind);
+        });
+    });
 }
 
 void MainFrame::on_preview_navigate(const std::string& url)
 {
     // プレビュー内リンクの振り分け（design 6章）。相対 .md/.html はタブで開き、他は既定ブラウザへ。
     // 本結線では外部 URL を既定ブラウザへ委譲する（相対リンクのタブ解決は後続で精緻化）。
-    if (!url.empty())
+    if (url.empty())
+    {
+        return;
+    }
+    // 委譲先スキームは許可リストで絞る（多層防御）。file:/UNC/カスタムプロトコルの自動起動を防ぐ。
+    auto starts_with = [&url](const char* p) { return url.rfind(p, 0) == 0; };
+    if (starts_with("http://") || starts_with("https://") || starts_with("mailto:"))
     {
         wxLaunchDefaultBrowser(u8(url));
     }
@@ -585,6 +676,8 @@ void MainFrame::on_notebook_page_changed(wxAuiNotebookEvent& evt)
     {
         tabs_.activate(static_cast<std::size_t>(sel));
     }
+    // アクティブタブが変われば差分可否・プレビュー内容も変わる（種別/サイズ依存）ので再評価する。
+    update_preview();
     evt.Skip();
 }
 

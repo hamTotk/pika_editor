@@ -44,6 +44,10 @@ class PreviewView : public wxPanel
     // 空なら doc.pika 要求をすべて拒否する（対象消滅時のマッピング解除）。
     void set_document_root(const std::string& folder_abs);
 
+    // 同梱アセット（preview.css 等）のディレクトリ（app.pika リソースハンドラの配信元・絶対パス）。
+    // exe 隣の assets/ を MainFrame が解決して渡す（軽量原則: 文書外の同梱信頼アセットのみ配信）。
+    void set_asset_dir(const std::string& asset_dir_abs);
+
     // リンク振り分けコールバックを登録する（ナビゲーションインターセプト時に呼ぶ）。
     void set_on_navigate(NavigateRequest cb) { on_navigate_ = std::move(cb); }
 
@@ -59,6 +63,22 @@ class PreviewView : public wxPanel
                                 const controller::PreviewDoc& doc,
                                 const core::diff::DiffResult& diff);
 
+    // ---- ワーカー（TaskRunner）オフロード用の二相 API（design 4章・5.5 手順3） ----
+    // 重い変換（render_markdown/差分計算）を UI スレッドから外すとき、要求時点で占有して stamp を
+    // 受け取り（request_occupy）、ワーカー完了後に UI スレッドで apply_* を呼ぶ。apply_* は stamp
+    // が
+    // まだ最新（別タブ/別モード/別差分へ未切替）のときだけナビゲートし、古ければ破棄する（中間状態を
+    // 描かない・最新だけを反映する）。
+
+    // 要求時点で占有鍵 key を占有し、その世代 stamp を返す（同一鍵なら世代は進めず現 stamp
+    // を返す）。
+    std::uint64_t request_occupy(const controller::OccupancyKey& key);
+
+    // 完全HTML文書（controller が組み上げ済み）を、stamp/key がまだ最新ならナビゲートする。
+    // js_kind で JS 有効/無効を切替える（Markdown=有効・Html=無効。design 6章 C5）。
+    void apply_document(std::uint64_t stamp, const controller::OccupancyKey& key,
+                        const std::string& full_html, controller::PreviewKind js_kind);
+
     // 全タブが非プレビューで一定時間経過したら呼ぶ（TrySuspend。design 6章 B1/DEC-02）。
     void suspend_if_idle();
 
@@ -70,15 +90,27 @@ class PreviewView : public wxPanel
     void ensure_webview();
     // 完全HTML文書をナビゲートする。kind で JS 有効/無効を直列（前ナビ完了待ち）で切替える。
     void navigate(const std::string& full_html, controller::PreviewKind kind);
+    // WebView2 の JS ランタイムを実際に有効/無効化する（design 6章 C5 の二層目防御）。
+    // 内部で ICoreWebView2Settings::put_IsScriptEnabled を叩く。失敗しても CSP（一層目）が残る。
+    void apply_script_enabled(bool enabled);
     void on_navigating(wxWebViewEvent& evt); // 全キャンセルし on_navigate_ へ振り分ける
     void on_loaded(wxWebViewEvent& evt);     // NavigationCompleted 相当（直列化の解除点）
 
     wxWebView* web_ = nullptr; // 共有 1 枚（遅延生成。nullptr＝未生成）
     controller::OccupancyTracker occupancy_;
-    std::string doc_root_; // doc.pika の許可フォルダ（'/' 区切り絶対パス・空＝拒否）
+    std::string doc_root_;  // doc.pika の許可フォルダ（'/' 区切り絶対パス・空＝拒否）
+    std::string asset_dir_; // app.pika の同梱アセットフォルダ（絶対パス・空＝拒否）
     NavigateRequest on_navigate_;
     bool js_enabled_ = true; // 現在の JS 有効状態（Markdown/差分=有効・HTML=無効）
     bool suspended_ = false; // TrySuspend 済みか（次回表示で Resume）
+
+    // 直列ナビゲート（design 6章 C5）。SetPage→on_loaded の間は in-flight とし、その間に来た
+    // 次の要求は pending_ に 1 件だけ最新で保持し、on_loaded 後に流す（前モード JS 設定の残留・
+    // 切替競合を防ぐ。最新だけを残すのは中間状態を描かないため＝占有世代と同じ思想）。
+    bool nav_in_flight_ = false;
+    bool has_pending_ = false;
+    std::string pending_html_;
+    controller::PreviewKind pending_kind_ = controller::PreviewKind::Markdown;
 };
 
 } // namespace pika::ui
