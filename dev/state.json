@@ -1,10 +1,12 @@
 {
-  "current_sprint": 1,
+  "current_sprint": 2,
   "iteration": 1,
-  "total_turns": 0,
+  "total_turns": 1,
   "max_turns_per_sprint": 3,
   "max_total_turns": 15,
-  "history": [],
+  "history": [
+    {"sprint": 1, "iteration": 1, "score": 100, "passed": true, "duration_sec": 540, "commit": "e9ab567"}
+  ],
   "status": "running",
-  "sprint_criteria_done": {"sprint": 1, "reviewers": []}
+  "sprint_criteria_done": {"sprint": 2, "reviewers": []}
 }

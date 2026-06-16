@@ -1,0 +1,12 @@
+CHANGED:
+src/CMakeLists.txt
+tests/CMakeLists.txt
+src/controller/app_controller.cpp
+src/controller/app_controller.h
+src/controller/data_root.cpp
+src/controller/data_root.h
+src/controller/tab_manager.cpp
+src/controller/tab_manager.h
+tests/controller/app_controller_test.cpp
+tests/controller/data_root_test.cpp
+tests/controller/tab_manager_test.cpp

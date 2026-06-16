@@ -1,0 +1,28 @@
+{
+  "score": 100,
+  "plan_implementation": {
+    "overall": 100,
+    "notes": "sprint2 must 全5件を実装・テストで充足。(1)resolve_data_root が portable.txt 両分岐＋未解決(退避先未確定で起動中断)を観測可能、(2)plan_open が parse_argv/parse_goto 結果を OpenTarget 列へ正規化し相対パス絶対化・ドライブレターコロン非分割を観測、(3)decide_instance が make_pipe_name/serialize_request で役割決定＋転送 JSON を組み立て parse_request 往復で検証、(4)TabManager が open/close/activate・重畳優先(削除済み>未保存>差分)・消失タブ安全遷移(閉じずアクティブ維持・クラッシュなし)を観測、(5)ctest x64-core-test 全件 PASS。should 2件(startup_sequence の design 5.1 順序一致・FolderSwitch 状態機械)も実装・テスト済で充足率 1.0。未実装の must/should なし。"
+  },
+  "quality": {
+    "overall": 100,
+    "breakdown": {"d_verify": 100, "d_accept": 100, "d_quality": 95},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[d_verify=100] ctest --preset x64-core-test が exit 0(verify_results。build+tests 両 PASS)。[d_accept=100] 当該 sprint must 全5件を観測可能な挙動でテスト充足(DataRoot 両分岐/CLI 正規化/単一インスタンス役割+転送 JSON 往復/TabManager 状態機械・重畳優先・消失タブ安全遷移/ctest PASS)。should 2件も充足(充足率 1.0)。[d_review=100] data・frontend-ui レビュワーとも has_critical=false。critical 該当なし。[テスト改竄照合] 改竄なし: src/CMakeLists.txt・tests/CMakeLists.txt の変更は sprint2 ソース/テストの追加のみで純加算、既存コアテストの削除・無効化・アサーション緩和・skip は皆無。core IPC API(make_pipe_name/serialize_request/normalize_to_absolute/parse_argv/validate/parse_request)は実在し署名一致(捏造 API なし)。テストは往復検証・優先順位・範囲安全性を実挙動で固定。[d_quality=95] 既存パターン整合(sprint1 構造を踏襲・FS は probe 注入でコア純化・resolve_file_mark を再利用し優先解決を一元化=YAGNI/重複回避)、1ファイル1責務、コメントは制約説明に限定。medium/low の申し送り(下記)はいずれも sprint3 の GUI 配線で担保すべき次ターン課題で本スプリント(純ロジック・I/O 未配線)に実害なし。",
+  "feedback_structured": {
+    "high": [],
+    "medium": [
+      {"area": "ビジュアル一貫性/状態記号 (frontend-ui・sprint3 申し送り)", "message": "display_mark/resolve_file_mark は重畳状態を色非依存の StateMark 列挙値へ正しく畳み込むが、StateMark→記号(±/◆/取消線/●)+位置+色 の写像は sprint3 GUI 配線に委ねられている。ui-design 5章の色非依存(モノクロ/ハイコントラストでも弁別)要件を割らぬよう、sprint3 で各 StateMark に固有の記号と配置(ツリー=名前の右・タブ=閉じる位置)を必ず付与すること。"},
+      {"area": "状態網羅/削除済みかつ新規 (frontend-ui・sprint3 申し送り)", "message": "has_baseline=false かつ deleted=true(外部で消えた新規未確認ファイル)が Deleted を返す設計はテストで直接固定されていない(DeletedBeatsUnsavedAndUnread は has_baseline 既定値依存)。『削除済みかつ新規だった』ファイルが ◆ でなく取消線で出ることを明示固定すると表示の取り違えを防げる。"}
+    ],
+    "low": [
+      {"area": "永続化境界の順序保証 (data・sprint3/4 申し送り)", "message": "FolderSwitch::teardown_done() は『state.json/index.json 書き出し完了』と『タブ/ツリーを閉じる完了』を区別せず1イベントで EnumerateNew へ進むため、後続 GUI スプリントが『状態を書き出す前に閉じる/列挙開始』を実装しても状態機械側テストでは検出できない。確定済み永続状態を確実に保存してから現ワークスペースを破棄する不変条件を、後続の DocumentController/WorkspaceController must で『書き出し成功を観測してから閉じる』として担保する(前回 report 持ち越し #5 と同系)。"},
+      {"area": "状態フラグの一貫性 (data・sprint3+ 申し送り)", "message": "set_unread(path, unread=false, has_baseline) が has_baseline を無条件上書きする。display_mark は unread=true 時しか has_baseline を見ないため現表示には無影響だが、has_baseline を未読以外の判定(新規保存可否・差分トグル可否)へ流用すると不整合の種になりうる。unread=false 時は has_baseline 据え置き、またはベースライン取得を別操作に分離すると意味が明確になる。"},
+      {"area": "長文字列レイアウト (frontend-ui・sprint3 申し送り)", "message": "TabState.title の切り詰め/省略(…)方針はモデル側にない。これは描画層(sprint3 wxAuiTabArt)の責務であり本スプリントで対処すべきではないが、長いファイル名でレイアウトが崩れぬよう sprint3 のタブ見出しに ellipsize が要る旨を申し送る。"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

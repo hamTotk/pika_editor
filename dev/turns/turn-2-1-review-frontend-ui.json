@@ -1,0 +1,27 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 2,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "ビジュアル一貫性 / 状態記号体系",
+      "message": "display_mark/resolve_file_mark は重畳状態を単一の StateMark(Deleted/Unsaved/Diff/New/None)へ畳み込むが、その StateMark→『記号(±/◆/取り消し線/●)+位置+色』への写像が本スプリントには存在せず GUI 配線(sprint3)に委ねられている。ui-design 5章は各状態を『色だけでなく記号・位置・取り消し線で弁別』(色非依存・モノクロ/ハイコントラストでも識別可能)を要件とする。本スプリントのロジック自体は色非依存の列挙値で正しく分離されており欠陥ではないが、sprint3 で StateMark を accent/diff-add/text-2 等の色のみに割り当て記号や位置を落とすと a11y(色覚・スクリーンリーダ)要件を割る。次ターンの GUI 配線で各 StateMark に固有の記号(±/◆/●/取り消し線)と配置(ツリー=名前の右、タブ=閉じる位置)を必ず付与すること。",
+      "location": "src/controller/tab_manager.cpp:122"
+    },
+    {
+      "severity": "medium",
+      "area": "状態の網羅 / 伝播マークの未経路",
+      "message": "tree_view_model は DiffPropagated(配下に差分あり ±淡=text-3)を Diff(自身の差分 ±=accent)と別値で持つが、TabManager 側の display_mark は path/unsaved/unread/has_baseline のみ参照し DiffPropagated を扱わない(タブはファイル単位なので妥当)。一方、TabState には『削除済み(path_missing)かつ未読/新規』のような外部削除後の状態は Deleted に正しく吸収される。網羅上の欠落は見当たらないが、has_baseline=false かつ deleted=true(=外部で消えた新規未確認ファイル)も Deleted を返す設計であることをテストが直接は固定していない(DeletedBeatsUnsavedAndUnread は has_baseline 既定値依存)。GUI で『削除済みかつ新規だった』ファイルが ◆ ではなく取り消し線で出ることをテストで明示固定すると、表示の取り違えを防げる。",
+      "location": "tests/controller/tab_manager_test.cpp:151"
+    },
+    {
+      "severity": "low",
+      "area": "レイアウト破綻リスク(長文字列)",
+      "message": "TabState.title は表示見出しだが、長いファイル名・空文字・想定外データに対する切り詰め/省略(…)方針はモデル側に無い。これは描画層(sprint3 wxAuiNotebook/wxAuiTabArt)の責務であり本スプリントで対処すべきではないが、frontend-ui チェックリスト『長い文字列でレイアウトが崩れないか』として sprint3 のタブ見出しに省略表示(ellipsize)が要ることを申し送る。",
+      "location": "src/controller/tab_manager.h:25"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint2 は wx 非依存のアプリケーション層ロジック(AppController/DataRoot/TabManager 状態機械/FolderSwitch)のみで、実描画・ウィジェット・フォーカス・キーボード配線・DOM は一切含まない(GUI 配線は sprint3)。frontend-ui として実機検証できる UI は無く use_playwright:false も妥当(ネイティブ GUI で外部 Web UI 無し)。本スプリントで frontend-ui の射程に入るのは『視覚層が消費する状態記号の解決ロジック』のみで、display_mark/resolve_file_mark は ui-design 5章の重畳優先(削除済み ＞ 未保存 ＞ 差分あり)・新規◆/差分±の弁別・削除済み取り消し線を忠実に再現し、色に依存しない列挙値として正しく分離され、優先順位・消失タブ安全遷移(削除済み表示で閉じない・アクティブ維持)もテストで観測可能。critical(主要操作が不能/不可視・致命的 a11y 違反)に該当する欠陥は無い。close() のアクティブ遷移も右隣→左隣フォールバックと index<active_ の補正が正しくタブ不可視化は起きない。指摘は全て『次の GUI 配線で記号・位置・省略表示・色非依存を落とさないための申し送り』(medium 以下)。"
+}

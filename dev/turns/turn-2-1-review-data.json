@@ -1,0 +1,21 @@
+{
+  "reviewer": "data",
+  "sprint_id": 2,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "状態モデル/永続化境界",
+      "message": "FolderSwitch 状態機械は TeardownCurrent フェーズを単一の遷移として表現するが、design.md 5.6 手順2 が要求する後始末内の順序(watcher停止 → index.json/state.json 書き出し → タブ/ツリーを閉じる)を内部に持たない。teardown_done() は『書き出し完了』と『閉じる完了』を区別せず1イベントで EnumerateNew へ進むため、呼び出し側(後続 GUI スプリント)が『状態を書き出す前にタブを閉じる/列挙を始める』実装をしても状態機械側のテストでは検出できない。本スプリントは純ロジックのみで実 I/O は配線しないため実害はないが、データルート確定済みの永続状態(state.json/index.json)を確実に保存してから現ワークスペースを破棄する不変条件は、後続スプリントの DocumentController/WorkspaceController 側 must で『書き出し成功を観測してから閉じる』として担保する必要がある(前回 report 持ち越し #5 の非原子性懸念と同系)。",
+      "location": "src/controller/tab_manager.cpp:163"
+    },
+    {
+      "severity": "low",
+      "area": "状態フラグの一貫性",
+      "message": "TabManager::set_unread(path, unread, has_baseline) は unread=false(確認済み/既読化)で呼ばれた場合でも has_baseline を無条件に上書きする。display_mark は unread=true のときしか has_baseline を参照しないため現状の表示には影響しないが、確認済み遷移で呼び出し側が has_baseline に意味のない値(既定 false 等)を渡すと、タブの内部状態が『ベースラインなし(新規)』として残る。後続スプリントで has_baseline を未読以外の判定(例: 新規ファイルの保存可否や差分トグル可否)に流用すると不整合の種になりうる。unread=false のときは has_baseline を据え置く、または引数から外して『ベースライン取得』を別操作にすると状態の意味が明確になる。",
+      "location": "src/controller/tab_manager.cpp:111"
+    }
+  ],
+  "has_critical": false,
+  "summary": "data 観点(データ整合性・不可逆性=本プロジェクトの最上位原則『データを失わない』への写像)で sprint2 の controller 層を確認した。本スプリントに DB スキーマ/マイグレーション/トランザクションは無く、対象は DataRoot 解決・CLI 正規化・単一インスタンス判定・TabManager/FolderSwitch 状態機械の wx 非依存純ロジック。データ整合性は良好: (1) resolve_data_root は %LOCALAPPDATA% 欠落時に resolved=false を返し『退避先未確定では書き込みを始めない』不変条件をヘッダで明示・テスト済み、(2) mark_path_missing は消失タブを閉じずバッファ保持で削除済み表示へ安全遷移し未確認内容を失わない、(3) close/activate は範囲チェックで破綻せず、タブ同一性は絶対パスで決定論的。rename 追従(再キー付け)は sprint4 の apply_renames へ明示的に委譲されており本スプリントでの欠落は設計通りで欠陥ではない。critical(データ破損/不整合を招くスキーマ・トランザクション欠陥、不可逆マイグレーション)に該当する指摘は無し。検出は永続化境界の順序保証と状態フラグの一貫性に関する low 2 件のみで、いずれも本スプリント(純ロジック・I/O 未配線)では実害なく、後続の I/O 配線スプリントで担保すべき注意点として feedback に残す。"
+}
