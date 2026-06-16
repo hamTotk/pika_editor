@@ -10,7 +10,11 @@ add_executable(pika_tests
     controller/dir_lister_test.cpp
     controller/document_controller_test.cpp
     controller/editor_view_model_test.cpp
+    controller/notification_model_test.cpp
     controller/preview_builder_test.cpp
+    controller/restore_plan_test.cpp
+    controller/search_session_test.cpp
+    controller/settings_view_test.cpp
     controller/shortcut_table_test.cpp
     controller/tab_manager_test.cpp
     controller/tree_view_model_test.cpp
