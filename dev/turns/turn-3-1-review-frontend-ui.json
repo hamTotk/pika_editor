@@ -1,0 +1,51 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 3,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "アクセシビリティ",
+      "message": "ファイルツリーの状態マークがスクリーンリーダーに伝わらない。FileTreeModel::GetValue は `mark_prefix(node->mark) + name`（記号＋名前）を 1 文字列で返すだけで、コメント（file_tree_panel.cpp:51-52「アクセシブルネームに状態ラベルを含める」）に反して state_mark_label（『差分あり』『新規』『削除済み』等）が一切使われていない。controller 側に用意済みの state_mark_label / icon_category_label は UI のどこからも参照されないデッドコード（src 内検索で参照ゼロ）。結果、UIA/MSAA で読まれるのは生記号『±』『◆』のみで、削除済みは記号が空のため何の手掛かりも残らない。ui-design 13章『主要UIにアクセシブルネーム(UIA/MSAA)』要件を満たさない。wxDataViewCtrl の列値に状態ラベルを含めるか wxAccessible でアクセシブルネームを補う配線が要る。critical 未満とするのは、記号自体は視覚的に出ており主要操作（開く・展開・タブ切替）はキーボードで到達可能なため。",
+      "location": "src/ui/file_tree_panel.cpp:43-54"
+    },
+    {
+      "severity": "medium",
+      "area": "ビジュアル一貫性",
+      "message": "ツリーの状態マークの位置が正典（ui-design 5章・6章）と逆。正典は『左＝種別アイコン、右＝状態マーク（±/◆ 等）』『差分あり ± は名前の右（ツリー）』だが、mark_prefix は記号を名前の前（左）に連結している（file_tree_panel.cpp:24「sym + ' '」→ GetValue で name の前置）。本 sprint では種別アイコンも未実装（コメントで『将来 wxDataViewIconText で重畳』と明記）のため記号だけが左に出る形。視覚仕様のレイアウト規則からの乖離。",
+      "location": "src/ui/file_tree_panel.cpp:17-25"
+    },
+    {
+      "severity": "medium",
+      "area": "状態の網羅",
+      "message": "削除済み（取り消し線）状態がツリー上で視覚的に表現されない。state_mark_symbol(Deleted) は空文字を返す設計（取り消し線で示す前提・ui-design 5章）だが、FileTreeModel は取り消し線フォント属性（wxDataViewItemAttr の strikethrough 等）を一切適用しないため、Deleted ノードは None ノードと見分けがつかない。重畳優先『削除済み＞未保存＞差分あり』のうち最上位が描画面に現れない。本 sprint では UnreadSet が常に空（main_frame.cpp:51 で空 unread を渡す）で Deleted が発生しないため潜在不具合だが、ViewModel が解決した最上位状態を描画層が落とす構造は次 sprint で顕在化する。",
+      "location": "src/ui/file_tree_panel.cpp:31-54"
+    },
+    {
+      "severity": "medium",
+      "area": "アクセシビリティ",
+      "message": "色だけに依存しない原則（ui-design 3章）の検証が次 sprint へ先送りされる構造。DiffPropagated（伝播±淡）と Diff（実心±）は state_mark_symbol が双方とも『±』を返し、区別は『淡色（呼び出し側の配色）』だけに委ねられている（tree_view_messages.cpp:17-18 のコメントが明示）。ところが本 sprint の UI には配色適用が無いため、この 2 状態は記号・色とも完全に同一描画になる。色非依存で弁別するには記号・位置・ラベルのいずれかで差を付ける必要があるが、伝播マークはラベル（state_mark_label）も未配線。フォルダの伝播 ± と自身の差分 ± が UI 上で区別不能。",
+      "location": "src/controller/tree_view_messages.cpp:11-18"
+    },
+    {
+      "severity": "medium",
+      "area": "ビジュアル一貫性",
+      "message": "テーマ/配色トークン（ui-design 2章 semantic token）の適用が UI 層に一切無い。src/ui 全体で SetForegroundColour/SetBackgroundColour/wxColour/accent/bg-sunken 等の参照がゼロ。on_sys_colour_changed は Refresh() を呼ぶのみで再配色しない（main_frame.cpp:282-288）。ステータス右下の bg-sunken・差分あり accent・選択行 bg-active などの視覚仕様が未反映で、システム既定配色のまま表示される。sprint3 should『ui-design 2章トークンで配色される』に対し骨格すら無い。テーマ解決は sprint7 計画だが、トークン適用の足場（色を当てる経路）が皆無な点は記録対象。",
+      "location": "src/ui/main_frame.cpp:282-288"
+    },
+    {
+      "severity": "low",
+      "area": "アクセシビリティ",
+      "message": "ペイン間フォーカス循環（F6/Shift+F6）と F5 再列挙のキーボード配線が無い（src/ui で F6/F5/accelerator 検索ゼロ）。ui-design 13章『キーボードのみで開く→プレビュー→差分→確認済みが完結』の土台。ただしツリー（wxDataViewCtrl）・タブ（wxAuiNotebook）・メニュー（Ctrl+O/Ctrl+W）は wx 既定で個別にキーボード操作可能で、主要操作の『開く』はキーボードで到達できるため critical ではない。F6 循環は sprint8 should に計画ありのため low。",
+      "location": "src/ui/main_frame.cpp:67-92"
+    },
+    {
+      "severity": "low",
+      "area": "状態の網羅",
+      "message": "ツリーの空状態文言が未配線。refresh_tree はワークスペース未オープン時に空の TreeRowVm を set_root するだけで（main_frame.cpp:139-144）、ui_messages に定義済みの EmptyNoFolder『フォルダーを開くと、ここにファイルが表示されます。』が描画されない。空の wxDataViewCtrl が無言で出る。空状態 3 分岐（ui-design 15章）の整備は sprint8 計画のため low。",
+      "location": "src/ui/main_frame.cpp:137-146"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint3 は GUI 配線骨格スプリントで、MainFrame レイアウト（メニュー/左ツリー/タブ/通知領域/右下ステータス）・wxDataViewCtrl ツリー・Scintilla 配線は素直に組まれ、判断ロジックを controller(gtest済)に寄せる分離は良好。frontend-ui 観点の critical(主要操作の不能/不可視・キーボード操作不能)は無し：開く/展開/タブ切替は wx 既定でキーボード到達可能。一方 a11y に実欠陥が 1 件 high：状態マークのアクセシブルネームが『含める』というコメントに反して未配線で、用意済みの state_mark_label がデッドコード化している。加えてビジュアル一貫性の乖離（マーク位置が正典と左右逆・削除済み取り消し線が未描画・伝播±と実心±が色非依存で弁別不能・配色トークン全面未適用）が medium 中心で複数。empty/error 状態・テーマ配色・F6 循環は sprint7/8 計画に沿うため high 以下に留めた。次 sprint で UnreadSet が埋まると Deleted/伝播の描画欠落が顕在化するため、ViewModel が解決した状態を描画層が落とさない配線（取り消し線属性・アクセシブルネーム・伝播の色非依存弁別）を優先対応すべき。"
+}

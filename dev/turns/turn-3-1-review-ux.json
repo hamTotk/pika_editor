@@ -1,0 +1,39 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 3,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "破壊的操作の確認/データ喪失",
+      "message": "未保存の編集を持つタブを閉じる/アプリを終了する際の確認（保存／破棄／キャンセル）が一切ない。on_close_tab(main_frame.cpp:232-241) は notebook_->DeletePage + tabs_.close を unsaved 状態を見ずに即実行し、on_notebook_page_close(272-280) と中クリック/タブ×は evt.Skip() で wx に即削除させ、on_exit(243-245) は Close(true) で無条件終了、wxEVT_CLOSE_WINDOW ハンドラ/Veto も無いため X ボタン・Alt+F4 でも確認なしで終わる。本 sprint でエディタは書き込み可能(make_editor_config の read_only=false・EditorPanel は編集可)になり、EditorPanel::is_dirty()・TabState.unsaved という未保存判定の素材も揃っているのに、どの閉じる経路もそれを参照しない。requirements.md:181『未保存のタブを閉じるときは確認する（保存／破棄／キャンセル）』・5.7/362(終了時の未保存確認)に正面から反し、誤操作でユーザーのバッファ編集が無告知で失われる(Nielsen #3 制御と自由・#5 エラー防止)。critical にしないのは、(a) 保存フロー/退避(SnapshotStore 結合)は sprint6・FolderSwitch の ConfirmUnsaved 確認は sprint2 should として後続スプリントに計画済みで本 sprint の must 範囲外、(b) タブを閉じてもディスク上のファイルは消えず喪失はバッファ内の未保存編集に限定される、ため。ただしエディタが今 sprint で書き込み可能化した以上ギャップは live であり、後続が遅れる場合の劣化として high で記録する。",
+      "location": "src/ui/main_frame.cpp:232-246"
+    },
+    {
+      "severity": "medium",
+      "area": "フィードバック/エラー回復",
+      "message": "ファイル読み取り失敗時に無告知で空エディタを開くため、ユーザーは『空のファイル』と『開けなかった』を区別できない。open_file の else 分岐(main_frame.cpp:186-190)は util::read_all 失敗時にコメント通り空エディタを出すだけで、原因も次の一手も出ない。通知バー領域は高さ0のプレースホルダ(main_frame.cpp:106-109・集約は sprint7)で、エラー文言を出す経路が今は存在しない。成功/失敗が伝わらない(Nielsen #1 可視性・#9 回復支援)。縮退表示/通知バー集約が sprint7-8 計画のため high でなく medium。",
+      "location": "src/ui/main_frame.cpp:186-190"
+    },
+    {
+      "severity": "medium",
+      "area": "エラー文言/縮退の案内",
+      "message": "権限なし・消失フォルダの列挙失敗が空バッチで無言処理され、権限のないフォルダと空フォルダがツリー上で見分けられない。list_directory(dir_enumerator.cpp:31-37)は error_code 時に空 out を on_listed するだけで、なぜ表示できないか/次に何をすべきかが一切示されない(ヘッダ・実装とも『本 sprint は最小配線』『縮退表示は呼び出し側』と明記)。ux 上はエラー原因と次の一手が欠落(Nielsen #9)。縮退判定ロジック(読み取り専用/権限/ネットワークドライブ等)は sprint8 must に計画済みのため、本 sprint としては medium。",
+      "location": "src/app/dir_enumerator.cpp:31-37"
+    },
+    {
+      "severity": "low",
+      "area": "一貫性(同じ操作→同じ結果)",
+      "message": "タブを閉じる 2 経路で TabManager と wxAuiNotebook の index 整合の取り方が非対称で、複数タブ時にアクティブ遷移がずれうる。メニュー経路 on_close_tab は GetSelection() の index で DeletePage と tabs_.close(sel) を同じ index で呼ぶが、ページ×/中クリック経路 on_notebook_page_close は evt.GetSelection() で tabs_.close(page) を呼んでから evt.Skip() で wx に削除させる。TabManager の close は『閉じたタブの右隣→左隣』へアクティブを移す安全遷移(tab_manager.h:43-45)を持つが、wxAuiNotebook 側のページ選択遷移は wx 既定に委ねられ、両者の選んだ次アクティブが一致する保証が配線上ない。結果、閉じた後に意図と違うタブが前面化しうる(Nielsen #4 一貫性)。本 sprint は単一ファイルを開く骨格で多タブ運用は浅く、TabState↔notebook page の同一性写像自体が sprint5/6 で本格化するため low。",
+      "location": "src/ui/main_frame.cpp:232-280"
+    },
+    {
+      "severity": "low",
+      "area": "CLI の DX",
+      "message": "GUI 経路の不正引数で『GUI を起動せず終了』するが、ユーザーへ理由が一切出ない。main_gui.cpp:108-113 は plan.accepted==false で OnInit を false で返すだけ(無言終了)。これは pika.com(コンソールスタブ)が stderr に『pika: <理由>』を出し非0終了する経路(main_console.cpp:102-109)と整合し、エクスプローラー等から GUI を直叩きした場合はそもそもコンソールが無いため stderr 文言は見えない設計判断としては妥当で、CLI 検証の主経路は pika.com が担う。ただし『なぜ起動しなかったか』がユーザーから完全に不可視な点は記録に値する(Nielsen #1/#9)。主たる CLI DX(--help/usage/終了コード/stdout-stderr 分離)は pika.com 側で適切に満たされており本 sprint で変更も無いため low。",
+      "location": "src/app/main_gui.cpp:108-113"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint3 は中心体験①『開く』の GUI/プラットフォーム配線(main_gui 実体化・MainFrame レイアウト・wxDataViewCtrl ツリー・Scintilla・名前付きパイプ単一インスタンス転送)で、判断ロジックを controller/core(gtest 済)に寄せる分離は良好。転送受信側で Raise()+RequestUserAttention() による前面化、重複オープン抑止(TabManager 委譲)など『開く』導線は素直に通る。ux の critical(主要タスクが完了不能な導線破綻/誤操作でデータ喪失で確認も取り消しも無し)としては、編集が今 sprint で書き込み可能化したにもかかわらずタブを閉じる/終了するどの経路にも未保存確認(wxEVT_CLOSE_WINDOW/Veto すら)が無いギャップが最も近いが、(a) 保存フロー・退避結合(sprint6)と ConfirmUnsaved 状態機械(sprint2 should)が後続スプリントに明確に計画済みで本 sprint must 範囲外、(b) タブを閉じてもディスク上ファイルは消えず喪失はバッファ未保存編集に限定、の二点で確信を持って critical とは言えず high に留めた。残りは読み取り失敗/権限なし列挙の無言化(フィードバック/縮退案内の欠落・通知バーと縮退判定が sprint7-8 計画)で medium、閉じる 2 経路の index 整合の非対称・GUI 不正引数の無言終了が low。frontend-ui 観点(空状態文言・配色トークン・a11y アクセシブルネーム・状態マーク描画)とは重複させていない。後続スプリントが遅延する場合、書き込み可能化したエディタに未保存確認が無い high を最優先で塞ぐべき。"
+}

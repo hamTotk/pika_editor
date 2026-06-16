@@ -1,0 +1,27 @@
+{
+  "reviewer": "security",
+  "sprint_id": 3,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "認可境界 / fail-open",
+      "message": "current_user_sid() が空文字を返した場合（OpenProcessToken/GetTokenInformation 失敗・制限トークン等）、make_owner_only_sddl(空) が 'D:(A;;GA;;;)' という不正 SDDL（SID 欠落）を生成し ConvertStringSecurityDescriptorToSecurityDescriptorA が失敗、sd_ok=false となる。try_acquire はこのとき CreateNamedPipeA に nullptr（SECURITY_ATTRIBUTES 不指定）を渡すため、要件3.2 が必須とする『作成者ユーザーのみ許可する owner-only DACL』が黙って外れ、既定 DACL でパイプが作られる（fail-open）。さらに make_pipe_name(空) が SID 抜きの予測可能なパイプ名（pika- 接尾辞なし）になり、ユーザー別分離も失われる。受理操作はパスのオープンに限定され op/絶対パス/サイズ検証も効くため影響は同一マシンのローカル他プロセスが本人のエディタに任意絶対パスを開かせうる範囲に限定され、かつ発火条件（SID 取得失敗）は通常の対話プロセスでは稀。したがって critical（明確な認可バイパス）には該当せず high。対策: sid 空 または sd_ok=false のときは既定 DACL へフォールバックせず try_acquire を失敗扱い（fail-closed）にし、ロック未獲得＝起動中止または安全な縮退に倒す。",
+      "location": "src/app/pipe_server.cpp:58-98"
+    },
+    {
+      "severity": "medium",
+      "area": "多層防御 / SDDL 検証",
+      "message": "try_acquire は ConvertStringSecurityDescriptorToSecurityDescriptorA の失敗（sd_ok=false）を、意図した owner-only DACL の付与失敗として扱わず黙って既定 DACL 作成へ流している。high 指摘と同根だが、SID が正常でも SDDL 文字列組み立て不整合や API 失敗の一般ケースで保護方針が静かに緩むため、sd_ok=false を明示的なエラー（パイプを作らない/ログ）として扱い、保護方針の劣化を検知可能にすべき。",
+      "location": "src/app/pipe_server.cpp:66-89"
+    },
+    {
+      "severity": "low",
+      "area": "情報開示 / 入力検証（確認・問題なし）",
+      "message": "確認のみ（指摘ではない）。(1) パイプ受信→apply_open_targets の経路は core/ipc parse_request が op=open 固定・絶対 Windows パス必須・kMaxMessageBytes 打ち切り・部分受理拒否で検証済みで injection/RCE sink は無い。(2) dir_enumerator/dir_lister は to_workspace_rel_path がプレフィックス境界厳密判定で root 外を破棄しシンボリックリンクを辿らないためトラバーサルは塞がっている。(3) ui_messages は静的日本語文言のみで秘密・内部パス・スタックトレースの漏洩は無い。これらは本 sprint で新たな脆弱性を持ち込んでいない。",
+      "location": "src/core/ipc/ipc_message.cpp:104-156"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint3（『開く』の GUI/プラットフォーム配線）の security 観点。中核の信頼境界＝名前付きパイプ IPC は core/ipc 側（parse_request の op 固定・絶対パス必須・サイズ打ち切り・部分受理拒否）と dir_lister の root 境界厳密判定により基本的に堅牢で、injection/RCE/トラバーサルの到達経路は無く、機密のハードコードも無い。critical は 0。唯一の実質的な弱点は pipe_server.cpp::try_acquire の fail-open: current_user_sid() 空や SDDL 変換失敗時に要件3.2 必須の owner-only DACL を黙って落として既定 DACL でパイプを作る点（発火条件は稀・影響はローカル限定のため high）。fail-closed 化（保護方針を確立できないならパイプを作らない）を推奨。"
+}

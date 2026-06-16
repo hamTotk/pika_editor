@@ -1,0 +1,73 @@
+#include "ui/editor_panel.h"
+
+#include <wx/string.h>
+
+namespace pika::ui
+{
+
+namespace
+{
+
+int to_sci_eol(controller::EolMode mode)
+{
+    switch (mode)
+    {
+    case controller::EolMode::Crlf:
+        return wxSTC_EOL_CRLF;
+    case controller::EolMode::Lf:
+    case controller::EolMode::Mixed:
+    default:
+        // 混在は統一しない（要件5.2）。新規行挿入の既定だけ LF にし、既存の改行は触らない。
+        return wxSTC_EOL_LF;
+    }
+}
+
+} // namespace
+
+EditorPanel::EditorPanel(wxWindow* parent, wxWindowID id)
+    : wxStyledTextCtrl(parent, id, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE)
+{
+    // 内部表現を UTF-8 に固定する。core/document の content（UTF-8）をそのまま扱うため。
+    SetCodePage(wxSTC_CP_UTF8);
+    // 行番号余白（design 10章のエディタ体裁。最小骨格）。
+    SetMarginType(0, wxSTC_MARGIN_NUMBER);
+    SetMarginWidth(0, 40);
+}
+
+void EditorPanel::apply_config(const controller::EditorConfig& cfg)
+{
+    // タブ/インデント設定を明示し原文を変えない（design 10章 G3）。SetUseTabs(false) でも既存の
+    // タブ文字は空白へ変換しない（Tab キー入力時の挙動だけが変わる）。
+    SetTabWidth(cfg.tab_width);
+    SetUseTabs(cfg.use_tabs);
+    SetIndent(cfg.tab_width);
+    SetEOLMode(to_sci_eol(cfg.eol_mode));
+    SetWrapMode(cfg.word_wrap ? wxSTC_WRAP_WORD : wxSTC_WRAP_NONE);
+    // 空白/タブの可視化（要件11章）。可視化は表示のみで内容は変えない。
+    SetViewWhiteSpace(cfg.show_whitespace ? wxSTC_WS_VISIBLEALWAYS : wxSTC_WS_INVISIBLE);
+    SetReadOnly(cfg.read_only);
+}
+
+void EditorPanel::set_text_utf8(const std::string& utf8)
+{
+    const bool was_read_only = GetReadOnly();
+    if (was_read_only)
+    {
+        SetReadOnly(false);
+    }
+    // wxString::FromUTF8 で UTF-8 バイト列を解釈する（CP_ACP を介さない）。改行は変換しない。
+    SetText(wxString::FromUTF8(utf8.c_str(), utf8.size()));
+    EmptyUndoBuffer(); // 読み込みは Undo 履歴の起点（外部変更反映の単一 Undo は sprint4）。
+    SetSavePoint();    // 読み込み直後は未編集（dirty=false）。
+    if (was_read_only)
+    {
+        SetReadOnly(true);
+    }
+}
+
+bool EditorPanel::is_dirty() const
+{
+    return GetModify();
+}
+
+} // namespace pika::ui

@@ -6,6 +6,8 @@ find_package(GTest CONFIG REQUIRED)
 add_executable(pika_tests
     controller/app_controller_test.cpp
     controller/data_root_test.cpp
+    controller/dir_lister_test.cpp
+    controller/editor_view_model_test.cpp
     controller/tab_manager_test.cpp
     controller/tree_view_model_test.cpp
     core/diff/diff_engine_test.cpp

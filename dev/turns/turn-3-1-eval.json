@@ -1,0 +1,37 @@
+{
+  "score": 95,
+  "plan_implementation": {
+    "overall": 95,
+    "notes": "must 6件すべて充足: (1)main_gui実体化+MainFrameレイアウト骨格(メニュー/左ツリー/タブ/通知領域/メイン/右下固定ステータス・wxStatusBar非オーバーレイ) (2)wxDataViewCtrl+sprint1 build_tree_view_model入力+dir_enumeratorの逐次列挙 (3)Scintilla配線(EditorConfig写像+decode_auto+set_text_utf8でエンコ/改行反映・SCI_SETTABWIDTH/SETUSETABS明示・原文非変換) (4)名前付きパイプ実I/O(FILE_FLAG_FIRST_PIPE_INSTANCE原子的ロック・owner-only SDDL・PIPE_REJECT_REMOTE_CLIENTS・敗者send_to_server転送でexit0・start_listeningをShow前) (5)cmake build exit0 (6)ctest非回帰PASS。verify.jsonで両コマンドexit0確認。should: 非オーバーレイ右下ステータス○・最短経路起動構造○・テーマトークン配色は△(再描画フックのみ・実トークン解決はsprint7計画通り先送り、frontend-uiがtokens全面未適用を指摘)。"
+  },
+  "quality": {
+    "overall": 95,
+    "breakdown": {"d_verify": 100, "d_accept": 100, "d_quality": 87},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[PASS] d_verify=100(ctest/cmake build 両exit0) d_accept=100(must6件全充足) d_quality=87 d_review=100(security/frontend-ui/ux 3レビュワーともhas_critical=false)。score=95。判断ロジックをwx非依存controller(editor_view_model/dir_lister)へ厚く寄せ系統A(gtest)に乗せた分離設計が良好で、新規22テストは観測可能挙動を緩和/skipなく検証し改竄なし、基準ファイル(core/docs/spec/sprints)も無改変。[HIGH 次ターン対応] (1)security: pipe_server try_acquire の fail-open — current_user_sid()空/SDDL変換失敗時にowner-only DACLを黙って落とし既定DACLでパイプ作成。fail-closed(保護確立不能ならパイプを作らない/起動中止)へ。(2)a11y: file_tree_panel GetValueが state_mark_label を使わず記号のみ返し、controller提供の state_mark_label/icon_category_label がデッドコード化。コメント『アクセシブルネームに状態ラベルを含める』に反する。(3)ux: エディタが書込可能化したのに タブ閉じ/終了のどの経路にも未保存確認(wxEVT_CLOSE_WINDOW/Veto)が無い。保存/退避はsprint6計画だが書込可能化したギャップはlive。[MEDIUM] 状態マーク位置が正典と左右逆(記号は名前右が正)/削除済み取消線属性未描画/伝播±と実心±が色非依存で弁別不能/配色トークン全面未適用/読取失敗・権限なし列挙の無言化。いずれもUnreadSet空・縮退/通知バー集約がsprint7-8計画のため非critical。",
+  "feedback_structured": {
+    "high": [
+      {"area": "security / 認可境界 fail-open", "message": "src/app/pipe_server.cpp try_acquire: current_user_sid()が空(OpenProcessToken/GetTokenInformation失敗・制限トークン)またはSDDL変換失敗(sd_ok=false)のとき、要件3.2必須のowner-only DACLを黙って落としnullptr SECURITY_ATTRIBUTESで既定DACLパイプを作る(fail-open)。さらにmake_pipe_name(空)でSID抜き予測可能パイプ名となりユーザー分離も失う。発火条件は稀・影響はローカル限定でcritical未満だが、保護方針を確立できないならパイプを作らないfail-closed化(try_acquire失敗扱い→安全縮退)が要る。securityレビュワー指摘。"},
+      {"area": "frontend-ui / アクセシビリティ", "message": "src/ui/file_tree_panel.cpp:43-54 GetValueが mark_prefix(記号)+name のみ返し、controller側に用意済みの state_mark_label(『差分あり』『新規』『削除済み』)/icon_category_label がUIから一切参照されずデッドコード化。コメント『アクセシブルネームに状態ラベルを含める』に反し、UIA/MSAAで読まれるのは生記号のみ、削除済みは記号空で手掛かりゼロ。ui-design 13章のアクセシブルネーム要件未達。列値に状態ラベルを含めるかwxAccessibleで補う配線が必要。"},
+      {"area": "ux / 破壊的操作の確認・データ喪失", "message": "src/ui/main_frame.cpp:232-246 タブ閉じ/終了のどの経路(on_close_tab・on_notebook_page_close・on_exit Close(true)・X/Alt+F4)にも未保存確認(保存/破棄/キャンセル)が無く、wxEVT_CLOSE_WINDOW/Vetoも未配線。本sprintでエディタが書込可能化(read_only=false)し EditorPanel::is_dirty/TabState.unsaved の素材も揃うのに参照されず、誤操作でバッファ未保存編集が無告知で失われる(requirements.md:181)。保存/退避結合はsprint6・ConfirmUnsavedはsprint2 shouldで計画済みのためcriticalではないが、書込可能化したギャップはlive。後続が遅延するなら最優先で塞ぐ。"}
+    ],
+    "medium": [
+      {"area": "frontend-ui / ビジュアル一貫性", "message": "ツリー状態マーク位置が正典(ui-design 5/6章=左:種別アイコン・右:状態マーク)と逆で mark_prefix が記号を名前前に連結。種別アイコンも本sprint未実装(将来 wxDataViewIconText 重畳とコメント)。"},
+      {"area": "frontend-ui / 状態の網羅", "message": "削除済み(取消線)状態が wxDataViewItemAttr strikethrough 未適用でNoneと見分け不能。ViewModelが解決した最上位状態(削除済み>未保存>差分あり)を描画層が落とす構造。本sprintはUnreadSet常時空で潜在だが次sprintで顕在化。"},
+      {"area": "frontend-ui / 色非依存", "message": "DiffPropagated(伝播±淡)とDiff(実心±)が state_mark_symbol で双方『±』を返し区別が色だけに依存。本sprintは配色適用ゼロのため2状態が記号・色とも同一描画。ui-design 3章の色非依存原則に対し記号/位置/ラベルでの弁別が要る。"},
+      {"area": "frontend-ui / テーマ配色", "message": "src/ui全体で ui-design 2章 semantic token(accent/bg-sunken/bg-active等)の適用がゼロ。on_sys_colour_changedはRefresh()のみで再配色しない。トークン解決はsprint7計画だが色を当てる足場が皆無。should『ui-design 2章トークンで配色』未達。"},
+      {"area": "ux / フィードバック・エラー回復", "message": "main_frame.cpp:186-190 read_all失敗時に無告知で空エディタを開き『空ファイル』と『開けなかった』を区別不能。通知バーは高さ0プレースホルダ(集約sprint7)でエラー文言経路が無い。縮退/通知集約がsprint7-8計画のためmedium。"},
+      {"area": "ux / 縮退案内", "message": "src/app/dir_enumerator.cpp:31-37 権限なし・消失フォルダの列挙失敗が空バッチで無言処理され、権限なしフォルダと空フォルダが見分け不能。縮退判定ロジックはsprint8 must計画のためmedium。"}
+    ],
+    "low": [
+      {"area": "ux / 一貫性", "message": "タブ閉じ2経路(on_close_tab=GetSelection / on_notebook_page_close=evt.GetSelection→Skip)でTabManagerとwxAuiNotebookのindex整合の取り方が非対称。多タブ時にアクティブ遷移がwx既定とTabManagerの安全遷移でずれうる。多タブ運用本格化はsprint5/6。"},
+      {"area": "ux / CLI DX", "message": "main_gui.cpp:108-113 plan.accepted==falseでOnInit false返却=無言終了。エクスプローラー直叩きはコンソール無しでstderrも見えない。CLI検証主経路はpika.com(stderr『pika: <理由>』+非0)が担うため設計判断としては妥当でlow。"},
+      {"area": "frontend-ui / キーボード", "message": "F6/Shift+F6ペイン間フォーカス循環・F5再列挙のaccelerator配線が無い(ui-design 13章の土台)。ツリー/タブ/メニューはwx既定で個別キーボード操作可・F6循環はsprint8 should計画のためlow。"},
+      {"area": "frontend-ui / 空状態", "message": "refresh_tree(main_frame.cpp:137-146)がワークスペース未オープン時に空TreeRowVmをset_rootするだけで ui_messages定義済みのEmptyNoFolder文言が描画されず空ツリーが無言で出る。空状態3分岐(ui-design 15章)整備はsprint8計画のためlow。"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

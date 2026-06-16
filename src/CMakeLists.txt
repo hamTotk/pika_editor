@@ -40,11 +40,19 @@ find_path(DTL_INCLUDE_DIR NAMES dtl/dtl.hpp REQUIRED)
 # sprint2 では DataRoot 解決（portable.txt 分岐）・AppController（CLI 受領→OpenTarget 正規化・
 # 単一インスタンス役割決定）・TabManager 状態機械（open/close/activate・重畳優先・消失タブ安全遷移・
 # フォルダ切替）を wx 非依存ロジックとして実装する。
+# sprint3（GUI 配線）では、その配線判断のうち wx/FS 非依存に切り出せる部分を controller に足す：
+# editor_view_model（Settings→Scintilla 配線パラメータ写像・タブ見出し抽出）と
+# dir_lister（実 FS 列挙フルパス→workspace::Entry 正規化・除外適用・root 越境遮断）。
+# wx 依存の MainFrame/ツリー/Scintilla/パイプ実 I/O は src/app・src/ui 側（系統B）が担う。
 add_library(pika_core STATIC
     controller/app_controller.cpp
     controller/app_controller.h
     controller/data_root.cpp
     controller/data_root.h
+    controller/dir_lister.cpp
+    controller/dir_lister.h
+    controller/editor_view_model.cpp
+    controller/editor_view_model.h
     controller/tab_manager.cpp
     controller/tab_manager.h
     controller/tree_view_messages.cpp

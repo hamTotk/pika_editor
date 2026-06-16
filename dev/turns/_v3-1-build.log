@@ -1,0 +1,7 @@
+MSBuild のバージョン 17.14.40+3e7442088 (.NET Framework)
+
+  pika_core.vcxproj -> C:\dev\pika_editor\build\x64-release\src\Release\pika_core.lib
+  pika_ui.vcxproj -> C:\dev\pika_editor\build\x64-release\src\app\Release\pika_ui.lib
+  pika.vcxproj -> C:\dev\pika_editor\build\x64-release\src\app\Release\pika.exe
+  pika_com.vcxproj -> C:\dev\pika_editor\build\x64-release\src\app\Release\pika.com
+  pika_tests.vcxproj -> C:\dev\pika_editor\build\x64-release\tests\Release\pika_tests.exe
