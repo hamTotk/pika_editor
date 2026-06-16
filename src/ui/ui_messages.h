@@ -22,11 +22,15 @@ enum class MsgId
     MenuClose,       // 「閉じる」
     MenuExit,        // 「終了」
     MenuView,        // 「表示」
+    MenuRefresh,     // 「再読み込み」（F5）
     MenuHelp,        // 「ヘルプ」
     MenuAbout,       // 「pika について」
     TreePaneTitle,   // ツリーペイン見出し
     StatusReady,     // 起動直後のステータス
     StatusNoFolder,  // フォルダ未オープン時
+    StatusWatching,  // 監視中（ReadDirectoryChangesW）
+    StatusPolling,   // ポーリングフォールバック中（監視不能環境）
+    StatusSyncing,   // 再同期実行中（F5/オーバーフロー回復。進捗表示。design 10章 F3）
     EmptyNoFolder,   // 中央: フォルダ未オープンの空状態
     NotificationArea // 通知バー領域のアクセシブルネーム
 };

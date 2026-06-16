@@ -10,6 +10,8 @@ add_executable(pika_tests
     controller/editor_view_model_test.cpp
     controller/tab_manager_test.cpp
     controller/tree_view_model_test.cpp
+    controller/watch_event_map_test.cpp
+    controller/workspace_controller_test.cpp
     core/diff/diff_engine_test.cpp
     core/diff/inline_diff_test.cpp
     core/diff/line_diff_test.cpp

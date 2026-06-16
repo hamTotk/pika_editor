@@ -19,6 +19,8 @@ std::string message(MsgId id)
         return "終了\tAlt+F4";
     case MsgId::MenuView:
         return "表示(&V)";
+    case MsgId::MenuRefresh:
+        return "再読み込み";
     case MsgId::MenuHelp:
         return "ヘルプ(&H)";
     case MsgId::MenuAbout:
@@ -29,6 +31,12 @@ std::string message(MsgId id)
         return "準備完了";
     case MsgId::StatusNoFolder:
         return "フォルダーが開かれていません";
+    case MsgId::StatusWatching:
+        return "変更を監視中";
+    case MsgId::StatusPolling:
+        return "変更を定期確認中（監視不可）";
+    case MsgId::StatusSyncing:
+        return "再同期中...";
     case MsgId::EmptyNoFolder:
         return "フォルダーを開くと、ここにファイルが表示されます。";
     case MsgId::NotificationArea:

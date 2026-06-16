@@ -21,9 +21,12 @@ add_library(pika_ui STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/main_frame.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/ui_messages.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/ui_messages.h
-    # プラットフォーム層（実 FS/OS I/O。MainFrame が直接呼ぶ列挙）。
+    # プラットフォーム層（実 FS/OS I/O。MainFrame が直接呼ぶ列挙・監視）。
     dir_enumerator.cpp
     dir_enumerator.h
+    # sprint4: ReadDirectoryChangesW 監視スレッド実体（FILE_NOTIFY_INFORMATION→RawEvent→WatcherCore）。
+    watch_thread.cpp
+    watch_thread.h
 )
 target_link_libraries(pika_ui
     PUBLIC
