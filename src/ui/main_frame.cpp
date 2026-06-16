@@ -1,14 +1,19 @@
 #include "ui/main_frame.h"
 
 #include "app/dir_enumerator.h"
+#include "controller/diff_mode_model.h"
 #include "controller/dir_lister.h"
 #include "controller/editor_view_model.h"
+#include "controller/preview_builder.h"
 #include "controller/tree_view_model.h"
+#include "core/diff/diff_engine.h"
+#include "core/render/markdown_renderer.h"
 #include "core/watcher/fs_probe.h"
 #include "core/watcher/resync.h"
 #include "core/workspace/workspace_model.h"
 #include "ui/editor_panel.h"
 #include "ui/file_tree_panel.h"
+#include "ui/preview_view.h"
 #include "ui/ui_messages.h"
 #include "util/atomic_file.h"
 #include "util/encoding.h"
@@ -21,6 +26,7 @@
 #include <wx/sizer.h>
 #include <wx/splitter.h>
 #include <wx/statusbr.h>
+#include <wx/utils.h>
 
 #include <optional>
 
@@ -29,6 +35,15 @@ namespace pika::ui
 
 namespace
 {
+
+// 表示メニューの項目 ID（モード排他＝ラジオ、差分＝チェック。ui-design 8章）。
+enum
+{
+    ID_MODE_SOURCE = wxID_HIGHEST + 1,
+    ID_MODE_SPLIT,
+    ID_MODE_PREVIEW,
+    ID_TOGGLE_DIFF,
+};
 
 wxString u8(const std::string& s)
 {
@@ -88,6 +103,13 @@ void MainFrame::build_menu()
     auto* view_menu = new wxMenu();
     // 再読み込み（F5）。監視不能環境/取りこぼし時のオンデマンド再同期（要件11.2・design 5.2）。
     view_menu->Append(wxID_REFRESH, u8(MsgId::MenuRefresh) + "\tF5");
+    view_menu->AppendSeparator();
+    // モード（排他＝ラジオ）と差分トグル（独立＝チェック）を直交させる（ui-design 8章）。
+    view_menu->AppendRadioItem(ID_MODE_SOURCE, u8(MsgId::MenuModeSource));
+    view_menu->AppendRadioItem(ID_MODE_SPLIT, u8(MsgId::MenuModeSplit));
+    view_menu->AppendRadioItem(ID_MODE_PREVIEW, u8(MsgId::MenuModePreview));
+    view_menu->AppendSeparator();
+    view_menu->AppendCheckItem(ID_TOGGLE_DIFF, u8(MsgId::MenuToggleDiff));
     menu_bar->Append(view_menu, u8(MsgId::MenuView));
 
     auto* help_menu = new wxMenu();
@@ -101,6 +123,10 @@ void MainFrame::build_menu()
     Bind(wxEVT_MENU, &MainFrame::on_exit, this, wxID_EXIT);
     Bind(wxEVT_MENU, &MainFrame::on_about, this, wxID_ABOUT);
     Bind(wxEVT_MENU, &MainFrame::on_refresh, this, wxID_REFRESH);
+    Bind(wxEVT_MENU, &MainFrame::on_set_mode_source, this, ID_MODE_SOURCE);
+    Bind(wxEVT_MENU, &MainFrame::on_set_mode_split, this, ID_MODE_SPLIT);
+    Bind(wxEVT_MENU, &MainFrame::on_set_mode_preview, this, ID_MODE_PREVIEW);
+    Bind(wxEVT_MENU, &MainFrame::on_toggle_diff, this, ID_TOGGLE_DIFF);
     Bind(wxEVT_SYS_COLOUR_CHANGED, &MainFrame::on_sys_colour_changed, this);
 }
 
@@ -127,13 +153,26 @@ void MainFrame::build_layout()
     tree_ = new FileTreePanel(splitter);
     tree_->set_on_file_activated([this](const std::string& rel) { on_tree_file_activated(rel); });
 
-    notebook_ = new wxAuiNotebook(splitter, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+    // メイン領域：エディタ（タブ）｜プレビュー（共有 1 枚 WebView2）の水平分割。分割モードで両方を
+    // 出し、ソース/プレビューモードでは片側だけ（update_preview がサッシュを出し入れする）。
+    auto* main_split = new wxSplitterWindow(splitter, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                                            wxSP_LIVE_UPDATE | wxSP_3DSASH);
+
+    notebook_ = new wxAuiNotebook(main_split, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                   wxAUI_NB_TOP | wxAUI_NB_TAB_MOVE | wxAUI_NB_SCROLL_BUTTONS |
                                       wxAUI_NB_CLOSE_ON_ACTIVE_TAB);
     notebook_->Bind(wxEVT_AUINOTEBOOK_PAGE_CHANGED, &MainFrame::on_notebook_page_changed, this);
     notebook_->Bind(wxEVT_AUINOTEBOOK_PAGE_CLOSE, &MainFrame::on_notebook_page_close, this);
 
-    splitter->SplitVertically(tree_, notebook_, 280);
+    preview_ = new PreviewView(main_split);
+    preview_->set_on_navigate([this](const std::string& url) { on_preview_navigate(url); });
+
+    // 既定はソースモード（差分OFF）。プレビューは隠す（初回要求まで WebView2 を作らない）。
+    main_split->SplitVertically(notebook_, preview_, -360);
+    main_split->SetMinimumPaneSize(120);
+    main_split->Unsplit(preview_); // ソースモードはエディタのみ
+
+    splitter->SplitVertically(tree_, main_split, 280);
     splitter->SetMinimumPaneSize(160);
     root_sizer->Add(splitter, 1, wxEXPAND);
 
@@ -147,6 +186,11 @@ void MainFrame::open_workspace(const std::string& folder_abs)
     workspace_ = folder_abs;
     // 新ワークスペース用の WorkspaceController を作り直す（前フォルダの未読・引き継ぎ状態を破棄）。
     workspace_ctl_ = controller::WorkspaceController(workspace_);
+    // doc.pika の許可範囲＝ワークスペース配下に更新する（../ 抜けは遮断。design 6章 C7）。
+    if (preview_)
+    {
+        preview_->set_document_root(workspace_);
+    }
     refresh_tree();
     update_status();
     // 表示後にツリー列挙・監視開始（design 5.1 手順4。表示をブロックしない）。
@@ -373,6 +417,123 @@ void MainFrame::on_refresh(wxCommandEvent&)
     if (watch_thread_)
     {
         watch_thread_->request_resync();
+    }
+}
+
+EditorPanel* MainFrame::active_editor() const
+{
+    const int sel = notebook_->GetSelection();
+    if (sel == wxNOT_FOUND)
+    {
+        return nullptr;
+    }
+    return dynamic_cast<EditorPanel*>(notebook_->GetPage(static_cast<std::size_t>(sel)));
+}
+
+void MainFrame::on_set_mode_source(wxCommandEvent&)
+{
+    view_mode_ = controller::ViewMode::Source;
+    update_preview();
+}
+
+void MainFrame::on_set_mode_split(wxCommandEvent&)
+{
+    view_mode_ = controller::ViewMode::Split;
+    update_preview();
+}
+
+void MainFrame::on_set_mode_preview(wxCommandEvent&)
+{
+    view_mode_ = controller::ViewMode::Preview;
+    update_preview();
+}
+
+void MainFrame::on_toggle_diff(wxCommandEvent& evt)
+{
+    diff_on_ = evt.IsChecked();
+    update_preview();
+}
+
+void MainFrame::update_preview()
+{
+    if (!preview_)
+    {
+        return;
+    }
+    // 描画面構成は controller::diff_mode_model が決める（wx 非依存・gtest 済み）。ここは結線のみ。
+    const controller::PaneLayout layout = controller::resolve_pane_layout(view_mode_, diff_on_);
+    auto* main_split = dynamic_cast<wxSplitterWindow*>(notebook_->GetParent());
+
+    // サッシュの出し入れ：エディタとプレビューの両方が要るときだけ分割し、片方のみのときは畳む。
+    if (main_split)
+    {
+        const bool need_both = layout.show_editor && layout.webview_active;
+        if (main_split->IsSplit())
+        {
+            main_split->Unsplit(); // いったん解消してから必要構成へ組み直す
+        }
+        notebook_->Show(layout.show_editor || !layout.webview_active);
+        preview_->Show(layout.webview_active);
+        if (need_both)
+        {
+            main_split->SplitVertically(notebook_, preview_, -360); // 分割（エディタ＋プレビュー）
+        }
+        else if (layout.webview_active)
+        {
+            main_split->Initialize(preview_); // 差分面のみ/プレビューのみ
+        }
+        else
+        {
+            main_split->Initialize(notebook_); // ソース（エディタのみ）
+        }
+    }
+    if (!layout.webview_active)
+    {
+        return; // ソース（差分OFF）。WebView2 を作らない（遅延初期化を維持）。
+    }
+
+    EditorPanel* editor = active_editor();
+    const std::string source = editor ? editor->text_utf8() : std::string{};
+
+    // 占有鍵（タブ, モード, 差分ON）。タブが無ければ tab_id=0。design 4章の占有世代に対応。
+    const auto tab_id = static_cast<std::uint64_t>(notebook_->GetSelection() + 1);
+    const controller::OccupancyKey key{tab_id, view_mode_, diff_on_};
+
+    // プレビュー本文 HTML（サニタイズ済み）はコア render_markdown が作る（wx 非依存・gtest 済み）。
+    controller::PreviewDoc doc;
+    doc.kind = controller::PreviewKind::Markdown;
+    const auto rendered = core::render::render_markdown(source);
+    doc.body_html = rendered.is_ok() ? rendered.value() : std::string{};
+
+    if (layout.show_diff)
+    {
+        // 差分は前回確認時点（ベースライン）と現内容の累積差分（コア DiffEngine・色非依存 +/-）。
+        // ベースライン供給は core/snapshot 結線（後続）。本結線は旧側を空で渡し骨格を成立させる。
+        const core::diff::DiffEngine engine;
+        const core::diff::DiffResult diff =
+            engine.compute(/*old*/ std::string_view{}, /*new*/ source);
+        if (layout.preview_diff_grid)
+        {
+            preview_->show_preview_diff_grid(key, doc, diff); // プレビュー＋差分ON＝grid
+        }
+        else
+        {
+            preview_->show_diff(key, diff, core::render::RemoteResourcePolicy::Blocked);
+        }
+    }
+    else
+    {
+        preview_->show_preview(key, doc); // プレビューのみ/分割の右ペイン
+    }
+}
+
+void MainFrame::on_preview_navigate(const std::string& url)
+{
+    // プレビュー内リンクの振り分け（design 6章）。相対 .md/.html はタブで開き、他は既定ブラウザへ。
+    // 本結線では外部 URL を既定ブラウザへ委譲する（相対リンクのタブ解決は後続で精緻化）。
+    if (!url.empty())
+    {
+        wxLaunchDefaultBrowser(u8(url));
     }
 }
 

@@ -11,6 +11,7 @@
 #pragma once
 
 #include "app/watch_thread.h"
+#include "controller/diff_mode_model.h"
 #include "controller/tab_manager.h"
 #include "controller/workspace_controller.h"
 #include "core/settings/settings.h"
@@ -30,6 +31,7 @@ namespace pika::ui
 
 class FileTreePanel;
 class EditorPanel;
+class PreviewView;
 
 class MainFrame : public wxFrame
 {
@@ -69,6 +71,18 @@ class MainFrame : public wxFrame
     void on_exit(wxCommandEvent& evt);
     void on_about(wxCommandEvent& evt);
     void on_refresh(wxCommandEvent& evt); // F5（要件11.2）= オンデマンド再同期
+
+    // 差分（sprint5）。モード（ソース/分割/プレビュー）と差分トグルを直交させて WebView2 へ反映。
+    void on_set_mode_source(wxCommandEvent& evt);
+    void on_set_mode_split(wxCommandEvent& evt);
+    void on_set_mode_preview(wxCommandEvent& evt);
+    void on_toggle_diff(wxCommandEvent& evt);
+    // 現モード×差分トグルから描画面を解決し、共有 WebView2 へ再ナビゲートする（占有世代照合）。
+    void update_preview();
+    // プレビュー内リンクの振り分け（相対 .md/.html はタブ・他は既定ブラウザ。design 6章）。
+    void on_preview_navigate(const std::string& url);
+    // アクティブタブのエディタ（無ければ nullptr）。
+    EditorPanel* active_editor() const;
     void on_tree_file_activated(const std::string& rel_path);
     void on_notebook_page_changed(wxAuiNotebookEvent& evt);
     void on_notebook_page_close(wxAuiNotebookEvent& evt);
@@ -81,6 +95,11 @@ class MainFrame : public wxFrame
     wxAuiNotebook* notebook_ = nullptr; // タブバー＋エディタ群
     wxWindow* notification_area_ = nullptr;
     wxStatusBar* status_ = nullptr;
+    PreviewView* preview_ = nullptr; // 共有 1 枚 WebView2（遅延生成。sprint5）
+
+    // 表示モード × 差分トグル（直交。ui-design 8章）。判断ロジックは controller::diff_mode_model。
+    controller::ViewMode view_mode_ = controller::ViewMode::Source;
+    bool diff_on_ = false;
 
     controller::TabManager tabs_; // タブ状態機械（wx 非依存・gtest 済み）
     // 外部変更の反映（sprint4。判断ロジックは wx 非依存・gtest 済み）。

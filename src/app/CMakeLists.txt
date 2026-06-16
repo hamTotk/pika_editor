@@ -7,8 +7,17 @@
 # - dir_enumerator: 実 FS の逐次列挙（controller::normalize_entries へ供給）
 # - src/ui: MainFrame・FileTreePanel（wxDataViewCtrl）・EditorPanel（wxStyledTextCtrl）・ui_messages
 # 判断ロジックは controller/core（wx 非依存・gtest 済み）に置き、ここは実配線に徹する。
+# sprint5（中心体験③『差分』の WebView2 配線）:
+# - src/ui/preview_view: 共有 1 枚 wxWebView（Edge）の遅延生成・仮想ホスト doc.pika のカスタム
+#   リソースハンドラ（親フォルダ配下のみ・../遮断）・ナビゲーション全インターセプト・JS 有効無効の
+#   直列切替の実配線。HTML 組み立て（CSP/base/色非依存差分/grid）は controller::preview_builder
+#   （wx 非依存・gtest 済み）が担い、ここは「どの HTML をいつナビゲートし占有世代を照合するか」に徹する。
 
 find_package(wxWidgets CONFIG REQUIRED)
+# WebView2 ローダ（静的）。wxWidgets[webview] の Edge バックエンドが要求する
+# WebView2LoaderStatic.lib をフルパスで解決する（wx の config は bare 名で参照するため、
+# unofficial::webview2::webview2 をリンクしてリンカ検索パスに載せる）。
+find_package(unofficial-webview2 CONFIG REQUIRED)
 
 # ---- pika_ui: wx 依存の UI 層（MainFrame・ツリー・エディタ・文言）----
 # main_gui（app）と将来のテスト/別 exe から再利用できるよう静的lib に切り出す。
@@ -19,6 +28,9 @@ add_library(pika_ui STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/file_tree_panel.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/main_frame.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/main_frame.h
+    # sprint5: 共有 1 枚 WebView2 のプレビュー/差分ファサード（wx 依存・系統B）。
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/preview_view.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/preview_view.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/ui_messages.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/ui_messages.h
     # プラットフォーム層（実 FS/OS I/O。MainFrame が直接呼ぶ列挙・監視）。
@@ -35,6 +47,10 @@ target_link_libraries(pika_ui
         wx::base
         wx::aui
         wx::stc
+        # sprint5: 共有 1 枚 WebView2（Edge バックエンド）でプレビュー/差分を描画する（design 6章）。
+        wx::webview
+        # WebView2 ローダ（静的）をフルパスで供給する（wx の bare 名参照のリンク不全を塞ぐ）。
+        unofficial::webview2::webview2
     PRIVATE
         pika_warnings
 )
