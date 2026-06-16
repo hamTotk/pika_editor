@@ -37,7 +37,16 @@ find_path(DTL_INCLUDE_DIR NAMES dtl/dtl.hpp REQUIRED)
 # 系統A（決定論ゲート）の対象として pika_core に含め、PIKA_BUILD_GUI の影響下に置かない
 # （spec.md 補完判断2）。wx 依存のビュー結線は src/ui 側（GUI スプリント）が担う。
 # sprint1 では TreeViewModel（build_tree/UnreadSet → 状態マーク・種別アイコンへの写像）を実装する。
+# sprint2 では DataRoot 解決（portable.txt 分岐）・AppController（CLI 受領→OpenTarget 正規化・
+# 単一インスタンス役割決定）・TabManager 状態機械（open/close/activate・重畳優先・消失タブ安全遷移・
+# フォルダ切替）を wx 非依存ロジックとして実装する。
 add_library(pika_core STATIC
+    controller/app_controller.cpp
+    controller/app_controller.h
+    controller/data_root.cpp
+    controller/data_root.h
+    controller/tab_manager.cpp
+    controller/tab_manager.h
     controller/tree_view_messages.cpp
     controller/tree_view_messages.h
     controller/tree_view_model.cpp
