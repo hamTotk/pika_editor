@@ -52,6 +52,11 @@ find_path(DTL_INCLUDE_DIR NAMES dtl/dtl.hpp REQUIRED)
 # diff_mode_model（モード×差分ON/OFF の直交→描画面構成・占有世代(タブ,モード,差分ON)・差分トグルの
 # 自動無効化判定）と preview_builder（CSP/base 付きの完全HTML文書・色非依存 +/- 差分HTML・grid 合成）。
 # wx/WebView2 依存の共有 1 枚 WebView2 実配線（preview_view）は src/ui 側（系統B）が担う。
+# sprint6（確認済み・保存・衝突退避）では、確認済み/すべて確認済み/巻き戻し/保存衝突の判断のうち wx 非依存に
+# 切り出せる部分を controller に足す：document_controller（ReviewFlow×SnapshotStore を束ねた確認済みフロー・
+# 退避結合の Result を握り潰さない・保存前の表現可能性/衝突検知/incoming 退避判定）と shortcut_table
+# （フォーカス別ショートカット・ディスパッチ表＝Ctrl+Enter/Ctrl+Shift+Enter/Ctrl+Alt+Enter。design 10章 J3）。
+# wx 依存の保存アトミック置換・確認済みの GUI 起動結線は src/ui 側（系統B）が担う。
 add_library(pika_core STATIC
     controller/app_controller.cpp
     controller/app_controller.h
@@ -61,10 +66,14 @@ add_library(pika_core STATIC
     controller/diff_mode_model.h
     controller/dir_lister.cpp
     controller/dir_lister.h
+    controller/document_controller.cpp
+    controller/document_controller.h
     controller/editor_view_model.cpp
     controller/editor_view_model.h
     controller/preview_builder.cpp
     controller/preview_builder.h
+    controller/shortcut_table.cpp
+    controller/shortcut_table.h
     controller/tab_manager.cpp
     controller/tab_manager.h
     controller/tree_view_messages.cpp

@@ -68,6 +68,11 @@ class WorkspaceController
     // 現在の未読集合（ツリー ViewModel・ステータスバー未読件数に使う）。
     const core::workspace::UnreadSet& unread() const noexcept { return unread_; }
 
+    // 確認済みフロー（DocumentController）が未読集合を直接更新するための可変参照（design 5.4）。
+    // 確認成功で未読を除去・一括取消で未読へ戻す等、退避結合の結果を 1 つの未読集合へ反映するため、
+    // WorkspaceController と DocumentController が同じ集合を共有する（二重管理を避ける）。
+    core::workspace::UnreadSet& unread_mut() noexcept { return unread_; }
+
     // 新規（◆）として表示すべき未読ファイル（ベースラインを持たない未読）の rel_path 集合。
     // build_tree_view_model の new_files 引数へそのまま渡す。
     std::vector<std::string> new_files() const;
