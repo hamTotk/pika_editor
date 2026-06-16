@@ -1,0 +1,12 @@
+[
+  {
+    "command": "ctest --preset x64-core-test",
+    "exit_code": 0,
+    "tail": "Test project C:/dev/pika_editor/build/x64-core-test\n    Start 1: pika_tests_build\n1/2 Test #1: pika_tests_build .................   Passed    0.86 sec\n    Start 2: pika_tests\n2/2 Test #2: pika_tests .......................   Passed    1.30 sec\n\n100% tests passed, 0 tests failed out of 2\n\nTotal Test time (real) =   2.16 sec\n"
+  },
+  {
+    "command": "cmake --build --preset x64-release",
+    "exit_code": 0,
+    "tail": "MSBuild のバージョン 17.14.40+3e7442088 (.NET Framework)\n\n  pika_core.vcxproj -> C:\\dev\\pika_editor\\build\\x64-release\\src\\Release\\pika_core.lib\n  pika_ui.vcxproj -> C:\\dev\\pika_editor\\build\\x64-release\\src\\app\\Release\\pika_ui.lib\n  pika.vcxproj -> C:\\dev\\pika_editor\\build\\x64-release\\src\\app\\Release\\pika.exe\n  pika_com.vcxproj -> C:\\dev\\pika_editor\\build\\x64-release\\src\\app\\Release\\pika.com\n  pika_tests.vcxproj -> C:\\dev\\pika_editor\\build\\x64-release\\tests\\Release\\pika_tests.exe\n"
+  }
+]

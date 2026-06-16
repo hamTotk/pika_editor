@@ -1,0 +1,33 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 5,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "機能縮退状態の不可視（Partial/degraded）",
+      "message": "差分トグル無効化の判定ロジック evaluate_diff_toggle / DiffDisableReason は controller に実装・テスト済みだが、GUI 側（main_frame.cpp）がこれを一切呼んでおらず、表示メニューの差分チェック項目（ID_TOGGLE_DIFF）の Enable/Check 状態にも理由表示にも結びついていない。on_toggle_diff は evt.IsChecked() を読むだけで、WebView2 不在・ベースライン未取得・10MB 超・非差分種別でもユーザーは『差分』をチェックでき、その結果 update_preview が空 body_html／旧側空の差分を WebView2 に流すため、無言で空または壊れた差分面が出る。ui-design 15章 Partial『差分トグルは無効＋理由表示』・8章『自動オフ＋理由表示（通知バーから再有効化）』が UI に未到達。せめてメニュー項目の Enable(false) と理由（diff_disable_reason_label）の提示が要る。なお has_baseline=false が常態（ベースライン供給は sprint6）であり、現状すべてのファイルで差分が無基準＝NoBaseline に該当するため、現結線では『差分基準なしでも押せて空差分が出る』状態が既定で発生する。",
+      "location": "src/ui/main_frame.cpp:451"
+    },
+    {
+      "severity": "medium",
+      "area": "差分の色非依存・行内強調（冗長チャンネル不足）",
+      "message": "build_diff_body は DiffLine::spans（行内強調＝変更語/文字の範囲。core が算出済み）を完全に無視し、行レベルの +/- マーカと diff-add/del/ctx クラスのみを出す。ui-design 11章は差分の冗長化を『色＋記号＋行内下線』、8章は『行内強調は下線＋太字。空白区切りが取れない文字列（日本語等）は文字単位で強調』と正典化しており、行内下線は色だけに依存しない弁別チャンネルの一部。行レベルの色非依存（記号＋クラス）は満たすが、行内の変更箇所が色（背景）でしか分からない構造になりうる。spans を <span class=\"diff-word\"> 等でラップして下線/太字の取りかかりを HTML 側に出すべき。テストも spans を常に {} で渡し行内強調の出力を一切検証していない。",
+      "location": "src/controller/preview_builder.cpp:97"
+    },
+    {
+      "severity": "medium",
+      "area": "プレビュー/差分面の empty・error 状態",
+      "message": "update_preview はプレビュー本文 HTML 生成失敗時 doc.body_html を空文字にフォールバックし（rendered.is_ok() ? value : \"\"）、アクティブエディタ不在時は source 空で差分・プレビューを生成する。結果として『レンダリングに失敗した』『表示する内容がない』が WebView2 上の白紙として出るだけで、ユーザーへの状態提示（empty/error の文言）がない。ui-design 15章は全ビューに Empty/Error 状態を求めており、本 sprint は骨格段階とはいえ、空 body をそのまま流すと無言の白紙になる。最低限プレビュー側にも『表示できる内容がありません』等の最小フォールバック本文を用意したい（diff 側は diff-truncated を持つのと非対称）。",
+      "location": "src/ui/main_frame.cpp:505"
+    },
+    {
+      "severity": "low",
+      "area": "ビジュアル一貫性（スタイルシート未配線・トークン未注入）",
+      "message": "差分/プレビュー HTML は https://app.pika/preview.css を参照するが、assets/ に該当 CSS が存在せず（リポジトリに *.css なし）、ui-design 2章のカラートークン（diff-add/del-{bg,tx,gut,word}・accent 等）を CSS 変数として WebView2 へ注入する配線も入っていない。本 sprint は build/系統B 検証で、実描画・CSS は系統C/後続スコープと spec に明記されているため critical/high ではないが、色非依存・コントラスト（ui-design 2章『diff-add-tx/del-tx で 4.5:1 を満たす』等）の最終担保はこの CSS に依存する。後続で preview.css を配線するまで差分・プレビューは無スタイルで描画されることを turn report で明示しておくと、視覚レビュー（acceptance.md）の漏れを防げる。",
+      "location": "src/controller/preview_builder.cpp:81"
+    }
+  ],
+  "has_critical": false,
+  "summary": "frontend-ui 観点（描画・操作要素・a11y・ビジュアル一貫性）でレビュー。use_playwright:false かつ本 sprint は wxWidgets ネイティブ GUI のため、Playwright MCP は呼ばずコード Read で検証した（外部公開 Web UI なし＝Playwright 対象外。spec の根拠と整合）。critical（主要操作が不能/不可視・致命的 a11y 違反）は無し：差分モード状態機械・占有世代・色非依存の +/- マーカ＋クラスは controller 側で正典どおり実装され gtest で観測可能、差分メニューはモード=ラジオ／差分=チェックで直交し Ctrl+Shift+D も付与、HTML エスケープで XSS 経路も塞いでいる。一方、(1) 差分トグルの自動無効化＋理由表示（ui-design 15章 Partial）が GUI に未結線で、WebView2 不在・ベースライン未取得（現状の既定）でも押せて無言の空差分が出る点が high。(2) 行内強調 spans を HTML 側で捨てており『色＋記号＋行内下線』の行内チャンネルが欠ける点、(3) プレビュー/差分面の empty/error が白紙どまりな点が medium。(4) preview.css 未配線・トークン未注入は本 sprint スコープ外（系統C）だが視覚担保の前提として low で記録。いずれも本 sprint がビルド/配線ゲートであることを踏まえた指摘で、リリースを妨げる致命ではない。"
+}

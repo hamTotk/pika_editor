@@ -21,6 +21,14 @@ std::string message(MsgId id)
         return "表示(&V)";
     case MsgId::MenuRefresh:
         return "再読み込み";
+    case MsgId::MenuModeSource:
+        return "ソース";
+    case MsgId::MenuModeSplit:
+        return "分割";
+    case MsgId::MenuModePreview:
+        return "プレビュー";
+    case MsgId::MenuToggleDiff:
+        return "差分\tCtrl+Shift+D";
     case MsgId::MenuHelp:
         return "ヘルプ(&H)";
     case MsgId::MenuAbout:

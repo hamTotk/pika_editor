@@ -48,15 +48,23 @@ find_path(DTL_INCLUDE_DIR NAMES dtl/dtl.hpp REQUIRED)
 # workspace_controller（FsEvent→未読集合・引き継ぎ状態の更新・rename 追従・削除安全遷移・新規/差分弁別）と
 # watch_event_map（FILE_NOTIFY_INFORMATION の Action コード→RawAction 写像・区切り正規化）。
 # wx/Win32 依存の監視スレッド実体（watch_thread）は src/app 側（系統B/C）が担う。
+# sprint5（差分）では、差分の判断/組み立てのうち wx/WebView2 非依存に切り出せる部分を controller に足す：
+# diff_mode_model（モード×差分ON/OFF の直交→描画面構成・占有世代(タブ,モード,差分ON)・差分トグルの
+# 自動無効化判定）と preview_builder（CSP/base 付きの完全HTML文書・色非依存 +/- 差分HTML・grid 合成）。
+# wx/WebView2 依存の共有 1 枚 WebView2 実配線（preview_view）は src/ui 側（系統B）が担う。
 add_library(pika_core STATIC
     controller/app_controller.cpp
     controller/app_controller.h
     controller/data_root.cpp
     controller/data_root.h
+    controller/diff_mode_model.cpp
+    controller/diff_mode_model.h
     controller/dir_lister.cpp
     controller/dir_lister.h
     controller/editor_view_model.cpp
     controller/editor_view_model.h
+    controller/preview_builder.cpp
+    controller/preview_builder.h
     controller/tab_manager.cpp
     controller/tab_manager.h
     controller/tree_view_messages.cpp

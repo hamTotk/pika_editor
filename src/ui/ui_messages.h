@@ -23,6 +23,10 @@ enum class MsgId
     MenuExit,        // 「終了」
     MenuView,        // 「表示」
     MenuRefresh,     // 「再読み込み」（F5）
+    MenuModeSource,  // 「ソース」（表示モード。ui-design 8章）
+    MenuModeSplit,   // 「分割」（エディタ＋プレビュー）
+    MenuModePreview, // 「プレビュー」（レンダリング）
+    MenuToggleDiff,  // 「差分」トグル（Ctrl+Shift+D）
     MenuHelp,        // 「ヘルプ」
     MenuAbout,       // 「pika について」
     TreePaneTitle,   // ツリーペイン見出し

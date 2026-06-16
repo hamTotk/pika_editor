@@ -65,6 +65,14 @@ void EditorPanel::set_text_utf8(const std::string& utf8)
     }
 }
 
+std::string EditorPanel::text_utf8() const
+{
+    // SCI の内部表現は UTF-8（CP_UTF8）。改行・空白を変換せず原文のまま取り出す。
+    const wxString text = GetText();
+    const wxScopedCharBuffer utf8 = text.utf8_str();
+    return std::string(utf8.data(), utf8.length());
+}
+
 bool EditorPanel::is_dirty() const
 {
     return GetModify();

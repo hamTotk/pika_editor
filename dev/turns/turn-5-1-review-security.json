@@ -1,0 +1,27 @@
+{
+  "reviewer": "security",
+  "sprint_id": 5,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "JS実行境界 / 多層防御",
+      "message": "design.md 6章とsprint5 must が要求する『HTMLプレビュー=JS無効(IsScriptEnabled=false。ナビゲート前に設定し直列化で前モード残留を防ぐ=C5)』が実配線されていない。preview_view.cpp は kind から js_enabled_ を算定する(navigate())だけで、wxWebView へ IsScriptEnabled 相当を一切適用せず on_loaded() では (void)js_enabled_; と握り潰している。grep の結果 IsScriptEnabled はソース全体で preview_builder.h:24 のコメント1箇所のみで、実呼び出しはゼロ。設計が定めた二層目(JS実行ランタイム無効化)が欠落している。critical に上げない根拠は、一層目の CSP(build_csp: script-src https://app.pika のみ・unsafe-inline/self なし)が全文書に正しく付与されており、ユーザー文書由来の inline/外部 script は CSP で阻止される=injection→実行が成立しないため。よって『未検証外部入力が実行に到達』には当たらず high。ただし設計必須の防御層欠落であり、CSPメタが効かない経路(例: メタ前への混入、将来の応答ヘッダ未設定)では唯一の砦が崩れるため要修正。MainFrame 側も doc.kind を常に Markdown 固定(main_frame.cpp:504)で HTMLプレビュー経路自体が未到達であり、この must が実質未充足である傍証。",
+      "location": "src/ui/preview_view.cpp:160"
+    },
+    {
+      "severity": "medium",
+      "area": "パストラバーサル(将来の有効化前ガード)",
+      "message": "DocPikaHandler::StartRequest は uri から https://doc.pika/ を剥がした rel を URL デコードせず core::ipc::normalize_to_absolute へ渡している。.. の畳み込みは normalize_to_absolute が行うが、%2e%2e%2f(=../) や %2e%2e/ のようなパーセントエンコードされた区切り/ドットはデコード前は素の文字列のため .. 畳み込みに掛からず、デコードを後段(実ファイル read 時)に行う実装になると配下検証(under_root)を素通りし得る。現時点は StartRequest が常に response->FinishWithError() を返し実ファイル配信が無い(系統C送り)ため traversal sink は未稼働=今スプリントの実害なし。よって medium。実ファイル read を配線する次スプリント前に、(1) rel を1回だけ URL デコードしてから normalize_to_absolute に渡す、(2) デコード後に % が残らないこと(二重エンコード)を確認、(3) under_root 検証は正規化済み絶対パスに対してのみ行う、を必須化すること。許可拡張子チェックも未実装(コメントのみ)なので実装時に許可リスト方式で。",
+      "location": "src/ui/preview_view.cpp:50"
+    },
+    {
+      "severity": "low",
+      "area": "外部リンク委譲のスキーム検証",
+      "message": "on_navigating が外部 URL を Veto して on_navigate_ へ渡し、MainFrame::on_preview_navigate が空でない全 URL を wxLaunchDefaultBrowser へそのまま委譲する(main_frame.cpp:534)。URL はユーザー文書(AI出力含む)由来で、スキームの許可リスト検証が無い。design 6章が外部リンクの既定ブラウザ委譲を意図しているため設計内挙動で、wxLaunchDefaultBrowser は OS シェル経由(pika の WebView コンテキストでは実行しない)ため javascript: 等の即時実行リスクは低い。ただし file: スキームや UNC・カスタムプロトコルを無検証でシェルに渡す動線になるため、委譲前に http/https/mailto 等への許可リストで絞ると多層防御として堅い。実害が薄く設計許容範囲のため low。",
+      "location": "src/ui/main_frame.cpp:534"
+    }
+  ],
+  "has_critical": false,
+  "summary": "セキュリティ観点の一層目(CSP)は堅い。build_csp は script-src を https://app.pika のみに限定し unsafe-inline/self を含めず、base-uri/form-action/frame-ancestors を常時 'none' にし、preview_builder の escape_html が差分原文を正しくエスケープ(テストで img onerror のエスケープを検証済)、本文HTMLはサニタイズ済み前提の契約も明記。機密のハードコード・SQL/シェル等の injection sink・認証認可サーフェスは無し(ローカル個人ツール)。一方 design 6章が定める二層目=HTMLプレビューの JS ランタイム無効化(IsScriptEnabled=false)が実配線されておらず(コメントのみ・実呼び出しゼロ)、sprint5 must 未充足かつ多層防御の欠落(high)。doc.pika ハンドラの URL 未デコードは実ファイル配信が未稼働のため今は medium だが次スプリントで read 配線前に要対処。critical=0(未検証外部入力が実行へ到達する経路は CSP により成立しないと判断)。"
+}

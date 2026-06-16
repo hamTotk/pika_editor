@@ -1,0 +1,9 @@
+Test project C:/dev/pika_editor/build/x64-core-test
+    Start 1: pika_tests_build
+1/2 Test #1: pika_tests_build .................   Passed    0.86 sec
+    Start 2: pika_tests
+2/2 Test #2: pika_tests .......................   Passed    1.30 sec
+
+100% tests passed, 0 tests failed out of 2
+
+Total Test time (real) =   2.16 sec

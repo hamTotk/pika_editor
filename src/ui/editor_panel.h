@@ -29,6 +29,9 @@ class EditorPanel : public wxStyledTextCtrl
     // UTF-8 content を表示する（改行・空白を変換しない）。読み込み直後は未編集（dirty クリア）。
     void set_text_utf8(const std::string& utf8);
 
+    // 現在のバッファ内容を UTF-8 で取り出す（プレビュー/差分のソース。sprint5）。
+    std::string text_utf8() const;
+
     // 編集の有無（未保存判定。SCI のモディファイ状態）。
     bool is_dirty() const;
 };

@@ -1,0 +1,27 @@
+{
+  "reviewer": "performance",
+  "sprint_id": 5,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "UIスレッドブロック / ワーカー未使用",
+      "message": "MainFrame::update_preview() が core::render::render_markdown(source) と DiffEngine::compute(old, source) を UIスレッド上で同期実行している。util::TaskRunner(設計が『固まらない』のために用意したワーカープール。design 4章)が存在するのに使われていない。差分トグルや モード切替のたびにこの経路が走り(ホットパス。ユーザー操作ごと)、入力は DiffEngine の構造ガード上限(max_total_bytes 10MB / max_lines 200k / max_diff_lines 50k)まで許容されるため、ガード内でも近上限の md レンダリング+行差分は容易に 200ms を超えて UI をブロックしうる。sprint5 should『差分計算・プレビュー変換は TaskRunner(ワーカー)で実行し UIを200ms以上ブロックしない』(design 4章)と設計原則#2『固まらない』の UI 側毀損。critical にしないのは、(a) これは must でなく should、(b) spec が 200ms非ブロック/起動性能ゲートを系統C(手動・docs/acceptance.md)へ明示的に繰り延べており(spec 124・185行)、(c) アルゴリズム計算量自体は core 側ガードで構造的に有界(暴走しない)なため。次ターンで update_preview の重い計算を TaskRunner::submit へ移し、結果適用前に PreviewView::generation()/OccupancyTracker で世代照合してから navigate する配線が望ましい。",
+      "location": "src/ui/main_frame.cpp:505,512-514"
+    },
+    {
+      "severity": "medium",
+      "area": "古いタスクのキャンセル未配線",
+      "message": "update_preview() は DiffEngine::compute をデフォルト引数(cancel=nullptr)で呼び、CancelToken を渡していない。DiffResult.cancelled / CancelTokenPtr の協調キャンセル機構(diff_engine.h・design 4章『古いタスクは協調キャンセル』)が用意されているのに、連続したモード/差分切替で前回計算を中断できない。占有世代(OccupancyTracker)は『結果適用の破棄』はできるが『計算そのものの中断』はしないため、ワーカー化(上記 high)を行う際は CancelToken も併せて配線しないと、古い大入力の計算が走り続けてワーカーを占有しスループットを下げる。現状 UIスレッド同期実行では複数同時計算は起きないため high ではなく medium。",
+      "location": "src/ui/main_frame.cpp:512-514"
+    },
+    {
+      "severity": "low",
+      "area": "プレビュー再計算の巻き上げ余地",
+      "message": "update_preview() は呼ばれるたびに source から render_markdown を毎回再実行する(layout.show_diff の有無に関わらず doc.body_html を常に生成)。例えば差分面のみ(ソース+差分ON)の経路では doc.body_html(プレビュー本文)は使われないのに render_markdown が走る。ホット経路だがガード内有界かつ本 sprint は骨格配線段階(ベースラインは空 string_view で骨格成立)のため低優先。ワーカー化と合わせて、必要な面の HTML だけを生成する(show_preview/show_diff_grid のときだけ body_html を作る)よう巻き上げると無駄な変換を省ける。",
+      "location": "src/ui/main_frame.cpp:503-528"
+    }
+  ],
+  "has_critical": false,
+  "summary": "performance 観点で critical は無し。差分/プレビュー計算は core 側に行数・バイト数・編集距離(D)の構造ガード(DiffLimits: 10MB/200k行/50k差分行/100k行長)が入っており、ref-dev が critical とする『criteria のレイテンシ/スループット要件を構造的に満たせない実装』(=アルゴリズム選択レベルの破綻・全件無制限ロード)には該当しない。最大の問題は、UIスレッドを 200ms 超ブロックしないために設計が用意した util::TaskRunner が update_preview() で使われず、render_markdown と DiffEngine::compute を UIスレッド同期実行している点(high)。ただし spec が 200ms非ブロック/起動性能ゲートを系統C(手動)へ明示的に繰り延べ、当該項目が should 止まりであることを踏まえ high とした。次ターンで重い計算の TaskRunner 化と CancelToken 配線(medium)、不要な body_html 生成の巻き上げ(low)を推奨する。"
+}

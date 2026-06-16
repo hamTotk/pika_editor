@@ -1,0 +1,34 @@
+{
+  "score": 86,
+  "plan_implementation": {
+    "overall": 86,
+    "notes": "must#1 差分モード状態機械(直交組合せ+占有世代)・must#2 差分トグル自動無効化(理由つき優先順位)・must#3 共有WebView2配線+unified差分HTML(色非依存+/-記号・再ナビゲート・占有世代再照合)・must#5 build+ctest PASS は充足。must#4 は部分未充足: CSP(script-src https://app.pika のみ・base/form-action/frame-ancestors 'none')と doc.pika ハンドラ(../遮断・under_root配下検証)は配線済みだが、(a)『HTMLプレビュー=JS無効を直列切替』が未配線(preview_view.cpp:160 で js_enabled_ を算定するのみ・wxWebView へ IsScriptEnabled/EnableScript 相当を一切適用せず on_loaded は (void)js_enabled_ で握り潰し)、(b)app.pika 仮想ホストのリソースハンドラが未登録(doc.pika のみ SetVirtualHost)で https://app.pika/preview.css が配信されない。MainFrame は doc.kind を常に Markdown 固定(main_frame.cpp:504)で HTMLプレビュー(JS無効)経路自体が未到達。should は TrySuspend 状態のみ保持・ナビゲーションインターセプトは配線済みだが scroll同期/プレビュー内検索/TaskRunnerワーカー化が未配線。"
+  },
+  "quality": {
+    "overall": 86,
+    "breakdown": {"d_verify": 100, "d_accept": 0, "d_quality": 82},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": false,
+  "feedback": "[HIGH] must#4 のJS有効/無効の直列切替が未配線: preview_view.cpp は kind から js_enabled_ を算定するだけで wxWebView の IsScriptEnabled/EnableScript 相当を呼ばず、on_loaded() で (void)js_enabled_ と握り潰す。設計(design 6章 C5)が要求する二層目=HTML プレビューの JS ランタイム無効化(IsScriptEnabled=false をナビゲート前に設定し直列化で前モード残留を防ぐ)が実コードに無い。MainFrame も doc.kind を常に Markdown 固定で HTMLプレビュー経路が未到達=この must が実質未充足。一層目の CSP(script-src https://app.pika のみ・unsafe-inline/self なし)が堅く injection→実行は成立しないため security/performance/frontend-ui の全レビュワーが has_critical:false(=d_review 100)だが、acceptance としては must#4 の JS切替要件が未達のため d_accept=0。 [HIGH] performance: update_preview() が render_markdown と DiffEngine::compute を UIスレッド同期実行(util::TaskRunner 未使用)。should『差分計算は TaskRunner で UI を200ms以上ブロックしない』未達。spec が性能ゲートを系統C(手動)へ繰延べているため critical ではない。 [HIGH] frontend-ui: evaluate_diff_toggle/DiffDisableReason は controller で実装・テスト済みだが GUI(main_frame.cpp)が呼ばず、ID_TOGGLE_DIFF の Enable/Check・理由表示に結線されていない。WebView2不在・ベースライン未取得(現状の既定 has_baseline=false)でも『差分』を押せて無言の空差分が出る(ui-design 15章 Partial 未到達)。 [HIGH] app.pika リソースハンドラが未登録(doc.pika のみ)で https://app.pika/preview.css が配信されず、無スタイル描画になる。must#4 の『仮想ホスト app.pika(同梱アセット)配線』の片肺。 [MEDIUM] CSP base-uri 'none' を出しつつ build_head が <base href=\"https://doc.pika/\"> を出力=base 要素の href が CSP で無効化され doc.pika 相対解決が効かない潜在矛盾(実ファイル配信は後続スプリントのため今は未稼働)。 [MEDIUM] DocPikaHandler が rel を URL デコードせず normalize_to_absolute へ渡す(%2e%2e%2f が .. 畳み込みを素通りし得る)・許可拡張子チェックがコメントのみ。実ファイル read 配線前(次スプリント)に要対処。 [MEDIUM] DiffEngine::compute を cancel=nullptr で呼びCancelToken未配線。ワーカー化時に協調キャンセルも要。build_diff_body が DiffLine::spans(行内強調)を捨て、テストも spans を常に {} で渡し行内下線(色+記号+行内下線)の出力を未検証。 [MEDIUM] プレビュー/差分面の empty/error が白紙どまり(ui-design 15章 Empty/Error 未提示)。 [LOW] 外部リンク委譲(on_preview_navigate→wxLaunchDefaultBrowser)にスキーム許可リスト無し。 [品質] 良い点: 差分モード状態機械・占有世代・差分トグル無効化は純粋関数で正典(ui-design 8章)どおり実装され gtest で観測可能(直交6組合せ・優先順位・境界10MB・stale stamp 破棄)。preview_builder は色非依存 +/- マーカ+クラス+HTMLエスケープ(img onerror エスケープを検証)で XSS 経路を塞ぐ。テスト改竄なし(skip/緩和/犠牲的期待値なし。従来373→391件 非回帰 PASS)。1ファイル1責務・命名/イディオムは既存 controller と整合・YAGNI 順守。",
+  "feedback_structured": {
+    "high": [
+      {"area": "JS実行境界/must#4 直列切替", "message": "HTMLプレビュー=JS無効の直列切替が未配線。preview_view.cpp:160 で js_enabled_ を算定するのみで wxWebView へ IsScriptEnabled/EnableScript 相当を適用せず on_loaded:232 で (void)js_enabled_ と握り潰す。MainFrame も doc.kind=Markdown 固定で HTMLプレビュー経路が未到達。design 6章 C5 の二層目防御=must#4 の JS切替要件が未達(d_accept=0 の主因)。次ターンで navigate 前に kind に応じ EnableScript(js_enabled_) を適用し、ナビゲート完了(on_loaded)を待つ直列化を入れる。"},
+      {"area": "performance/UIブロック", "message": "update_preview() が render_markdown と DiffEngine::compute を UIスレッド同期実行(util::TaskRunner 未使用)。should『差分計算は TaskRunner で UI を200ms以上ブロックしない』未達。重い計算を TaskRunner::submit へ移し、結果適用前に OccupancyTracker.is_current で世代照合してから navigate する。"},
+      {"area": "frontend-ui/差分トグル無効化のGUI未結線", "message": "evaluate_diff_toggle/DiffDisableReason は controller 実装・テスト済みだが main_frame.cpp が呼ばず、ID_TOGGLE_DIFF の Enable/Check・理由表示に未結線。WebView2不在/ベースライン未取得(既定 has_baseline=false)でも押せて無言の空差分が出る。せめてメニュー項目 Enable(false)+diff_disable_reason_label を提示する。"},
+      {"area": "must#4/app.pika 仮想ホスト未配線", "message": "app.pika のリソースハンドラが未登録(doc.pika のみ SetVirtualHost)で https://app.pika/preview.css(および同梱アセット)が配信されない。must#4『仮想ホスト app.pika(同梱アセット)』の片肺。app.pika ハンドラを登録し assets/preview.css を配信する。"}
+    ],
+    "medium": [
+      {"area": "CSP/base 矛盾", "message": "build_csp が base-uri 'none' を出しつつ build_head が <base href=\"https://doc.pika/\"> を出力。base 要素の href が CSP で無効化され doc.pika 相対解決が効かない潜在矛盾。実ファイル配信(次スプリント)前に base 方針を統一する。"},
+      {"area": "パストラバーサル前ガード", "message": "DocPikaHandler が rel を URL デコードせず normalize_to_absolute へ渡す(%2e%2e%2f が .. 畳み込みを素通りし得る)・許可拡張子チェックがコメントのみ。実ファイル read を配線する前に (1)1回だけURLデコード→(2)% 残存(二重エンコード)拒否→(3)正規化済み絶対パスへ under_root を必須化、許可リスト方式の拡張子検証を入れる。"},
+      {"area": "キャンセル/行内強調", "message": "DiffEngine::compute を cancel=nullptr で呼び CancelToken 未配線(ワーカー化時に協調キャンセルが要)。build_diff_body が DiffLine::spans を捨て、テストも spans を常に {} で渡し行内下線(色+記号+行内下線)の出力を未検証。spans を <span class=\"diff-word\"> でラップして行内チャンネルを HTML に出す。"},
+      {"area": "empty/error 状態", "message": "プレビュー本文生成失敗時 body_html を空文字フォールバック・アクティブエディタ不在時 source 空で、WebView2 上が無言の白紙になる。ui-design 15章の Empty/Error 文言(最小フォールバック本文)を出す。"}
+    ],
+    "low": [
+      {"area": "外部リンク委譲のスキーム検証", "message": "on_preview_navigate が空でない全 URL を wxLaunchDefaultBrowser へそのまま委譲。http/https/mailto 等の許可リストで file:/UNC/カスタムプロトコルを絞ると多層防御として堅い。"},
+      {"area": "ビジュアル一貫性", "message": "preview.css がリポジトリに存在せず ui-design 2章のカラートークン(diff-add/del-*・accent)の CSS 変数注入も未配線。色非依存・コントラスト4.5:1 の最終担保は後続の preview.css 配線に依存することを turn report に明示する。"}
+    ]
+  },
+  "passed": false,
+  "evaluator_skill": "assign-dev-evaluator"
+}
