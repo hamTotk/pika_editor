@@ -39,6 +39,13 @@ struct FsChange
     std::string path;     // 影響対象パス（Renamed のときは新パス）
     std::string old_path; // Renamed のときのみ意味を持つ（旧パス）
     bool is_new = false;  // UnreadMarked かつベースライン無し＝新規（◆）。それ以外は false
+    // Renamed のときのみ。apply_renames が「対応付け不能で最終ディスク内容で再判定せよ」と
+    // 判定したパス（往復 A→B→A 等。要件4.2）。本 rename イベントの引き継ぎで生じた分だけを
+    // 載せる（controller 側でベースラインを暫定無効化し再差分対象化する）。
+    std::vector<std::string> reevaluate;
+    // Renamed のときのみ。引き継ぎ失敗で旧キーが孤立保全されたパス
+    // （90日GC に委ねる。要件4.2/7.2）。握り潰さず UI/ログへ流すための素材。
+    std::vector<std::string> orphaned;
 };
 
 // WorkspaceController: 外部変更の反映ロジック（wx 非依存）。
@@ -77,6 +84,15 @@ class WorkspaceController
     // build_tree_view_model の new_files 引数へそのまま渡す。
     std::vector<std::string> new_files() const;
 
+    // rename 引き継ぎで「対応付け不能＝最終ディスク内容で再判定せよ」と判定された累積パス集合
+    // （要件4.2）。controller は当該エントリのベースラインを暫定無効化（再差分対象化）済みだが、
+    // UI/ログへ「再判定が必要」と通知する素材としても観測できるよう累積保持する。
+    const std::vector<std::string>& reevaluate_pending() const noexcept { return reevaluate_; }
+
+    // rename 引き継ぎで旧キーが孤立保全された累積パス集合（90日GC に委ねる。要件4.2/7.2）。
+    // 握り潰さず UI/ログ（消失タブ安全遷移・退避保全の診断）へ流す素材として観測できる。
+    const std::vector<std::string>& orphaned() const noexcept { return orphaned_; }
+
     // ツリーノード（build_tree の結果）から、現在の未読/新規状態を載せた ViewModel を構築する。
     // 純ロジックの集約点（tree_view_model.build_tree_view_model を現状態で呼ぶだけ）。
     TreeRowVm build_view_model(const core::workspace::TreeNode& tree) const;
@@ -93,11 +109,19 @@ class WorkspaceController
     // states_ の当該エントリ（無ければ作る）を未読・ベースライン有無で更新する。
     void touch_unread(const std::string& rel_path, bool has_baseline);
 
+    // events[begin, end) の連続 Renamed run を 1 回の apply_renames でまとめて適用し、
+    // reevaluate/orphaned を消費して各イベントの FsChange を changes へ積む。
+    void apply_rename_run(const std::vector<core::watcher::FsEvent>& events, std::size_t begin,
+                          std::size_t end, std::vector<FsChange>& changes);
+
     std::string root_;
     core::watcher::BaselineMap baseline_; // resync 突き合わせ基準（set_baseline が取り込む）
     core::workspace::UnreadSet unread_;
     // rel_path → 引き継ぎ状態（未読・ベースライン有無・退避 ID）。apply_renames が付け替える。
     std::map<std::string, core::workspace::CarryState> states_;
+    // apply_renames の reevaluate/orphaned を握り潰さず累積する（UI/ログへ流す素材）。
+    std::vector<std::string> reevaluate_;
+    std::vector<std::string> orphaned_;
 };
 
 } // namespace pika::controller

@@ -266,6 +266,102 @@ TEST(WorkspaceControllerTest, SelfSaveSuppressedDoesNotMarkUnread)
     EXPECT_FALSE(wc.unread().is_unread("self.md"));
 }
 
+// ---- rename carry の reevaluate/orphaned 消費（往復 A→B→A・対応付け不能ケース） ----
+// apply_renames の往復検出は 1 回の呼び出し内（連続 Renamed run）で行われる。apply_events は
+// 連続 Renamed を 1 バッチにまとめて apply_renames へ渡すため、A→B→A を 1 つの events 列で
+// 与えると最後の B→A が「往復＝再判定」と判定される（要件4.2）。
+
+TEST(WorkspaceControllerTest, RoundtripRenameMarksReevaluateAsRediffTarget)
+{
+    // A にベースラインを持たせ、A→B→A の往復を 1 つの events 列で与える。最後の B→A は
+    // 対応付け不能（reevaluate）と判定され、controller は当該エントリのベースラインを暫定無効化
+    // して再差分対象（新規 ◆ 相当）へ倒す。
+    WorkspaceController wc("C:/ws");
+    BaselineMap base;
+    base["a.md"] = BaselineEntry{8, 80, 0x2222};
+    wc.set_baseline(base);
+    ASSERT_TRUE(wc.states().find("a.md")->second.has_baseline);
+
+    const auto changes = wc.apply_events({
+        make_event(FsEventKind::Renamed, "b.md", "a.md"), // A→B
+        make_event(FsEventKind::Renamed, "a.md", "b.md"), // B→A（往復＝再判定）
+    });
+    ASSERT_EQ(changes.size(), 2u);
+
+    // (a) reevaluate 対象（a.md）が再差分対象化されている＝ベースライン無効化・未読化。
+    auto it = wc.states().find("a.md");
+    ASSERT_NE(it, wc.states().end());
+    // ベースライン暫定無効化（誤った差分基準で見せない）・再判定まで未読として扱う。
+    EXPECT_FALSE(it->second.has_baseline);
+    EXPECT_TRUE(wc.unread().is_unread("a.md"));
+
+    // 再差分対象なので new_files（ベースラインなし未読）に乗る＝再判定される素材。
+    const auto nf = wc.new_files();
+    EXPECT_NE(std::find(nf.begin(), nf.end(), "a.md"), nf.end());
+
+    // controller の累積アクセサからも reevaluate が観測できる（握り潰していない）。
+    const auto& rev = wc.reevaluate_pending();
+    EXPECT_NE(std::find(rev.begin(), rev.end(), "a.md"), rev.end());
+
+    // FsChange（rename イベントの戻り値）にも reevaluate が載っている。
+    bool seen_in_change = false;
+    for (const auto& c : changes)
+    {
+        if (std::find(c.reevaluate.begin(), c.reevaluate.end(), "a.md") != c.reevaluate.end())
+        {
+            seen_in_change = true;
+        }
+    }
+    EXPECT_TRUE(seen_in_change);
+}
+
+TEST(WorkspaceControllerTest, RenameRemovalSideExposesOrphaned)
+{
+    // rename ペアの削除側（new 空＝旧名単独）は引き継ぎ失敗で旧キーを孤立保全する。
+    // orphaned が呼び出し側（controller アクセサと FsChange）から観測できることを確認する。
+    WorkspaceController wc("C:/ws");
+    BaselineMap base;
+    base["doomed.md"] = BaselineEntry{4, 40, 0x5};
+    wc.set_baseline(base);
+
+    // old_path のみ・new_path 空＝削除側の rename（apply_renames が orphaned に積む）。
+    const auto changes = wc.apply_events({make_event(FsEventKind::Renamed, "", "doomed.md")});
+    ASSERT_EQ(changes.size(), 1u);
+
+    // (b) orphaned が呼び出し側に観測可能（握り潰していない）。
+    const auto& orph = wc.orphaned();
+    EXPECT_NE(std::find(orph.begin(), orph.end(), "doomed.md"), orph.end());
+
+    // FsChange にも orphaned が載っている。
+    EXPECT_NE(std::find(changes[0].orphaned.begin(), changes[0].orphaned.end(), "doomed.md"),
+              changes[0].orphaned.end());
+
+    // 状態は孤立保全で残る（90日GC に委ねる。要件4.2/7.2）。
+    EXPECT_NE(wc.states().find("doomed.md"), wc.states().end());
+}
+
+TEST(WorkspaceControllerTest, NormalRenameDoesNotProduceReevaluateOrOrphaned)
+{
+    // 単純な A→B（往復でない）では reevaluate/orphaned は生じない（過剰に再判定へ倒さない）。
+    WorkspaceController wc("C:/ws");
+    BaselineMap base;
+    base["x.md"] = BaselineEntry{1, 1, 0x9};
+    wc.set_baseline(base);
+
+    const auto changes = wc.apply_events({make_event(FsEventKind::Renamed, "y.md", "x.md")});
+    ASSERT_EQ(changes.size(), 1u);
+    EXPECT_TRUE(changes[0].reevaluate.empty());
+    EXPECT_TRUE(changes[0].orphaned.empty());
+    EXPECT_TRUE(wc.reevaluate_pending().empty());
+    EXPECT_TRUE(wc.orphaned().empty());
+
+    // ベースラインは新キーへ素直に引き継がれている（暫定無効化されていない）。
+    auto it = wc.states().find("y.md");
+    ASSERT_NE(it, wc.states().end());
+    EXPECT_TRUE(it->second.has_baseline);
+    EXPECT_EQ(it->second.baseline_hash, 0x9u);
+}
+
 TEST(WorkspaceControllerTest, ExternalChangeMarksUnreadWhenHashDiffers)
 {
     constexpr std::uint64_t kSavedHash = 0xCAFE;

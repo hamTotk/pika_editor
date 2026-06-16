@@ -66,10 +66,17 @@ struct UiSettings
 // settings 反映の結果（GUI が見る素材）。
 struct SettingsApplyResult
 {
-    bool apply = true;             // UI へ反映してよいか（parse_ok=false なら false＝直前値維持）
-    UiSettings settings;           // apply=true のとき反映する設定の写し（false でも既定で埋まる）
-    std::size_t warning_count = 0; // 不正値で既定フォールバックした項目数（通知バーへ）
-    bool parse_failed = false;     // TOML 構文破損（保存途中の不完全 TOML 等）
+    // UI へ反映してよいか（parse_ok=false なら false＝直前値維持）。
+    bool apply = true;
+    // apply=true のとき反映する設定の写し（false でも既定で埋まる）。
+    UiSettings settings;
+    // 不正値で既定フォールバックした項目数（warning_keys.size() と一致。後方互換のため残す）。
+    std::size_t warning_count = 0;
+    // 既定フォールバックした不正な設定キー名（LoadResult.warnings をそのまま透過）。
+    // 通知バー集約（NotificationKind::SettingsError）が「どのキーが不正か」を提示する素材。
+    std::vector<std::string> warning_keys;
+    // TOML 構文破損（保存途中の不完全 TOML 等）。
+    bool parse_failed = false;
 };
 
 // core::settings::Settings を UiSettings へ写す純粋写像（enum 語彙の写し替えを含む）。

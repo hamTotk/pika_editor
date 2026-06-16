@@ -60,6 +60,9 @@ UiSettings to_ui_settings(const core::settings::Settings& s)
 SettingsApplyResult apply_settings(const core::settings::LoadResult& load)
 {
     SettingsApplyResult result;
+    // 不正キー名をそのまま透過する（通知バーが「どのキーが不正か」を提示できるように）。
+    // warning_count は後方互換のため件数も残す（warning_keys.size() と一致）。
+    result.warning_keys = load.warnings;
     result.warning_count = load.warnings.size();
     result.parse_failed = !load.parse_ok;
 
