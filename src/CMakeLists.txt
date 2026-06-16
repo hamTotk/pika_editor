@@ -63,11 +63,18 @@ find_path(DTL_INCLUDE_DIR NAMES dtl/dtl.hpp REQUIRED)
 # search_session（SearchEngine 結線＋ヒットのカーソル遷移＝次へ/前へ・折り返し）・settings_view
 # （load_settings 結果→UI 設定の純粋写像・parse破損は直前値維持・warnings 件数を通知へ。読み取り専用）。
 # wx 依存の検索パネル/設定監視 I/O/状態復元の実結線は src/ui・src/app 側（系統B/C）が担う。
+# sprint8（エッジケース・画像簡易ビュー・GUI 統合）では、縮退判定/ビュー5状態の判断のうち wx 非依存に
+# 切り出せる部分を controller に足す：degrade_model（読み取り専用/権限/シンボリックリンク循環/ネットワーク
+# ドライブ/クラウドプレースホルダ/画像ピクセル数超過 → 機能縮退＋次の一手・アプリ継続。優先順位解決）・
+# view_state（ビュー別5状態＝Ideal/Empty/Loading/Partial/Error の解決・Empty の3分岐・Partial/Error 区別）。
+# wx 依存の画像簡易ビュー（wxImage 自前描画）・診断ログ I/O・手動 acceptance は src/ui・docs 側（系統B/C）が担う。
 add_library(pika_core STATIC
     controller/app_controller.cpp
     controller/app_controller.h
     controller/data_root.cpp
     controller/data_root.h
+    controller/degrade_model.cpp
+    controller/degrade_model.h
     controller/diff_mode_model.cpp
     controller/diff_mode_model.h
     controller/dir_lister.cpp
@@ -94,6 +101,8 @@ add_library(pika_core STATIC
     controller/tree_view_messages.h
     controller/tree_view_model.cpp
     controller/tree_view_model.h
+    controller/view_state.cpp
+    controller/view_state.h
     controller/watch_event_map.cpp
     controller/watch_event_map.h
     controller/workspace_controller.cpp
