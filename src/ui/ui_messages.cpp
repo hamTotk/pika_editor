@@ -65,6 +65,33 @@ std::string message(MsgId id)
         return "退避を取れないファイル（10MB以上・画像・機密）のため操作をブロックしました";
     case MsgId::NotifyStashFailed:
         return "退避に失敗したため上書き/確認を中止しました（内容は失われていません）";
+    case MsgId::NotifySaveIoFailed:
+        // 次の一手（再試行/別名保存/属性確認）を併記し『保存した』誤認を防ぐ（要件5.7・設計原則1）。
+        return "保存に失敗しました。再試行/別名保存/書き込み権限の確認を（元の内容は無事です）";
+    case MsgId::NotifyIndexSaveFailed:
+        return "退避記録の保存に失敗しました（退避内容は保存済み・次の操作で再記録されます）";
+    case MsgId::NotifyRollbackWriteFailed:
+        return "巻き戻しの書き戻しに失敗しました。再試行を（巻き戻し前の内容は退避済みで安全です）";
+    case MsgId::NotifyConfirmAllSkipped:
+        // 件数つきの文言は notify_confirm_all_skipped(count) を使う（ここは件数なしの汎用文言）。
+        return "一部のファイルは並行変化/退避失敗のため未確認のまま残りました";
+    case MsgId::ConfirmClosePrompt:
+        return "保存していない変更があります。閉じる前に保存しますか？";
+    case MsgId::ConfirmExitPrompt:
+        return "保存していない変更があります。保存して終了しますか？";
+    case MsgId::ConfirmSave:
+        return "保存";
+    case MsgId::ConfirmSaveAll:
+        return "すべて保存";
+    case MsgId::ConfirmDiscard:
+        return "破棄";
+    case MsgId::ConfirmDiscardExit:
+        return "保存しない";
+    case MsgId::ConfirmCancel:
+        return "キャンセル";
+    case MsgId::OverflowNotices:
+        // 件数は notify_overflow(count) を使う（ここは件数なしの汎用文言）。
+        return "他にも通知があります";
     case MsgId::EmptyNoFolder:
         return "フォルダーを開くと、ここにファイルが表示されます。";
     case MsgId::NotificationArea:
@@ -80,6 +107,43 @@ std::string status_unread(std::size_t count)
         return "未読なし";
     }
     return "未読 " + std::to_string(count) + " 件";
+}
+
+std::string notify_confirm_all_skipped(std::size_t count)
+{
+    if (count == 0)
+    {
+        return std::string();
+    }
+    // 全件完了の誤認を防ぐため確認できなかった件数を即時提示する（要件8.3・design 5.4）。
+    return std::to_string(count) + " 件は未確認のまま残りました（並行変化/退避失敗）";
+}
+
+std::string notify_overflow(std::size_t count)
+{
+    if (count == 0)
+    {
+        return std::string();
+    }
+    return "他 " + std::to_string(count) + " 件の通知";
+}
+
+std::string notification_kind_label(controller::NotificationKind kind)
+{
+    switch (kind)
+    {
+    case controller::NotificationKind::Conflict:
+        return message(MsgId::NotifyConflict);
+    case controller::NotificationKind::SettingsError:
+        return "設定ファイルに不正な値があります（既定値で継続中）";
+    case controller::NotificationKind::RemoteResource:
+        return "プレビューが外部リソースを参照しています（既定で取得をブロック）";
+    case controller::NotificationKind::JsDetected:
+        return "文書に JavaScript が含まれています（プレビューで無効化）";
+    case controller::NotificationKind::BigFile:
+        return "巨大ファイルのため一部機能を縮退しています";
+    }
+    return std::string();
 }
 
 } // namespace pika::ui
