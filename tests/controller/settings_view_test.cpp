@@ -103,6 +103,51 @@ TEST(SettingsViewTest, ApplyInvalidValueSurfacesWarningCount)
     EXPECT_GT(r.warning_count, 0u);
 }
 
+// ---- apply_settings：不正キー名を UI へ透過する（warning_keys） ----
+
+TEST(SettingsViewTest, ApplyInvalidKeysSurfaceWarningKeyNames)
+{
+    using pika::core::settings::LoadResult;
+    // 複数の不正キーを含む LoadResult を直接渡し、キー名がそのまま透過されることを検証する
+    // （通知バー集約が「どのキーが不正か」を提示できる素材になる）。
+    LoadResult load;
+    load.parse_ok = true;
+    load.warnings = {"tabWidth", "pollIntervalSeconds", "fontSize"};
+
+    const SettingsApplyResult r = apply_settings(load);
+    EXPECT_TRUE(r.apply); // 構文 OK＝反映する（不正値は既定へ丸め済み）
+    // warning_keys にキー名が順序を保って保持されている。
+    ASSERT_EQ(r.warning_keys.size(), 3u);
+    EXPECT_EQ(r.warning_keys[0], "tabWidth");
+    EXPECT_EQ(r.warning_keys[1], "pollIntervalSeconds");
+    EXPECT_EQ(r.warning_keys[2], "fontSize");
+    // 後方互換：件数は keys のサイズと一致する。
+    EXPECT_EQ(r.warning_count, r.warning_keys.size());
+}
+
+TEST(SettingsViewTest, ApplyValidSettingsHasEmptyWarningKeys)
+{
+    const auto load = load_settings("tabWidth = 2\n");
+    const SettingsApplyResult r = apply_settings(load);
+    EXPECT_TRUE(r.warning_keys.empty());
+    EXPECT_EQ(r.warning_count, 0u);
+}
+
+// ---- apply_settings：実 TOML 由来の不正キーも warning_keys に乗る ----
+
+TEST(SettingsViewTest, ApplyInvalidValueFromTomlSurfacesKeyNames)
+{
+    // 型違い（tabWidth に文字列）は load_settings が既定へ丸めて warnings に積む。
+    const auto load = load_settings("tabWidth = \"oops\"\n");
+    ASSERT_TRUE(load.parse_ok);
+    ASSERT_FALSE(load.warnings.empty());
+
+    const SettingsApplyResult r = apply_settings(load);
+    // load 由来の warnings（キー名）がそのまま透過されている。
+    EXPECT_EQ(r.warning_keys, load.warnings);
+    EXPECT_EQ(r.warning_count, load.warnings.size());
+}
+
 // ---- apply_settings：構文破損は再適用しない（直前値維持） ----
 
 TEST(SettingsViewTest, ApplyBrokenTomlDoesNotReapply)

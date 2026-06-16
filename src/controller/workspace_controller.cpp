@@ -37,8 +37,26 @@ std::vector<FsChange> WorkspaceController::apply_events(const std::vector<wat::F
     std::vector<FsChange> changes;
     changes.reserve(events.size());
 
-    for (const auto& ev : events)
+    for (std::size_t i = 0; i < events.size(); ++i)
     {
+        const wat::FsEvent& ev = events[i];
+
+        // Renamed は連続する run を 1 回の apply_renames へまとめて適用する。
+        // apply_renames の往復検出（A→B→A）は呼び出し内 seen_pairs で行うため、イベントを
+        // 1 件ずつ別呼び出しにすると対応付け不能ケースを取りこぼす（要件4.2）。
+        // 連続 run だけをまとめることで Created/Modified/Removed との順序関係は崩さない。
+        if (ev.kind == wat::FsEventKind::Renamed)
+        {
+            std::size_t end = i;
+            while (end < events.size() && events[end].kind == wat::FsEventKind::Renamed)
+            {
+                ++end;
+            }
+            apply_rename_run(events, i, end, changes);
+            i = end - 1; // 次のループで end の位置へ進む
+            continue;
+        }
+
         switch (ev.kind)
         {
         case wat::FsEventKind::Created: {
@@ -78,32 +96,77 @@ std::vector<FsChange> WorkspaceController::apply_events(const std::vector<wat::F
             changes.push_back(std::move(c));
             break;
         }
-        case wat::FsEventKind::Renamed: {
-            // rename/移動。core/workspace::apply_renames で未読・ベースライン・退避を新パスへ
-            // 引き継ぐ（relPath 付け替え。design.md 5.2・要件4.2/7.2）。未読集合も旧→新へ移す。
-            const bool old_was_unread = unread_.is_unread(ev.old_path);
-
-            ws::RenameOp op;
-            op.old_path = ev.old_path;
-            op.new_path = ev.path;
-            const ws::CarryResult res = ws::apply_renames(states_, {op});
-            states_ = res.states;
-
-            unread_.clear(ev.old_path);
-            if (old_was_unread)
-            {
-                unread_.mark(ev.path);
-            }
-            FsChange c;
-            c.effect = FsChangeEffect::RenamedCarried;
-            c.path = ev.path;
-            c.old_path = ev.old_path;
-            changes.push_back(std::move(c));
+        case wat::FsEventKind::Renamed:
+            // Renamed はループ先頭で run 単位に処理済み（ここには来ない）。
             break;
-        }
         }
     }
     return changes;
+}
+
+void WorkspaceController::apply_rename_run(const std::vector<wat::FsEvent>& events,
+                                           std::size_t begin, std::size_t end,
+                                           std::vector<FsChange>& changes)
+{
+    // rename/移動。core/workspace::apply_renames で未読・ベースライン・退避を新パスへ引き継ぐ
+    // （relPath 付け替え。design.md 5.2・要件4.2/7.2）。連続 run を 1 回でまとめて適用すると、
+    // 往復（A→B→A）が呼び出し内の往復検出に乗り reevaluate/orphaned が正しく返る。
+    std::vector<ws::RenameOp> ops;
+    ops.reserve(end - begin);
+    std::vector<bool> old_was_unread;
+    old_was_unread.reserve(end - begin);
+    for (std::size_t k = begin; k < end; ++k)
+    {
+        ws::RenameOp op;
+        op.old_path = events[k].old_path;
+        op.new_path = events[k].path;
+        ops.push_back(op);
+        old_was_unread.push_back(unread_.is_unread(events[k].old_path));
+    }
+
+    const ws::CarryResult res = ws::apply_renames(states_, ops);
+    states_ = res.states;
+
+    // 先に未読集合の旧→新移動と各イベントの反映結果を作る。reevaluate 由来の未読化を後段で
+    // 行うのは、この移動ループの clear(old_path) が往復の終端パス（再判定対象）を消し戻すのを
+    // 避けるため。
+    for (std::size_t k = begin; k < end; ++k)
+    {
+        const wat::FsEvent& ev = events[k];
+        unread_.clear(ev.old_path);
+        if (old_was_unread[k - begin])
+        {
+            unread_.mark(ev.path);
+        }
+        FsChange c;
+        c.effect = FsChangeEffect::RenamedCarried;
+        c.path = ev.path;
+        c.old_path = ev.old_path;
+        // この run で生じた reevaluate/orphaned を run 内の各 rename イベントへ載せる
+        // （イベント単位の厳密な帰属は core が返さないため run の結果として透過する）。
+        c.reevaluate = res.reevaluate;
+        c.orphaned = res.orphaned;
+        changes.push_back(std::move(c));
+    }
+
+    // reevaluate＝対応付け不能で最終ディスク内容での再判定が必要なパス。controller 側では当該
+    // エントリのベースラインを暫定無効化して「再差分対象」に倒す（安全側。確定読みで再判定される
+    // まで Modified を ± ではなく新規 ◆ 相当に扱い、誤った差分基準で見せない）。
+    for (const auto& rel : res.reevaluate)
+    {
+        ws::CarryState& st = states_[rel];
+        st.has_baseline = false;
+        st.baseline_hash = 0;
+        st.unread = true;
+        unread_.mark(rel);
+        reevaluate_.push_back(rel);
+    }
+
+    // orphaned＝引き継ぎ失敗で旧キーが孤立保全されたパス。握り潰さず累積し UI/ログへ流す。
+    for (const auto& rel : res.orphaned)
+    {
+        orphaned_.push_back(rel);
+    }
 }
 
 void WorkspaceController::mark_confirmed(const std::string& rel_path)
