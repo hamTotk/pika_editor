@@ -2,9 +2,11 @@
 
 #include "controller/tree_view_messages.h"
 
+#include <wx/generic/dataview.h>
 #include <wx/sizer.h>
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace pika::ui
@@ -54,6 +56,46 @@ class FileTreeModel : public wxDataViewModel
     }
 
     bool SetValue(const wxVariant&, const wxDataViewItem&, unsigned int) override { return false; }
+
+    // 行の視覚属性。削除済み（Deleted）のみ取り消し線を付ける（ui-design
+    // 5章「削除済み＝取り消し線・記号なし」）。
+    // 差分あり（±）・新規（◆）等は記号＋色で示すため、ここでは取り消し線を付けない（現状維持）。
+    bool GetAttr(const wxDataViewItem& item, unsigned int /*col*/,
+                 wxDataViewItemAttr& attr) const override
+    {
+        const auto* node = to_node(item);
+        if (node != nullptr && node->mark == controller::StateMark::Deleted)
+        {
+            attr.SetStrikethrough(true);
+            return true;
+        }
+        return false;
+    }
+
+    // 行のアクセシブルネーム（UIA/MSAA。ui-design 13章「色だけに依存しない＝記号＋ラベル」）。
+    // 表示テキスト（GetValue 本文）は「記号＋名前」のまま据え置き、スクリーンリーダー向けに
+    // 「名前, 状態ラベル, 種別ラベル」を別経路（FileTreeAccessible）へ供給する。
+    // 状態・種別の日本語ラベルは controller/tree_view_messages（単一定義）から取得する。
+    wxString accessible_name(const wxDataViewItem& item) const
+    {
+        const auto* node = to_node(item);
+        if (node == nullptr)
+        {
+            return wxString();
+        }
+        wxString name = wxString::FromUTF8(node->name.c_str(), node->name.size());
+        const std::string_view state = controller::state_mark_label(node->mark);
+        if (!state.empty())
+        {
+            name += ", " + wxString::FromUTF8(state.data(), state.size());
+        }
+        const std::string_view category = controller::icon_category_label(node->icon);
+        if (!category.empty())
+        {
+            name += ", " + wxString::FromUTF8(category.data(), category.size());
+        }
+        return name;
+    }
 
     wxDataViewItem GetParent(const wxDataViewItem& item) const override
     {
@@ -136,15 +178,84 @@ class FileTreeModel : public wxDataViewModel
     std::unique_ptr<controller::TreeRowVm> root_;
 };
 
+// wxDataViewCtrl の薄い派生。protected な GetItemByRow（行番号→item の解決）を public
+// 公開するためだけに存在する（using による親 protected メンバの公開は C++ 標準で合法）。
+// AppendTextColumn/AssociateModel 等は親の API をそのまま使う。
+class FileTreeDataView : public wxDataViewCtrl
+{
+  public:
+    using wxDataViewCtrl::GetItemByRow;
+    using wxDataViewCtrl::wxDataViewCtrl;
+};
+
+#if wxUSE_ACCESSIBILITY
+// ファイルツリーのアクセシブル実装（UIA/MSAA。ui-design 13章）。
+// 既定の wxDataViewCtrlAccessible は各行のアクセシブルネームを「最初の文字列列の表示テキスト」
+// （＝記号＋名前）から組み立てる（generic/datavgen.cpp の GetName）。本クラスはその GetName を
+// 差し替え、視覚は据え置いたまま「名前, 状態ラベル, 種別ラベル」をスクリーンリーダーへ供給する。
+// ナビゲーション・ロール等の挙動は基底をそのまま使う（最小差分）。
+class FileTreeAccessible : public wxDataViewCtrlAccessible
+{
+  public:
+    FileTreeAccessible(FileTreeDataView* ctrl, const FileTreeModel* model)
+        : wxDataViewCtrlAccessible(ctrl), ctrl_(ctrl), model_(model)
+    {
+    }
+
+    wxAccStatus GetName(int childId, wxString* name) override
+    {
+        const wxString accessible = item_accessible_name(childId);
+        if (!accessible.empty())
+        {
+            *name = accessible;
+            return wxACC_OK;
+        }
+        // 行を解決できない場合（自身・行外）は既定の組み立てに委ねる。
+        return wxDataViewCtrlAccessible::GetName(childId, name);
+    }
+
+  private:
+    // childId（1 始まりの行番号。wxACC_SELF=0 はコントロール自身）→ 行 → モデルノードへ写し、
+    // 状態ラベル・種別ラベルを含むアクセシブルネームを得る。解決できなければ空。
+    wxString item_accessible_name(int childId) const
+    {
+        if (childId == wxACC_SELF || ctrl_ == nullptr || model_ == nullptr)
+        {
+            return wxString();
+        }
+        // 保持した型付きポインタ経由で行→item を解決する（const メソッドから非 const の
+        // GetWindow を呼ばずに済む。GetItemByRow は FileTreeDataView で public 公開済み）。
+        const wxDataViewItem item = ctrl_->GetItemByRow(static_cast<unsigned int>(childId - 1));
+        if (!item.IsOk())
+        {
+            return wxString();
+        }
+        return model_->accessible_name(item);
+    }
+
+    FileTreeDataView* ctrl_ = nullptr;
+    const FileTreeModel* model_ = nullptr;
+};
+#endif // wxUSE_ACCESSIBILITY
+
 FileTreePanel::FileTreePanel(wxWindow* parent)
     : wxPanel(parent, wxID_ANY), model_(new FileTreeModel())
 {
-    view_ = new wxDataViewCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
-                               wxDV_SINGLE | wxDV_ROW_LINES);
+    // protected な GetItemByRow を public 公開した薄い派生（FileTreeDataView）で生成する。
+    // 描画・列・モデル関連付けは親 wxDataViewCtrl の API をそのまま使う。
+    auto* view = new FileTreeDataView(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                                      wxDV_SINGLE | wxDV_ROW_LINES);
+    view_ = view;
     view_->AssociateModel(model_.get());
     // 1 列に「状態記号＋アイコン＋テキスト」を共存させる（design 10章・ui-design 6章）。
     view_->AppendTextColumn("ファイル", 0, wxDATAVIEW_CELL_INERT, -1, wxALIGN_LEFT,
                             wxDATAVIEW_COL_RESIZABLE);
+
+#if wxUSE_ACCESSIBILITY
+    // 行ごとのアクセシブルネームに状態・種別ラベルを供給する（視覚は据え置き）。
+    // SetAccessible の所有権は wxWindow 側が握り破棄する。
+    view_->SetAccessible(new FileTreeAccessible(view, model_.get()));
+#endif
 
     auto* sizer = new wxBoxSizer(wxVERTICAL);
     sizer->Add(view_, 1, wxEXPAND);
