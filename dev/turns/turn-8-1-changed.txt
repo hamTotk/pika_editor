@@ -1,0 +1,10 @@
+CHANGED:
+src/CMakeLists.txt
+tests/CMakeLists.txt
+docs/acceptance.md
+src/controller/degrade_model.cpp
+src/controller/degrade_model.h
+src/controller/view_state.cpp
+src/controller/view_state.h
+tests/controller/degrade_model_test.cpp
+tests/controller/view_state_test.cpp

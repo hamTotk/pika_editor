@@ -1,0 +1,33 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 8,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "状態の網羅 (Empty)",
+      "message": "Empty 状態のうち『フォルダは開いているが項目が無い（空フォルダ）』ケースが EmptyReason::None に倒され、empty_reason_label(None) は空文字を返す（view_state.cpp:87-91, 105-106）。ui-design 15章 Empty は『行き止まりにせず CTA 1つ＋最近使った項目。3分岐で文言を変える』と定めるが、この第4ケースは文言もCTAも伴わない無地の Empty 面になりうる。NoFolderOpened/SearchNoHits/AllConsumed の3分岐は文言が揃っているのに、空フォルダだけ画面が空白になると『行き止まりにしない』原則に反する。GUI 側で空文字を許容する分岐があると無導線の死状態になるため、空フォルダ向けの文言（例: 『このフォルダーに表示できる項目がありません』）を加えるか、本ケースを許容する旨を明示すべき。状態機械自体は決定論で正しく分岐できているので medium。",
+      "location": "src/controller/view_state.cpp:87-91"
+    },
+    {
+      "severity": "low",
+      "area": "状態の網羅 (Error)",
+      "message": "ui-design 15章 Error の代表シーンは『WebView2 不在 / アクセス権なし / 衝突』の3つだが、view_state の is_error_degrade は AccessDenied のみを Error へ畳む（view_state.cpp:11-14）。設計上 WebView2 不在は diff_mode_model の DiffToggleReason::NoWebView 経由で差分トグル自動無効化＝Partial（diff_auto_off）へ、衝突は notification_model（衝突=最優先の通知バー）へ振り分ける責務分離になっており（diff_mode_model.h:55, notification_model.h）、主要表示が不能/不可視になる毀損には至らない。ただしソース/ヘッダのコメントが『Error＝WebView2 不在・アクセス権なし・衝突』と正典の文言をそのまま転記している（view_state.h:33, view_state.cpp:10, 43）ため、実装（AccessDenied のみ）との乖離が読み手を誤認させる。コメントを実際の責務分担（WebView2 不在/衝突は別 ViewModel が吸収する）に合わせて補正すると一貫性が増す。a11y/描画上の実害はないため low。",
+      "location": "src/controller/view_state.cpp:11-14"
+    },
+    {
+      "severity": "low",
+      "area": "ビジュアル一貫性 (色非依存の弁別)",
+      "message": "本スプリントの ViewModel は DegradeKind/NextStep/ViewState/EmptyReason を列挙で返し、文言は単一メッセージ定義（*_label）に集約していて、色やアイコンを直接埋めない設計になっている。これは ui-design 1章『色だけに依存しない（状態は形・位置・記号でも弁別）』を GUI 側で守れる正しい土台。一方で、各縮退種別をどの状態記号/アイコンへ写すか（ui-design 6章のファイルタイプアイコン分類や差分記号 ±/◆/取消線との整合）は本 ViewModel に情報がなく、GUI 配線（系統B/系統C の I1/I2/I10）に委ねられている。色非依存の最終担保（acceptance.md E6/G5）が手動項目に残る点は frontend-ui として把握しておくべきだが、本スプリントのロジック自体は適切な抽象で、指摘は注意喚起レベル（low）。",
+      "location": "src/controller/degrade_model.cpp:73-113"
+    },
+    {
+      "severity": "low",
+      "area": "状態の網羅 (Loading 進捗)",
+      "message": "Loading は loaded_count/total_count を素通しで結果へ載せる（view_state.cpp:39-41）が、total_count==0 のとき percent 未確定である旨はヘッダコメント（view_state.h:58）にあるのみで、ViewModel 上で『percent 確定か否か』を明示するフラグは持たない。ui-design 15章 Loading は『percent-done＋件数（1000中620 等）』を求めるので、GUI 側が total_count==0 を 0% と誤表示しないよう、不定 progress（spinner）と確定 progress を区別できると安全。決定論ロジックとしては進捗を正しく透過できているため low。",
+      "location": "src/controller/view_state.cpp:39-41"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint8 の成果物（縮退判定 degrade_model・ビュー別5状態 view_state の wx 非依存 ViewModel と gtest、acceptance.md 整備）を frontend-ui 観点でレビューした。critical はゼロ。5状態（Ideal/Empty/Loading/Partial/Error）と Empty 3分岐は ui-design 15章正典を忠実に写し、状態網羅・優先順位上書き・決定論がテストで観測可能。文言は単一メッセージ定義に集約し、列挙で返すことで色非依存の弁別（ui-design 1章）と状態記号化を GUI 側で守れる土台になっている。acceptance.md も a11y/色非依存の手動項目（E6 色非依存、G4 キーボード完結、G5 ハイコントラスト、G6 スクリーンリーダ、I10 Empty 3分岐）を漏れなく系統C へ集約できている。指摘は (1) 空フォルダ Empty が無文言・無CTA になりうる点（medium、行き止まり防止の徹底）、(2) Error のコメント記載（WebView2 不在/衝突）と実装（AccessDenied のみ）の乖離＝責務分離の説明不足（low）、(3) Loading の percent 確定/不定の区別（low）、(4) 色非依存の最終担保が手動項目に残る注意喚起（low）。いずれも主要操作の不能/不可視や致命的 a11y 違反ではなく、次ターンの polish 範囲。"
+}

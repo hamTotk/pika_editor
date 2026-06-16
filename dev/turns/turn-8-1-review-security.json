@@ -1,0 +1,21 @@
+{
+  "reviewer": "security",
+  "sprint_id": 8,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "情報漏洩 (将来ターンへの備忘)",
+      "message": "本スプリントの変更は縮退判定とビュー状態の純粋ロジックのみで、診断ログの実体配線は含まれない。spec/acceptance.md (I11) が掲げる『診断ログにユーザーのファイル内容を書かない』(要件12.3・design 9章) は security 上の情報漏洩防止要件だが、ログ書き込みコードは src 内に未配線 (Grep でログ実体なし、util/logger.h のみ)。今回の縮退ラベル (degrade_kind_label/next_step_label/empty_reason_label) はファイル名・パス・内容を一切含まない固定日本語文言で、この点は適切。実際のログ実装ターンで『例外メッセージや FS パスを warn/error に載せない』を再確認する必要がある旨を残す。本ターンの成果物に欠陥はない。",
+      "location": "src/controller/degrade_model.cpp:73"
+    },
+    {
+      "severity": "low",
+      "area": "DoS (入力前提の明示)",
+      "message": "ImageTooLarge ガードは DegradeInput.pixel_count を信頼してデコード可否を判定する (degrade_model.cpp:40)。コメントどおり pixel_count は『ヘッダ寸法・デコード前』に取得する前提であり、本純粋ロジック自体は健全 (幅×高さの乗算は呼び出し側で行われ、ここでは uint64 比較のみで桁あふれもない)。ただし供給側 (画像ヘッダパーサ、本ターン外) が width*height を計算する際の整数オーバーフロー対策と、ヘッダ偽装で小さい pixel_count を申告された場合のデコード時実メモリ上限の二重防御が、配線ターンで必要になる。判定値の前提として備忘で残す。本ターンの判定ロジックに脆弱性はない。",
+      "location": "src/controller/degrade_model.cpp:40"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint8 の変更 (degrade_model.cpp/h・view_state.cpp/h・CMakeLists.txt・acceptance.md) を security 観点でレビュー。いずれも bool フラグと数値を受ける wx 非依存の純粋判定ロジックとドキュメントで、信頼境界の危険な sink (SQL/シェル/パス操作/HTTP発行/HTMLレンダリング/デシリアライズ/正規表現) には一切到達しない。秘密情報のハードコードなし、外部入力の injection/RCE/SSRF 経路なし、認証/認可の概念がそもそも存在しないローカル個人ツール。縮退の日本語ラベルはファイル名・パス・内容を含まない固定文言で情報漏洩なし。security 観点で関係する実装 (FS 属性収集・doc.pika の ../ 遮断・診断ログの内容秘匿・ACL) は系統B/C 扱いで本ターンの変更外であり、acceptance.md の I7/I11/J4/B5 に手動検証項目として正しく予約されている。critical=0、high=0。残した2件はいずれも将来の実 I/O 配線ターンへの low 備忘であり、本ターン成果物の欠陥ではない。"
+}

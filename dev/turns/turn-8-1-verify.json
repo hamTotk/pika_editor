@@ -1,0 +1,12 @@
+[
+  {
+    "command": "ctest --preset x64-core-test",
+    "exit_code": 0,
+    "tail": "(log読込失敗: ENOENT: no such file or directory, open 'C:\\tmp\\v8_ctest.log')"
+  },
+  {
+    "command": "cmake --build --preset x64-release",
+    "exit_code": 0,
+    "tail": "(log読込失敗: ENOENT: no such file or directory, open 'C:\\tmp\\v8_build.log')"
+  }
+]

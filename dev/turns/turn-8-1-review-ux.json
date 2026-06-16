@@ -1,0 +1,33 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 8,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "空状態ガイド（オンボーディング/行き止まり防止）",
+      "message": "resolve_view_state の Empty 分岐で、フォルダは開いているが表示項目が無い（空フォルダ・既定除外で全部隠れた等）ケースが EmptyReason::None に倒され、empty_reason_label が空文字を返す。ui-design 15章/要件10章が要求する『Empty は行き止まりにせず CTA 1つ＋最近使った項目』の精神に対し、この第4ケースだけ画面に文言が出ず真っ白になりうる（Nielsen #1 可視化・空状態ガイド欠如）。spec の must は『3分岐で文言が変わる』ことの観測のみを要求しており該当3分岐は満たすため critical/high ではないが、ux 上は『このフォルダーには表示できる項目がありません』等の文言を 1 つ用意したい。GUI 配線(系統B)側で None を素通しすると無案内になる点を後続スプリントに申し送るべき。",
+      "location": "src/controller/view_state.cpp:87"
+    },
+    {
+      "severity": "low",
+      "area": "次の一手の提示（行き止まり防止）",
+      "message": "SymlinkLoop の next_step が NextStep::None で、degrade_kind_label は『リンクの循環を検出したため、この先の展開を中止しました』と理由のみを返す。AccessDenied/CloudPlaceholder 等が全て『次の一手』を持つ中、循環ケースだけ次のアクション提示が無く、ui-design 15章『行き止まりにしない』の一貫性がわずかに崩れる。展開を打ち切るだけで他に取れる操作が無いという設計判断は妥当だが、ユーザー視点では『この枝は展開を中止しました（他のフォルダーは通常どおり操作できます）』のように継続可能であることを明示する文言があると安心感が高い。重畳優先・継続性自体は満たしているため low。",
+      "location": "src/controller/degrade_model.cpp:25"
+    },
+    {
+      "severity": "low",
+      "area": "エラー回復文言（次の一手の網羅性）",
+      "message": "ReadOnly の next_step ラベルが『名前を付けて保存する』のみで、要件12.1（要件439行『名前を付けて保存へ誘導するか属性解除を確認する』）が併記する『属性解除』の選択肢が文言上は見えない。DegradeKind の設計コメント上は SaveAsOrUnlock（Unlock=属性解除）を含意するが、next_step_label が片方しか提示しないため、ユーザーが読み取り専用属性をその場で外して上書きしたい導線が文言から読み取れない。データ喪失や保存不能には至らない（保存自体は別名保存で完遂できる）ため low。GUI 配線時に『属性を解除して保存』導線も併置することを推奨。",
+      "location": "src/controller/degrade_model.cpp:104"
+    },
+    {
+      "severity": "low",
+      "area": "ヘルプ/ドキュメント（手動チェックリストの網羅）",
+      "message": "docs/acceptance.md は系統C の手動 ux/挙動検証を requirements/design 節併記つきで網羅的に整備できており（A〜K、I10 で Empty 3分岐の文言差分も項目化）、Nielsen #10『ヘルプとドキュメント』として良質。軽微な指摘として、本スプリントが追加した degrade_model の『次の一手ボタンの文言が実画面で正しく表示・押下できるか』を直接確認する手動項目（I3/I4/I6/I7 は挙動は見るがボタン文言の妥当性確認は明示されない）を 1 行足すと、ロジック(系統A)で検証済みの文言が実 UI に正しく結線されたかの最終確認が閉じる。現状でも I 系で実描画は確認されるため low。",
+      "location": "docs/acceptance.md:147"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint8 の ux 関連成果物は degrade_model（縮退→次の一手の写像）・view_state（5状態＋Empty3分岐の解決）・acceptance.md（手動チェックリスト）。いずれも wx 非依存の純ロジック/ドキュメントであり、ux の核心(タスク完了導線・エラー回復・行き止まり防止)を構造的に支えている。全縮退で can_continue=true（クラッシュさせない）、エラー文言は内部コード/スタックトレースを露出せず平易な日本語で『何が起きたか＋次の一手』を提示しており、Nielsen #9（回復支援）/#3（制御と自由）/#1（可視化）に概ね適合。critical（主要タスクが完了不能な導線破綻・誤操作でのデータ喪失）に該当する欠陥は無い。改善余地は、(1)Empty の第4ケース(空フォルダ)が無案内になりうる点[medium]、(2)SymlinkLoop/ReadOnly の次の一手文言の網羅性[low×2]、(3)acceptance.md に次の一手ボタンの実画面確認を1行足す余地[low]。いずれも後続 GUI 配線スプリントで feedback_structured 経由で対応可能。"
+}
