@@ -5,6 +5,7 @@
 #include "controller/dir_lister.h"
 #include "controller/editor_view_model.h"
 #include "controller/preview_builder.h"
+#include "controller/tree_view_messages.h"
 #include "controller/tree_view_model.h"
 #include "core/diff/diff_engine.h"
 #include "core/render/markdown_renderer.h"
@@ -31,10 +32,12 @@
 #include <wx/panel.h>
 #include <wx/sizer.h>
 #include <wx/splitter.h>
+#include <wx/stattext.h>
 #include <wx/statusbr.h>
 #include <wx/stdpaths.h>
 #include <wx/utils.h>
 
+#include <algorithm>
 #include <ctime>
 #include <optional>
 
@@ -114,6 +117,8 @@ MainFrame::MainFrame(const core::settings::Settings& settings, const std::string
     Bind(wxEVT_TIMER, &MainFrame::on_debounce_timer, this, debounce_timer_.GetId());
     // フォーカス別ショートカット（Ctrl+Enter 等）を全体で 1 か所に集約して捌く（design 10章 J3）。
     Bind(wxEVT_CHAR_HOOK, &MainFrame::on_char_hook, this);
+    // 終了（X/Alt+F4/終了メニュー）の未保存確認・Veto を 1 か所で受ける（要件5.7・設計原則1）。
+    Bind(wxEVT_CLOSE_WINDOW, &MainFrame::on_close_window, this);
 }
 
 MainFrame::~MainFrame()
@@ -185,10 +190,13 @@ void MainFrame::build_layout()
 
     auto* root_sizer = new wxBoxSizer(wxVERTICAL);
 
-    // 通知バー領域（最上段。最大3本＋他N件の集約は sprint7。本 sprint は領域だけ確保）。
-    notification_area_ = new wxPanel(this, wxID_ANY);
-    notification_area_->SetName(u8(MsgId::NotificationArea));
-    notification_area_->SetMinSize(wxSize(-1, 0)); // 通知が無ければ高さ 0（コストゼロ）。
+    // 通知バー領域（最上段。最大3本＋他N件の集約＝notification_model）。失敗・スキップの提示はここへ
+    // 載せる（design 10章 J1・ui-design 10章）。通知が無ければ高さ 0（コストゼロ）で畳む。
+    auto* area = new wxPanel(this, wxID_ANY);
+    area->SetName(u8(MsgId::NotificationArea));
+    area->SetSizer(new wxBoxSizer(wxVERTICAL));
+    area->SetMinSize(wxSize(-1, 0));
+    notification_area_ = area;
     root_sizer->Add(notification_area_, 0, wxEXPAND);
 
     // 左ツリー｜メイン（タブ）の水平分割。
@@ -363,14 +371,30 @@ void MainFrame::apply_fs_events(const std::vector<core::watcher::FsEvent>& event
     const auto changes = workspace_ctl_.apply_events(events);
     for (const auto& c : changes)
     {
-        // 削除は消失タブの安全遷移（バッファ保持・削除済み表示）。タブ側状態機械へ伝える。
-        if (c.effect == controller::FsChangeEffect::PathRemoved && !workspace_.empty())
+        if (workspace_.empty())
         {
-            tabs_.mark_path_missing(workspace_ + "/" + c.path);
+            continue;
+        }
+        const std::string abs = workspace_ + "/" + c.path;
+        switch (c.effect)
+        {
+        case controller::FsChangeEffect::PathRemoved:
+            // 削除は消失タブの安全遷移（バッファ保持・削除済み表示）。タブ側状態機械へ伝える。
+            tabs_.mark_path_missing(abs);
+            break;
+        case controller::FsChangeEffect::UnreadMarked:
+            // 外部の作成/変更で未読化（タブは ± 差分あり／新規 ◆）。記号体系はツリーと一元化する。
+            tabs_.set_unread(abs, true, /*has_baseline*/ !c.is_new);
+            break;
+        case controller::FsChangeEffect::RenamedCarried:
+            // rename 追従はパス同一性の付け替えであり、タブ側パスの更新は本タスクの範囲外（後続）。
+            break;
         }
     }
-    // 未読集合が変わったのでツリーと未読件数を更新する。
+    // 未読集合が変わったのでツリーと未読件数を更新する。タブの状態記号（削除済み/差分あり）も
+    // 変わりうるので全タブ見出しを更新する（ui-design 5章）。
     refresh_tree();
+    refresh_all_tab_titles();
     update_status();
 }
 
@@ -425,6 +449,8 @@ void MainFrame::open_file(const std::string& file_abs)
     }
 
     notebook_->AddPage(editor, u8(title), /*select*/ true);
+    // 追加直後に状態記号を反映する（新規タブは記号なしだが、経路を 1 本化する）。
+    refresh_tab_title(idx);
     update_status();
 }
 
@@ -666,13 +692,21 @@ void MainFrame::on_save(wxCommandEvent&)
     const auto written = util::write_atomic(abs, encoded.value());
     if (written.is_err())
     {
-        return; // I/O 失敗。旧内容は破壊しない（write_atomic の不変条件）。
+        // I/O 失敗。旧内容は破壊しない（write_atomic の不変条件）。無言終了せず通知へ変換し、
+        // ユーザーが『保存した』と誤認しないようにする（次の一手も併記。要件5.7）。
+        wxMessageBox(u8(MsgId::NotifySaveIoFailed), u8(MsgId::AppTitle), wxOK | wxICON_WARNING,
+                     this);
+        push_notification(controller::NotificationKind::Conflict, abs,
+                          message(MsgId::NotifySaveIoFailed));
+        return;
     }
 
-    // incoming 退避が起きていれば index を保存しておく（退避 object のダングリングを防ぐ）。
-    if (!plan.stash_hash.empty())
+    // incoming 退避が起きていれば index を保存しておく（退避 object のダングリングを防ぐ）。失敗は
+    // 握り潰さず通知へ（退避 object 自体は保存済み＝データは失われていない。design 1章）。
+    if (!plan.stash_hash.empty() && store.save(index).is_err())
     {
-        store.save(index);
+        push_notification(controller::NotificationKind::Conflict, abs,
+                          message(MsgId::NotifyIndexSaveFailed));
     }
 
     // 保存後の状態を更新する（次回保存の衝突基準を保存内容へ。自己保存抑制は watcher 側で済む）。
@@ -681,6 +715,13 @@ void MainFrame::on_save(wxCommandEvent&)
         mit->second.last_loaded_hash = util::xxh3_64_lf_hex(ctx.buffer_content);
     }
     tabs_.set_unsaved(abs, false);
+    refresh_tab_title(tabs_.index_of(abs));
+    if (plan.conflict)
+    {
+        // 衝突退避して上書きした旨は通知バーにも残す（ステータスは一過性。design 10章 J1）。
+        push_notification(controller::NotificationKind::Conflict, abs,
+                          message(MsgId::NotifyConflict));
+    }
     status_->SetStatusText(plan.conflict ? u8(MsgId::NotifyConflict) : u8(MsgId::StatusSaved), 0);
 }
 
@@ -723,9 +764,15 @@ void MainFrame::on_confirm(wxCommandEvent&)
                      this);
         return;
     }
-    store.save(index);
+    // index.json 保存（コミット相当）の失敗を握り潰さず通知へ変換する（design 1章・sprint6 趣旨）。
+    if (store.save(index).is_err())
+    {
+        push_notification(controller::NotificationKind::Conflict, abs,
+                          message(MsgId::NotifyIndexSaveFailed));
+    }
     // ツリー/タブのマーク解除（未読集合から外れた）。
     tabs_.set_unread(abs, false, /*has_baseline*/ true);
+    refresh_tab_title(tabs_.index_of(abs));
     refresh_tree();
     update_status();
     status_->SetStatusText(u8(MsgId::StatusConfirmed), 0);
@@ -769,11 +816,28 @@ void MainFrame::on_confirm_all(wxCommandEvent&)
     controller::ConfirmAllOutcome out =
         doc.confirm_all(index, workspace_ctl_.unread_mut(), targets, batch_id,
                         static_cast<std::int64_t>(::time(nullptr)));
-    store.save(index);
+    // index.json 保存（コミット相当）の失敗を握り潰さず通知へ変換する（design 1章・sprint6 趣旨）。
+    if (store.save(index).is_err())
+    {
+        push_notification(controller::NotificationKind::Conflict, std::string{},
+                          message(MsgId::NotifyIndexSaveFailed));
+    }
     refresh_tree();
+    refresh_all_tab_titles();
     update_status();
-    (void)out; // skipped は通知バー集約 ViewModel（sprint7）でまとめて提示する。
-    status_->SetStatusText(u8(MsgId::StatusConfirmed), 0);
+    // 全件完了の誤認防止: skipped>0 は即時提示する（並行変化/退避失敗で未確認が残る。要件8.3）。
+    // 詳細（どのファイルが残ったか）はグローバル通知へ集約する（design 10章 J1）。
+    if (out.skipped.empty())
+    {
+        status_->SetStatusText(u8(MsgId::StatusConfirmed), 0);
+    }
+    else
+    {
+        const std::string skipped_msg = notify_confirm_all_skipped(out.skipped.size());
+        status_->SetStatusText(u8(skipped_msg), 0);
+        push_notification(controller::NotificationKind::Conflict, std::string{},
+                          message(MsgId::NotifyConfirmAllSkipped));
+    }
 }
 
 void MainFrame::on_rollback(wxCommandEvent&)
@@ -812,20 +876,36 @@ void MainFrame::on_rollback(wxCommandEvent&)
                      wxOK | wxICON_WARNING, this);
         return;
     }
-    store.save(index);
-    // ベースライン内容でディスクを上書きしてバッファを再読込する（design 5.4）。
-    if (util::write_atomic(abs, rolled.value()).is_ok())
+    // index.json 保存（コミット相当）の失敗を握り潰さず通知へ変換する（design 1章・sprint6 趣旨）。
+    if (store.save(index).is_err())
     {
-        if (EditorPanel* editor = active_editor())
-        {
-            editor->set_text_utf8(rolled.value());
-        }
-        auto mit = doc_meta_.find(abs);
-        if (mit != doc_meta_.end())
-        {
-            mit->second.last_loaded_hash = util::xxh3_64_lf_hex(rolled.value());
-        }
+        push_notification(controller::NotificationKind::Conflict, abs,
+                          message(MsgId::NotifyIndexSaveFailed));
     }
+    // ベースライン内容でディスクを上書きしてバッファを再読込する（design 5.4）。
+    const auto written = util::write_atomic(abs, rolled.value());
+    if (written.is_err())
+    {
+        // 巻き戻しの書き戻し失敗を握り潰さず通知へ（見た目とディスクの不整合をユーザーに知らせる）。
+        // 巻き戻し前の内容は rollback 退避に保存済み＝データ損失ではない旨も文言で示す（要件8.3）。
+        wxMessageBox(u8(MsgId::NotifyRollbackWriteFailed), u8(MsgId::AppTitle),
+                     wxOK | wxICON_WARNING, this);
+        push_notification(controller::NotificationKind::Conflict, abs,
+                          message(MsgId::NotifyRollbackWriteFailed));
+        return;
+    }
+    if (EditorPanel* editor = active_editor())
+    {
+        editor->set_text_utf8(rolled.value());
+    }
+    auto mit = doc_meta_.find(abs);
+    if (mit != doc_meta_.end())
+    {
+        mit->second.last_loaded_hash = util::xxh3_64_lf_hex(rolled.value());
+    }
+    // 巻き戻しで未保存編集が破棄され、ディスク＝ベースラインに揃った。タブの未保存記号を落とす。
+    tabs_.set_unsaved(abs, false);
+    refresh_tab_title(tabs_.index_of(abs));
 }
 
 void MainFrame::update_diff_toggle_state()
@@ -982,17 +1062,25 @@ void MainFrame::on_open_folder(wxCommandEvent&)
 void MainFrame::on_close_tab(wxCommandEvent&)
 {
     const int sel = notebook_->GetSelection();
-    if (sel != wxNOT_FOUND)
+    if (sel == wxNOT_FOUND)
     {
-        notebook_->DeletePage(static_cast<std::size_t>(sel));
-        tabs_.close(static_cast<std::size_t>(sel));
-        update_status();
+        return;
     }
+    // 未保存タブを無確認で閉じない（保存/破棄/キャンセル。要件5.7・設計原則1）。中断なら閉じない。
+    if (!confirm_discard_unsaved(sel))
+    {
+        return;
+    }
+    notebook_->DeletePage(static_cast<std::size_t>(sel));
+    tabs_.close(static_cast<std::size_t>(sel));
+    update_status();
 }
 
 void MainFrame::on_exit(wxCommandEvent&)
 {
-    Close(true);
+    // 終了は wxEVT_CLOSE_WINDOW を発火させ、未保存確認・Veto を on_close_window に一本化する
+    // （X/Alt+F4 と同じ経路。force=false で Veto を許す）。
+    Close(false);
 }
 
 void MainFrame::on_about(wxCommandEvent&)
@@ -1018,16 +1106,28 @@ void MainFrame::on_notebook_page_changed(wxAuiNotebookEvent& evt)
     }
     // アクティブタブが変われば差分可否・プレビュー内容も変わる（種別/サイズ依存）ので再評価する。
     update_preview();
+    // アクティブタブ固有の通知（衝突等）はタブ切替で表示対象が変わるので集約し直す。
+    refresh_notifications();
     evt.Skip();
 }
 
 void MainFrame::on_notebook_page_close(wxAuiNotebookEvent& evt)
 {
     const int page = evt.GetSelection();
-    if (page != wxNOT_FOUND)
+    if (page == wxNOT_FOUND)
     {
-        tabs_.close(static_cast<std::size_t>(page));
+        evt.Skip();
+        return;
     }
+    // ×/中クリック閉じも未保存なら確認する。キャンセル/保存失敗ならページ閉じイベントを Veto する
+    // （wxAuiNotebook は Veto を尊重しページを残す。要件5.7・設計原則1）。
+    if (!confirm_discard_unsaved(page))
+    {
+        evt.Veto();
+        return;
+    }
+    // 実際の DeletePage は wxAuiNotebook 側が行う。TabManager をそれに同期させる。
+    tabs_.close(static_cast<std::size_t>(page));
     evt.Skip();
 }
 
@@ -1037,6 +1137,209 @@ void MainFrame::on_sys_colour_changed(wxSysColourChangedEvent& evt)
     // 再起動なしで配色を追従させる（要件11.3）。
     Refresh();
     evt.Skip();
+}
+
+// ---- 終了/閉じるの未保存確認（データを失わない。要件5.7・設計原則1） ----
+
+bool MainFrame::has_unsaved_tabs() const
+{
+    for (std::size_t i = 0; i < tabs_.count(); ++i)
+    {
+        const controller::TabState* st = tabs_.at(i);
+        if (st != nullptr && st->unsaved)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool MainFrame::save_tab(int tab_index)
+{
+    if (tab_index < 0 || static_cast<std::size_t>(tab_index) >= tabs_.count())
+    {
+        return false;
+    }
+    const std::size_t idx = static_cast<std::size_t>(tab_index);
+    // on_save
+    // はアクティブタブを対象にするため、保存対象を一旦アクティブにしてから既存経路を流用する
+    // （退避/アトミック置換/通知は on_save に一本化＝独自に書かない）。
+    if (idx < notebook_->GetPageCount())
+    {
+        notebook_->SetSelection(idx);
+        tabs_.activate(idx);
+    }
+    wxCommandEvent e(wxEVT_MENU, wxID_SAVE);
+    on_save(e);
+    // 保存成功は on_save が tabs_.set_unsaved(false) するため、保存後の未保存フラグで判定する。
+    const controller::TabState* st = tabs_.at(idx);
+    return st != nullptr && !st->unsaved;
+}
+
+bool MainFrame::confirm_discard_unsaved(int tab_index)
+{
+    if (tab_index < 0 || static_cast<std::size_t>(tab_index) >= tabs_.count())
+    {
+        return true; // 範囲外＝確認不要（そのまま進めてよい）。
+    }
+    const controller::TabState* st = tabs_.at(static_cast<std::size_t>(tab_index));
+    if (st == nullptr || !st->unsaved)
+    {
+        return true; // 未保存でなければ確認不要。
+    }
+    // 保存/破棄/キャンセルの 3 択（モーダル）。既定は保存（誤操作でのデータ喪失を避ける）。
+    wxMessageDialog dlg(this, u8(MsgId::ConfirmClosePrompt), u8(MsgId::AppTitle),
+                        wxYES_NO | wxCANCEL | wxICON_WARNING);
+    dlg.SetYesNoCancelLabels(u8(MsgId::ConfirmSave), u8(MsgId::ConfirmDiscard),
+                             u8(MsgId::ConfirmCancel));
+    switch (dlg.ShowModal())
+    {
+    case wxID_YES:
+        // 保存できなければ閉じない（保存失敗で『保存した』誤認のまま破棄しない）。
+        return save_tab(tab_index);
+    case wxID_NO:
+        return true; // 破棄して閉じる。
+    default:
+        return false; // キャンセル＝閉じない/終了しない。
+    }
+}
+
+bool MainFrame::confirm_discard_all_unsaved()
+{
+    if (!has_unsaved_tabs())
+    {
+        return true;
+    }
+    wxMessageDialog dlg(this, u8(MsgId::ConfirmExitPrompt), u8(MsgId::AppTitle),
+                        wxYES_NO | wxCANCEL | wxICON_WARNING);
+    dlg.SetYesNoCancelLabels(u8(MsgId::ConfirmSaveAll), u8(MsgId::ConfirmDiscardExit),
+                             u8(MsgId::ConfirmCancel));
+    switch (dlg.ShowModal())
+    {
+    case wxID_YES:
+        // 各未保存タブを既存 on_save 経路で保存する。1 つでも保存に失敗したら終了を中断する
+        // （保存できなかった内容を黙って破棄しない。設計原則1）。
+        for (std::size_t i = 0; i < tabs_.count(); ++i)
+        {
+            const controller::TabState* st = tabs_.at(i);
+            if (st != nullptr && st->unsaved && !save_tab(static_cast<int>(i)))
+            {
+                return false;
+            }
+        }
+        return true;
+    case wxID_NO:
+        return true; // 保存せず終了。
+    default:
+        return false; // キャンセル＝終了しない。
+    }
+}
+
+void MainFrame::on_close_window(wxCloseEvent& evt)
+{
+    // X/Alt+F4/終了メニューの共通経路。未保存があれば確認し、キャンセル時は Veto して終了を止める。
+    if (!confirm_discard_all_unsaved())
+    {
+        if (evt.CanVeto())
+        {
+            evt.Veto(); // 終了を中断（未保存内容を保持。要件5.7・設計原則1）。
+            return;
+        }
+        // Veto できない強制終了（OS シャットダウン等）は止められない＝既存挙動で終了する。
+    }
+    stop_watching(); // 監視スレッドを畳んでから破棄する（デストラクタと二重でも安全）。
+    Destroy();
+}
+
+// ---- タブ見出しの状態記号結線（display_mark。ui-design 5章） ----
+
+std::string MainFrame::tab_display_title(const controller::TabState& tab) const
+{
+    const controller::StateMark mark = controller::display_mark(tab);
+    // 削除済みは記号を持たない（ツリーは取り消し線）。タブは取り消し線を描けないため、色に依存せず
+    // 記号で弁別できるよう接頭辞を付ける（ui-design 5章「記号・位置・取り消し線で全状態を弁別」）。
+    if (mark == controller::StateMark::Deleted)
+    {
+        return "[削除] " + tab.title;
+    }
+    const std::string symbol(controller::state_mark_symbol(mark));
+    if (symbol.empty())
+    {
+        return tab.title;
+    }
+    // 差分あり ±/新規 ◆ は名前の左（ui-design 5章の表「名前の左（タブ）」）。
+    return symbol + " " + tab.title;
+}
+
+void MainFrame::refresh_tab_title(std::size_t index)
+{
+    const controller::TabState* st = tabs_.at(index);
+    if (st == nullptr || index >= notebook_->GetPageCount())
+    {
+        return;
+    }
+    notebook_->SetPageText(index, u8(tab_display_title(*st)));
+}
+
+void MainFrame::refresh_all_tab_titles()
+{
+    const std::size_t n = std::min<std::size_t>(tabs_.count(), notebook_->GetPageCount());
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        refresh_tab_title(i);
+    }
+}
+
+// ---- 通知バー集約の結線（notification_model。design 10章 J1） ----
+
+void MainFrame::push_notification(controller::NotificationKind kind, const std::string& tab_path,
+                                  const std::string& detail)
+{
+    controller::Notification n;
+    n.kind = kind;
+    n.tab_path = tab_path;
+    n.seq = ++notify_seq_;
+    n.detail = detail;
+    notifications_.push_back(std::move(n));
+    refresh_notifications();
+}
+
+void MainFrame::refresh_notifications()
+{
+    if (notification_area_ == nullptr)
+    {
+        return;
+    }
+    wxSizer* sizer = notification_area_->GetSizer();
+    if (sizer == nullptr)
+    {
+        return;
+    }
+    // 既存の行を捨てて、現在のアクティブタブ文脈で集約し直す（純粋関数 aggregate_notifications）。
+    notification_area_->DestroyChildren();
+    sizer->Clear();
+
+    const controller::NotificationView view =
+        controller::aggregate_notifications(notifications_, active_file_path());
+
+    for (const controller::NotificationRow& row : view.rows)
+    {
+        // detail があればそれを、無ければ種別の既定文言を出す（design 10章 K9）。
+        const std::string text =
+            row.detail.empty() ? notification_kind_label(row.kind) : row.detail;
+        auto* label = new wxStaticText(notification_area_, wxID_ANY, u8(text));
+        sizer->Add(label, 0, wxEXPAND | wxALL, 2);
+    }
+    if (view.overflow > 0)
+    {
+        auto* more =
+            new wxStaticText(notification_area_, wxID_ANY, u8(notify_overflow(view.overflow)));
+        sizer->Add(more, 0, wxEXPAND | wxALL, 2);
+    }
+    // 通知が無ければ高さ 0 で畳む（コストゼロ）。あれば内容に合わせて再レイアウトする。
+    notification_area_->SetMinSize(wxSize(-1, view.rows.empty() ? 0 : -1));
+    notification_area_->Layout();
+    Layout();
 }
 
 } // namespace pika::ui

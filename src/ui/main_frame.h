@@ -13,6 +13,7 @@
 #include "app/watch_thread.h"
 #include "controller/diff_mode_model.h"
 #include "controller/document_controller.h"
+#include "controller/notification_model.h"
 #include "controller/shortcut_table.h"
 #include "controller/tab_manager.h"
 #include "controller/workspace_controller.h"
@@ -28,6 +29,7 @@
 #include <wx/frame.h>
 #include <wx/timer.h>
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -83,6 +85,21 @@ class MainFrame : public wxFrame
     void on_about(wxCommandEvent& evt);
     void on_refresh(wxCommandEvent& evt); // F5（要件11.2）= オンデマンド再同期
 
+    // ウィンドウ終了（X/Alt+F4/終了メニュー）。未保存タブがあれば確認し、キャンセルなら Veto する
+    // （データを失わない。要件5.7・設計原則1）。
+    void on_close_window(wxCloseEvent& evt);
+
+    // 未保存タブの有無（終了/フォルダ切替の確認要否）。
+    bool has_unsaved_tabs() const;
+
+    // 未保存タブの保存/破棄/キャンセル確認。戻り値 true=継続してよい（保存済み or 破棄）、
+    // false=中断（キャンセル or 保存失敗）。閉じる/終了の経路はこの結果で進む/止める。
+    bool confirm_discard_unsaved(int tab_index); // 1 タブ分（閉じる経路）
+    bool confirm_discard_all_unsaved();          // 全タブ分（終了経路）
+
+    // index のタブを保存する（既存 on_save 経路を流用）。保存できたら true。
+    bool save_tab(int tab_index);
+
     // 差分（sprint5）。モード（ソース/分割/プレビュー）と差分トグルを直交させて WebView2 へ反映。
     void on_set_mode_source(wxCommandEvent& evt);
     void on_set_mode_split(wxCommandEvent& evt);
@@ -119,6 +136,20 @@ class MainFrame : public wxFrame
     void on_notebook_page_close(wxAuiNotebookEvent& evt);
     void on_sys_colour_changed(wxSysColourChangedEvent& evt);
 
+    // タブ見出しの状態記号（削除済み ＞ 未保存 ＞ 差分あり）を display_mark から結線する（ui-design
+    // 5章）。保存・確認・外部変更・ページ切替の各経路から呼んで SetPageText を更新する。
+    void refresh_tab_title(std::size_t index); // 1 タブ分
+    void refresh_all_tab_titles();             // 全タブ分（外部変更/一括確認の後）
+    // TabState から「状態記号＋ファイル名」の表示文字列（UTF-8）を組み立てる。
+    std::string tab_display_title(const controller::TabState& tab) const;
+
+    // 失敗・スキップを通知バー集約 ViewModel（notification_model）へ載せて再描画する。
+    // tab_path 空＝グローバル通知（タブ非依存）。detail 空なら種別の既定文言で表示する。
+    void push_notification(controller::NotificationKind kind, const std::string& tab_path,
+                           const std::string& detail);
+    // 通知集合をアクティブタブ文脈で集約し、通知バー領域へ反映する（最大3本＋他N件）。
+    void refresh_notifications();
+
     core::settings::Settings settings_;
     std::string workspace_; // 現在開いているワークスペース（絶対パス・空＝未オープン）
 
@@ -154,6 +185,11 @@ class MainFrame : public wxFrame
         bool has_bom = false;                           // BOM の有無（保存時に復元）
     };
     std::map<std::string, DocMeta> doc_meta_;
+
+    // 通知バー集約（sprint7 の notification_model を GUI へ結線。design 10章 J1）。失敗・スキップは
+    // ここへ積み、aggregate_notifications でアクティブタブ文脈に集約して通知バー領域へ描画する。
+    std::vector<controller::Notification> notifications_;
+    std::uint64_t notify_seq_ = 0; // 通知の投入順（同種・同一ファイルの最新判定。単調増加）
 };
 
 } // namespace pika::ui

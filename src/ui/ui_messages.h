@@ -8,6 +8,9 @@
 // 分離する）。ここは GUI 固有の文言（メニュー項目・ステータス書式）に限定する。
 #pragma once
 
+#include "controller/notification_model.h"
+
+#include <cstddef>
 #include <string>
 
 namespace pika::ui
@@ -45,8 +48,20 @@ enum class MsgId
     NotifyBlockedEncoding,    // 表現不能文字で保存中断（要件5.2・G2）
     NotifyBlockedUnstashable, // 退避不能で保存/巻き戻しをブロック（要件7.3・D3）
     NotifyStashFailed,        // 退避 I/O 失敗で上書き/確認をブロック（データを失わない）
-    EmptyNoFolder,            // 中央: フォルダ未オープンの空状態
-    NotificationArea          // 通知バー領域のアクセシブルネーム
+    NotifySaveIoFailed,       // 保存の書き込み失敗（再試行/別名保存/属性確認を促す。失っていない）
+    NotifyIndexSaveFailed, // 退避台帳(index.json)の保存失敗（退避 object は保存済み・再操作で復旧）
+    NotifyRollbackWriteFailed, // 巻き戻しの書き戻し失敗（退避済みで内容は安全・再試行を促す）
+    NotifyConfirmAllSkipped,   // すべて確認済みで一部スキップ（並行変化/退避失敗で未確認が残る）
+    ConfirmClosePrompt,        // タブを閉じる前の未保存確認（保存/破棄/キャンセル。要件5.7）
+    ConfirmExitPrompt,         // 終了前の未保存確認（保存して終了/保存しない/キャンセル。要件5.7）
+    ConfirmSave,               // 確認ダイアログのボタン: 保存
+    ConfirmSaveAll,            // 確認ダイアログのボタン: すべて保存
+    ConfirmDiscard,            // 確認ダイアログのボタン: 破棄
+    ConfirmDiscardExit,        // 確認ダイアログのボタン: 保存しない（終了）
+    ConfirmCancel,             // 確認ダイアログのボタン: キャンセル
+    OverflowNotices,           // 通知バーの「他N件」集約行（{n} は呼び出し側で差し込む）
+    EmptyNoFolder,             // 中央: フォルダ未オープンの空状態
+    NotificationArea           // 通知バー領域のアクセシブルネーム
 };
 
 // ID → 日本語文言（UTF-8）。未定義 ID は空文字を返さず ID 名を返さない（網羅を保つ）。
@@ -55,5 +70,16 @@ std::string message(MsgId id);
 // ステータスバー右下の書式（未読ファイル数）。要件11章「フォルダ内の未読ファイル数」。
 // count=0 のときは「未読なし」を返す。
 std::string status_unread(std::size_t count);
+
+// 「すべて確認済みにする」でスキップした件数つきの即時提示文言（全件完了の誤認防止。要件8.3）。
+// count=0 のときは空文字を返す（提示しない）。
+std::string notify_confirm_all_skipped(std::size_t count);
+
+// 通知バーの「他N件」集約行（design 10章 J1・ui-design 10章）。count=0 のときは空文字を返す。
+std::string notify_overflow(std::size_t count);
+
+// 通知バー集約 ViewModel の種別（controller::NotificationKind）→ 日本語の既定文言（UTF-8）。
+// NotificationRow.detail が空のとき通知バーが種別から出す文言（design 10章 K9・J1）。
+std::string notification_kind_label(controller::NotificationKind kind);
 
 } // namespace pika::ui
