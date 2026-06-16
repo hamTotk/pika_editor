@@ -1,0 +1,15 @@
+CHANGED:
+src/CMakeLists.txt
+tests/CMakeLists.txt
+src/controller/notification_model.cpp
+src/controller/notification_model.h
+src/controller/restore_plan.cpp
+src/controller/restore_plan.h
+src/controller/search_session.cpp
+src/controller/search_session.h
+src/controller/settings_view.cpp
+src/controller/settings_view.h
+tests/controller/notification_model_test.cpp
+tests/controller/restore_plan_test.cpp
+tests/controller/search_session_test.cpp
+tests/controller/settings_view_test.cpp

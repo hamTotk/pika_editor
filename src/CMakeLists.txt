@@ -57,6 +57,12 @@ find_path(DTL_INCLUDE_DIR NAMES dtl/dtl.hpp REQUIRED)
 # 退避結合の Result を握り潰さない・保存前の表現可能性/衝突検知/incoming 退避判定）と shortcut_table
 # （フォーカス別ショートカット・ディスパッチ表＝Ctrl+Enter/Ctrl+Shift+Enter/Ctrl+Alt+Enter。design 10章 J3）。
 # wx 依存の保存アトミック置換・確認済みの GUI 起動結線は src/ui 側（系統B）が担う。
+# sprint7（周辺機能の肉付け）では、状態復元/通知集約/検索/設定反映の判断のうち wx 非依存に切り出せる部分を
+# controller に足す：restore_plan（AppState→UI 復元素材・未知version安全側・モード正規化）・
+# notification_model（最大3本＋他N件・優先順位・同一ファイル/同一種別の最新集約・タブ固有/グローバル）・
+# search_session（SearchEngine 結線＋ヒットのカーソル遷移＝次へ/前へ・折り返し）・settings_view
+# （load_settings 結果→UI 設定の純粋写像・parse破損は直前値維持・warnings 件数を通知へ。読み取り専用）。
+# wx 依存の検索パネル/設定監視 I/O/状態復元の実結線は src/ui・src/app 側（系統B/C）が担う。
 add_library(pika_core STATIC
     controller/app_controller.cpp
     controller/app_controller.h
@@ -70,8 +76,16 @@ add_library(pika_core STATIC
     controller/document_controller.h
     controller/editor_view_model.cpp
     controller/editor_view_model.h
+    controller/notification_model.cpp
+    controller/notification_model.h
     controller/preview_builder.cpp
     controller/preview_builder.h
+    controller/restore_plan.cpp
+    controller/restore_plan.h
+    controller/search_session.cpp
+    controller/search_session.h
+    controller/settings_view.cpp
+    controller/settings_view.h
     controller/shortcut_table.cpp
     controller/shortcut_table.h
     controller/tab_manager.cpp

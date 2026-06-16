@@ -1,0 +1,21 @@
+{
+  "reviewer": "product",
+  "sprint_id": 7,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "ユーザー価値/規約整合",
+      "message": "recent クランプの『先頭が新しい順』前提が core/state/state_io.cpp と controller/restore_plan.cpp の 2 箇所に同一ロジックで分散している。sprint7 must#1 の目的（state.json から最近項目を正しく復元）に対しては現状で価値が出ており criteria 充足は問題ないが、将来 MRU の並び順規約（先頭=新/旧）が片方だけ変わると、ユーザーに復元される『最近使った項目』の並びが永続化時と復元時でズレ、最近項目という機能の価値が静かに毀損する。規約の正本（core 側）に一本化し controller は再利用するのが価値の整合上望ましい。コード品質（DRY/YAGNI）の判断は d_quality 観点に委ね、product としては『順序規約の二重持ちがユーザー価値（復元される最近順）に効く』点のみ指摘する。",
+      "location": "src/controller/restore_plan.cpp:13"
+    },
+    {
+      "severity": "low",
+      "area": "スコープ/価値の透明性",
+      "message": "sprint7 must#3 は『検索/置換ロジックの結線…置換適用を決定論部分でテスト』までを範囲とし、要件5.4 の『第2段階(200MB超)で置換無効化』『置換はソース・分割のみ（差分は読み取り専用）』という置換可否ゲートは should（巨大ファイル段階制・第2段階の置換UI無効化）および GUI（系統B）側へ退避している。この分割自体は spec の検証戦略（wx 非依存ロジック=must / UI gating=系統B）と整合し過少ではない。ただし SearchSession には置換可否の判断点が無く UiSettings が閾値を運ぶのみのため、後続スプリントで『差分モード/第2段階での置換抑止』の所在が曖昧になり、誤って置換が走る（読み取り専用の意図に反する操作）リスクが残る。価値（誤操作で読み取り専用文書を書き換えない）を確実にするため、置換可否ゲートの責務所在を turn report か後続 sprint criteria に明示しておくことを提案する（現スプリントの合否には影響しない）。",
+      "location": "src/controller/search_session.h:42"
+    }
+  ],
+  "has_critical": false,
+  "summary": "product 観点での重大な問題なし。spec の目的（中心体験貫通後の周辺機能肉付け）→ sprint7 goal（状態復元の組み立て / 通知バー集約 ViewModel / 検索置換結線 / settings 監視反映）→ 4 つの must criteria が一直線で、目的のすり替えは無い。各 criteria は『機能の存在』ではなく観測可能な挙動（優先順位整列と他N件集約、同一ファイル・同種別の最新集約、未知 version は復元しない安全側、parse_ok=false で apply=false の直前値維持、next/prev の折り返し）をテストで測れており、形式充足で価値を外す抜け道は見当たらない。スコープも変更4ファイル+テスト+CMake のみで goal に正対し、過剰な抽象や要求外の設定追加（gold plating）は無い。最近使った項目/ジャンプリスト/巨大ファイル段階制UIは should・系統B へ正しく退避。『データを失わない』最上位原則も settings 構文破損時の非適用・未知 version 非復元・検索 cancelled/truncated 透過として UI 側に反映されている。残す findings は low 2件（recent 順序規約の二重持ちが将来の復元順の価値に効く点 / 置換可否ゲートの責務所在の明示提案）で、いずれも合否をブロックしない改善提案。"
+}

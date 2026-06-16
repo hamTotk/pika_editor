@@ -1,0 +1,33 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 7,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "エラー回復支援(Nielsen #9)",
+      "message": "settings.toml の不正値警告で「どの項目が」の情報が UI へ届かない。core/settings::LoadResult.warnings は不正だった設定キー名(配列)を持ち、settings.h:120 のコメントも『UI は通知バーで警告表示』『warnings に項目名(キー)を積む』と明記している。しかし apply_settings() は warning_count = load.warnings.size() と件数だけに畳み、SettingsApplyResult にキー名(load.warnings)を一切伝えていない。結果として通知バー集約(NotificationKind::SettingsError)が出せるのは『設定エラー N 件』止まりで、ユーザーは settings.toml のどの項目を直せばよいか分からない。エラーは『何が・なぜ・どうすればよいか』を示すべきで(ux チェックリスト/Nielsen #9)、ここは『何が』が構造的に欠落している。SettingsApplyResult に警告キー列(例: std::vector<std::string> warning_keys)を透過し、通知/ログへ流せる素材を渡すべき。なお『直前値維持・既定フォールバックでアプリは継続』『settings.toml を直接見れば直せる』ため主要タスクの導線破綻ではなく critical ではない。",
+      "location": "src/controller/settings_view.cpp:60"
+    },
+    {
+      "severity": "medium",
+      "area": "システム状態の可視化(Nielsen #1)",
+      "message": "検索のカーソル遷移 NavTarget が打ち切り(truncated)を伝えず、ステータス『i/総数』が誤った総数になり得る。next_match/prev_match は total を result.matches.size() から設定するが、SearchResult.truncated(複雑度上限/件数上限/入力過大)を NavTarget へ渡していない。core/search の search_types.h:32-33 は truncated を『UI が「先頭N件」「式を見直してください」等を出し分けるため』と明記しており、打ち切り時の total は全件ではなく打ち切り件数である。GUI が『i/N』をそのまま出すと、ユーザーは全件中の位置だと誤認する。find_all の Result(truncated/cancelled)は別経路で GUI へ透過される設計のため致命ではないが、遷移結果と件数表示の素材が NavTarget に閉じていない点で情報設計上のギャップ。NavTarget に truncated/total_is_partial を持たせ『i/N+(打ち切り)』を出せる素材を与えると一貫する。",
+      "location": "src/controller/search_session.cpp:23"
+    },
+    {
+      "severity": "low",
+      "area": "フィードバック(検索0件/折り返し)",
+      "message": "検索のヒット0件(found=false,total=0)と折り返し(wrapped=true)の素材は NavTarget に揃っており、GUI が『一致なし』『先頭/末尾へ折り返しました』を出せる前提は満たしている。一方その文言表現は sprint8 の Empty 状態/単一メッセージ定義側に委ねられている。本スプリント範囲では問題なし。次スプリントで、検索0件時に『大文字小文字/正規表現の切替を試す』等の次の一手提示まで含めると回復支援が完成する(任意)。",
+      "location": "src/controller/search_session.cpp:23"
+    },
+    {
+      "severity": "low",
+      "area": "ユーザーの制御と自由(行き止まり防止)",
+      "message": "RestorePlan は未知versionで restorable=false=既定起動、壊れたウィンドウジオメトリは has_window_geometry=false で OS 既定に委ね、active_tab 範囲外は -1 へクランプと、復元失敗時にユーザーを行き止まり(空白画面/画面外ウィンドウ)へ落とさない安全側設計が一貫しており ux 上良好。懸念は『タブは存在するが active_tab=-1(どれも非アクティブ)』を GUI(系統B/sprint3)が安全に表示できるかのみで、これは配線層の責務。本層は素材を正しく渡せている。指摘というより確認事項。",
+      "location": "src/controller/restore_plan.cpp:97"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint7 の controller 4 本(通知集約/状態復元/検索/設定反映)を ux(フロー・エラー文言・情報設計)で確認。通知集約と状態復元は優先順位/overflow/安全側既定が ui-design に沿って堅実。最大の懸念は settings_view::apply_settings が不正設定の『キー名』を件数に畳んでしまい、通知バーが『設定エラー N 件』しか出せず、ユーザーがどの設定を直すべきか分からない点(high・Nielsen #9 のエラー回復支援の情報落ち。ただし直前値維持でアプリは継続でき導線破綻ではないため critical ではない)。次点は検索遷移 NavTarget が打ち切り(truncated)を伝えず件数表示が誤り得る点(medium)。critical(主要タスク完了不能/データ喪失)に該当する findings はゼロ。"
+}

@@ -1,0 +1,33 @@
+{
+  "score": 97,
+  "plan_implementation": {
+    "overall": 100,
+    "notes": "sprint7 must 5件すべて充足。must#1 状態復元(restore_plan: 未知version非復元・欠落既定値補完・モード正規化・active_tab/recent/window クランプを純粋関数で実装、build_restore_plan/normalize_mode/normalize_theme をテストで観測)、must#2 通知集約(notification_model: 最大3本+他N件 overflow・優先順位 Conflict>SettingsError>RemoteResource>JsDetected>BigFile・同一ファイル/同種別の seq最大集約・タブ固有/グローバル切替を aggregate_notifications でテスト観測)、must#3 検索/置換結線(search_session: SearchEngine への find_all/replace_all 委譲と Result/truncated/cancelled 透過、next_match/prev_match のカーソル遷移・折り返し・置換キャプチャ参照をテスト観測)、must#4 settings 反映(settings_view: load_settings 結果の純粋写像・parse_ok=false は apply=false で直前値維持・書き戻さない不変性をテスト観測)、must#5 ビルド+ctest PASS は verify で確認済み。should は restore_plan の recent クランプ core 再利用・安全側既定など controller 層分を満たし、最近項目/ジャンプリスト配線・テーマ再適用・巨大ファイル段階制UIは spec の検証戦略通り GUI(系統B)/手動(系統C)へ正しく退避。"
+  },
+  "quality": {
+    "overall": 97,
+    "breakdown": {"d_verify": 100, "d_accept": 100, "d_quality": 90},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[合格] sprint7(周辺機能=状態復元/通知集約/検索結線/設定反映)は全次元が足切り以上。d_verify=100(ctest --preset x64-core-test と cmake --build --preset x64-release がともに exit 0)、d_accept=100(must 5件を4つの wx非依存純粋ロジックとして実装し決定論テストで観測。テスト改竄=skip/DISABLED/緩和は皆無、4ソースは pika_core・4テストは pika_tests に登録済み)、d_review=100(security/frontend-ui/ux/product 全レビュワーが has_critical=false)、d_quality=90。score=97。 [high] 合否はブロックしないが次ターンの GUI 配線前に素材設計を補強すると良い2点: (1) ux指摘 settings_view::apply_settings が不正設定のキー名(core/settings LoadResult.warnings)を warning_count の件数に畳んでおり、通知バーが『設定エラー N件』止まりで『どの項目を直すか』をユーザーに示せない。SettingsApplyResult に warning_keys を透過するとエラー回復支援が完成する。(2) frontend-ui指摘 NotificationRow に『この行を警告扱いにするか』の意味フラグ(is_alert/emphasis)が無く、衝突(データ損失リスク)の色非依存警告表現が完全に描画側の kind==Conflict 再判定任せになっている。ViewModel段で意味フラグを返すと描画側で色のみ強調へ退化する事故を構造的に防げる。 [medium] 検索遷移 NavTarget が SearchResult.truncated を伝えず、ステータス『i/総数』が打ち切り時に誤総数になりうる(NavTarget に truncated/total_is_partial を持たせる素材追加を推奨)。 [low] recent の『先頭=最新』順序前提が core/state/state_io.cpp と controller/restore_plan.cpp に二重持ちで将来の復元順ズレ懸念/置換可否ゲート(差分=読み取り専用・第2段階で置換無効)の責務所在を後続criteriaに明示/restore_plan が state.json 由来パスを未検証転写するため GUI/app層で dir_lister の root越境遮断を必ず通すことを明示/検索0件時の次の一手提示。",
+  "feedback_structured": {
+    "high": [
+      {"area": "ux/エラー回復支援(Nielsen #9)", "message": "settings_view::apply_settings(settings_view.cpp:60) が不正設定の『キー名』(core/settings LoadResult.warnings)を warning_count の件数だけに畳み、SettingsApplyResult にキー列を渡していない。通知バー(SettingsError)が『設定エラー N件』止まりになりユーザーがどの項目を直せばよいか分からない。SettingsApplyResult に warning_keys(vector<string>)を透過すべき。直前値維持でアプリは継続できるため critical ではない。"},
+      {"area": "frontend-ui/色非依存の警告表現", "message": "NotificationRow(notification_model.h:53) に『警告扱いか』の意味フラグ(is_alert/emphasis)が無く、衝突(データ損失リスク)の色以外の冗長手掛かりの担保が描画側 kind==Conflict 再判定に完全依存。ViewModel 段で意味フラグを返せば描画側で色のみ強調へ退化する事故を構造的に防げる(ui-design 10章。当スプリントは描画コードを含まないため high)。"}
+    ],
+    "medium": [
+      {"area": "ux/システム状態の可視化(Nielsen #1)", "message": "next_match/prev_match の NavTarget(search_session.cpp:23) が SearchResult.truncated を伝えず、total を matches.size() で設定するため打ち切り時に GUI の『i/総数』が誤った総数になりうる。NavTarget に truncated/total_is_partial を持たせ『i/N+(打ち切り)』を出せる素材を与えると一貫する。"}
+    ],
+    "low": [
+      {"area": "product/DRY・復元順の価値", "message": "recent の『先頭=最新』順序前提が core/state/state_io.cpp と controller/restore_plan.cpp:13 に同一ロジックで二重持ち。片方だけ規約が変わると復元される最近順がズレる。core側に一本化し controller は再利用するのが整合的。"},
+      {"area": "product/置換可否ゲートの責務所在", "message": "search_session(search_session.h:42) に置換可否の判断点が無く、要件5.4の『差分=読み取り専用』『第2段階(200MB超)で置換無効』ゲートの所在が後続スプリントで曖昧になりうる。置換可否ゲートの責務所在を turn report か後続 sprint criteria に明示すると誤って置換が走るリスクを避けられる。"},
+      {"area": "security/second-order パス検証の責務明示", "message": "build_restore_plan(restore_plan.cpp:84) は state.json 由来パス(tab.path・last_workspace・tree_expanded 相対パス・recent)を検証せず RestorePlan へ転写。本スプリント内では injection sink に届かず同一ユーザー権限境界で実害は薄いが、将来 GUI が tree_expanded を root連結でツリー解決する際に '../' トラバーサルが入りうる。パス絶対化・root越境遮断は GUI/app 層の責務として明示し dir_lister の既存遮断を必ず通すこと。"},
+      {"area": "frontend-ui/Empty 状態の素材順序", "message": "clamp_recent の『先頭=最新』順序前提が消費側(Empty 状態 CTA・sprint8 ViewState)との境界で明文化されておらず、前提が崩れると Empty の CTA が古い項目を優先表示しうる。ViewModel コメントに消費側契約として残すと安全(restore_plan.cpp:13)。"},
+      {"area": "frontend-ui/overflow 内高優先の素材", "message": "aggregate_notifications(notification_model.cpp:67) は overflow 件数を返すが、overflow に高優先(Conflict 等)が含まれる場合のメタ(overflow 内最高優先 kind)が無い。色非依存の警告到達性を上げるための任意改善。"},
+      {"area": "ux/検索0件の次の一手", "message": "検索0件(found=false,total=0)・折り返し(wrapped)の素材は NavTarget に揃っているが、0件時に『大文字小文字/正規表現の切替を試す』等の次の一手提示まで含めると回復支援が完成する(sprint8 の Empty 状態/単一メッセージ定義側で対応・任意)。"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

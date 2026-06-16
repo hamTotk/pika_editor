@@ -1,0 +1,15 @@
+{
+  "reviewer": "security",
+  "sprint_id": 7,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "second-order 入力 / パス処理",
+      "message": "build_restore_plan は state.json 由来のパス文字列(tab.path・last_workspace・tree_expanded の相対パス・recent_files/folders)を検証・正規化せずそのまま RestorePlan へ転写する(restore_plan.cpp:84-114)。state.json は改竄されうる永続入力(second-order)で、これらの値は下流の GUI/app 層で実ファイルオープン sink に到達する。本スプリント内では injection sink に届かず、データルートは %LOCALAPPDATA% 配下の同一ユーザー権限境界(攻撃者は既に同権限を持つローカル個人ツール)で特権境界を越えないため実害は薄く critical/high に当たらない。ただし tree_expanded は相対パス契約のため、将来 GUI が root 連結でツリー節点を解決する際に '../' トラバーサルが入りうる。本層は restorable/version/active_tab/recent クランプ等の安全ガードは適切に持つので、パス検証(絶対化・root 越境遮断)は GUI/app 層の責務として明示し、そこで dir_lister 既存の root 越境遮断を必ず通すことを担保するとよい。", 
+      "location": "src/controller/restore_plan.cpp:84"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint7(周辺機能=状態復元/通知集約/検索結線/設定反映)の security 観点で critical は無し。(1)settings_view は core/settings の読み取り専用ロード結果を純粋写像するのみで書き戻さず(テストで不変性を確認)、不正値クランプ・parse破損時の直前値維持・allow_remote_resources のオプトイン制御は core 側で確立済みを faithful に伝播。(2)search_session は SearchEngine の既定 SearchLimits(match_limit=10M/depth_limit=10K/max_total_bytes=200MB/max_matches=1M)を弱めず、自己ReDoS(破滅的バックトラック)ガードと truncated/cancelled をそのまま透過(バイパスなし)。(3)restore_plan は未知version=復元しない・active_tab/recent/window ジオメトリのクランプで DoS/クラッシュ面を塞ぐ。(4)notification_model は detail にファイル内容を載せない診断ログ規約を守り、集約は純粋な整列・件数集計で injection sink 無し。(5)CMakeLists は新規依存追加なし・/W4/WX 維持・ビルド設定の弱化なし。機密ハードコード無し・未検証外部入力の injection/RCE 到達無し・認可境界無し(ローカル単一ユーザーツール)。唯一の指摘は state.json 由来パスの検証を GUI/app 層の責務として明示する low の念押しのみ。"
+}
