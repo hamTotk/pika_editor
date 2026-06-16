@@ -232,6 +232,66 @@ TEST(DecideInstanceTest, ClientTransfersFolderTarget)
     EXPECT_EQ(back.targets[0].path, "C:\\repo"); // フォルダも絶対パスで転送される
 }
 
+// ---- fail-closed: セキュアな単一インスタンス保護を構築できない場合の縮退（要件3.2） ----
+
+TEST(DecideInstanceTest, InsecureIsolationFallsBackToStandaloneServer)
+{
+    // SID 取得失敗・owner-only DACL 構築失敗等で per-user パイプ名/owner-only DACL を作れない場合、
+    // owner-less パイプを公開する fail-open へ落とさず、IPC を一切張らないスタンドアロン起動
+    // （主インスタンス＝Server・転送しない）へ縮退する。
+    InstanceContext inst;
+    inst.secure_isolation_available = false;
+    inst.user_sid = ""; // SID 取得失敗を模す。
+
+    OpenPlan plan;
+    plan.accepted = true;
+    pika::core::ipc::OpenTarget t;
+    t.path = "C:\\src\\main.cpp";
+    plan.file_targets.push_back(t);
+
+    auto d = decide_instance(inst, plan);
+    EXPECT_EQ(d.role, InstanceRole::Server); // 主インスタンスとして開く（クライアントにしない）
+    EXPECT_TRUE(d.transfer_json.empty());    // 転送しない（存在しないサーバーへ送らない）
+}
+
+TEST(DecideInstanceTest, InsecureIsolationOverridesPipeAcquiredFalse)
+{
+    // pipe_acquired=false（通常ならクライアント）でも、セキュア化不能なら転送経路に落とさない。
+    // この分岐がなければ敗者クライアントとして owner-less/不在サーバーへ転送しに行きハングしうる。
+    InstanceContext inst;
+    inst.secure_isolation_available = false;
+    inst.pipe_acquired = false;
+    inst.user_sid = "";
+
+    OpenPlan plan;
+    plan.accepted = true;
+    plan.folder = "C:\\repo";
+
+    auto d = decide_instance(inst, plan);
+    EXPECT_EQ(d.role, InstanceRole::Server); // セキュア化不能は pipe_acquired より優先
+    EXPECT_TRUE(d.transfer_json.empty());
+}
+
+TEST(DecideInstanceTest, SecureAvailableKeepsExistingClientBehavior)
+{
+    // 正常系（secure_isolation_available=true・既定値）は従来どおり pipe_acquired で分岐する
+    // （セキュア化成功時の挙動は一切変えない）。
+    InstanceContext inst;
+    inst.pipe_acquired = false; // 既存インスタンスあり
+    inst.user_sid = "S-1-5-21-7-7-7-1001";
+    // secure_isolation_available は既定 true（明示せず正常系を確認）。
+
+    OpenPlan plan;
+    plan.accepted = true;
+    pika::core::ipc::OpenTarget t;
+    t.path = "C:\\a.md";
+    plan.file_targets.push_back(t);
+
+    auto d = decide_instance(inst, plan);
+    EXPECT_EQ(d.role, InstanceRole::Client); // セキュア化成功時は従来どおりクライアント
+    EXPECT_FALSE(d.transfer_json.empty());   // 転送 JSON を組み立てる
+}
+
 // ---- 起動手順の順序（should: design.md 5.1） ----
 
 TEST(StartupSequenceTest, MatchesDesignOrder)

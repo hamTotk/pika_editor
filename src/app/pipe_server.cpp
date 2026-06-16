@@ -55,7 +55,7 @@ PipeServer::~PipeServer()
     stop();
 }
 
-bool PipeServer::try_acquire(const std::string& pipe_name, const std::string& owner_sddl)
+AcquireResult PipeServer::try_acquire(const std::string& pipe_name, const std::string& owner_sddl)
 {
     pipe_name_ = pipe_name;
     owner_sddl_ = owner_sddl;
@@ -67,7 +67,19 @@ bool PipeServer::try_acquire(const std::string& pipe_name, const std::string& ow
     PSECURITY_DESCRIPTOR sd = nullptr;
     const bool sd_ok = ConvertStringSecurityDescriptorToSecurityDescriptorA(
         owner_sddl.c_str(), SDDL_REVISION_1, &sd, nullptr);
-    sa.lpSecurityDescriptor = sd_ok ? sd : nullptr;
+
+    // fail-closed（要件3.2）: owner-only DACL の SECURITY_DESCRIPTOR を構築できないときは、
+    // nullptr（SECURITY_ATTRIBUTES 不指定＝既定 DACL）へフォールバックして既定 DACL のパイプを
+    // 作る経路を撤廃する。owner-less パイプを公開すると『作成者ユーザーのみ許可する owner-only
+    // DACL』が黙って外れる（fail-open）ため、パイプを一切作らず InsecureNotCreated を返す。
+    // 呼び出し側（main_gui）はこれをスタンドアロン縮退として扱い、IPC を張らずに自分で開く。
+    if (!sd_ok)
+    {
+        // ConvertString... が失敗した場合 sd は未確定なので LocalFree しない（失敗時は確保なし）。
+        acquired_ = false;
+        return AcquireResult::InsecureNotCreated;
+    }
+    sa.lpSecurityDescriptor = sd;
 
     const core::ipc::PipeOpenPolicy policy = core::ipc::default_policy();
     DWORD open_mode = PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED;
@@ -84,17 +96,15 @@ bool PipeServer::try_acquire(const std::string& pipe_name, const std::string& ow
 
     // FILE_FLAG_FIRST_PIPE_INSTANCE: 最初の 1 プロセスだけが作成に成功する（原子的ロック）。
     // 既存インスタンスがあれば ERROR_ACCESS_DENIED で失敗＝このプロセスはクライアント。
+    // owner-only DACL の SECURITY_DESCRIPTOR を必ず指定する（既定 DACL へは決して落ちない）。
     pipe_ = CreateNamedPipeA(pipe_name.c_str(), open_mode, pipe_mode,
                              /*nMaxInstances*/ 1, /*nOutBufferSize*/ 0, in_buffer,
-                             /*nDefaultTimeOut*/ 0, sd_ok ? &sa : nullptr);
+                             /*nDefaultTimeOut*/ 0, &sa);
 
-    if (sd != nullptr)
-    {
-        LocalFree(sd);
-    }
+    LocalFree(sd);
 
     acquired_ = (pipe_ != INVALID_HANDLE_VALUE);
-    return acquired_;
+    return acquired_ ? AcquireResult::Server : AcquireResult::Client;
 }
 
 void PipeServer::start_listening(OnRequestLine on_line)

@@ -101,6 +101,18 @@ InstanceDecision decide_instance(const InstanceContext& inst, const OpenPlan& pl
     InstanceDecision out;
     out.pipe_name = core::ipc::make_pipe_name(inst.user_sid);
 
+    if (!inst.secure_isolation_available)
+    {
+        // セキュアな単一インスタンス保護（per-user パイプ名＋owner-only DACL）を構築できない
+        // （SID 取得失敗・owner-only SECURITY_DESCRIPTOR 構築失敗）。owner-less パイプを公開せず、
+        // 敗者クライアントとして存在しない/不正なサーバーへ転送しに行く経路にも落とさないため、
+        // IPC を一切張らず主インスタンスとして開くスタンドアロン起動へ縮退する（fail-closed。
+        // 要件3.2）。pipe_acquired は無視し、転送 JSON は空のまま（呼び出し側は try_acquire/
+        // 転送を行わない）。
+        out.role = InstanceRole::Server;
+        return out;
+    }
+
     if (inst.pipe_acquired)
     {
         // 原子的ロックを獲得＝サーバー兼ウィンドウ（design.md 5.1 手順2）。

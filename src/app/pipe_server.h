@@ -29,6 +29,19 @@ namespace pika::app
 // パイプ名・SDDL の SID 部に使う（make_pipe_name/make_owner_only_sddl へ渡す）。
 std::string current_user_sid();
 
+// try_acquire の結果（3 値）。呼び出し側（main_gui）が役割決定へ橋渡しする。
+enum class AcquireResult
+{
+    // FILE_FLAG_FIRST_PIPE_INSTANCE で最初に作成成功＝このプロセスがサーバー。
+    Server,
+    // 作成失敗（既存インスタンスあり）＝このプロセスはクライアント（引数を転送する）。
+    Client,
+    // owner-only DACL の SECURITY_DESCRIPTOR を構築できず、既定 DACL へフォールバックせずに
+    // パイプを未作成にした（fail-closed）。owner-less パイプは絶対に公開しない。呼び出し側は
+    // これをスタンドアロン縮退（IPC を張らず主インスタンスとして開く）として扱うこと。
+    InsecureNotCreated,
+};
+
 // サーバー側: 受信した 1 行 JSON（信頼境界）を受け取るコールバック。
 // 呼び出しは内部のリスナースレッドから来るため、実装は UI スレッドへマーシャリングすること
 // （MainFrame 側は CallAfter で UI スレッドへ渡す）。
@@ -46,9 +59,14 @@ class PipeServer
     PipeServer& operator=(const PipeServer&) = delete;
 
     // pipe_name のパイプを FILE_FLAG_FIRST_PIPE_INSTANCE で作成しロックを試みる（owner-only DACL・
-    // PIPE_REJECT_REMOTE_CLIENTS）。成功＝このプロセスがサーバー（戻り値 true）。失敗（既存あり）＝
-    // クライアント（false）。サーバーになれた場合のみ on_line を保持する（公開＝start_listening）。
-    bool try_acquire(const std::string& pipe_name, const std::string& owner_sddl);
+    // PIPE_REJECT_REMOTE_CLIENTS）。
+    //  - 作成成功 → AcquireResult::Server（このプロセスがサーバー。acquired()=true）。
+    //  - 作成失敗（既存あり） → AcquireResult::Client（このプロセスはクライアント）。
+    //  - owner-only DACL の SECURITY_DESCRIPTOR を構築できない → 既定 DACL へフォールバックせず
+    //    パイプを作らず AcquireResult::InsecureNotCreated を返す（fail-closed。owner-less パイプを
+    //    公開しない。要件3.2）。呼び出し側はスタンドアロン縮退として扱う。
+    // サーバーになれた場合のみ on_line を保持できる（公開＝start_listening）。
+    AcquireResult try_acquire(const std::string& pipe_name, const std::string& owner_sddl);
 
     // ロックを獲得できたか（サーバーか）。
     bool acquired() const noexcept { return acquired_; }
