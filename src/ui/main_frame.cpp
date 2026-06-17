@@ -143,7 +143,7 @@ void MainFrame::build_menu()
     review_menu->Append(ID_CONFIRM, u8(MsgId::MenuConfirm));
     review_menu->Append(ID_CONFIRM_ALL, u8(MsgId::MenuConfirmAll));
     review_menu->Append(ID_ROLLBACK, u8(MsgId::MenuRollback));
-    menu_bar->Append(review_menu, "レビュー(&R)");
+    menu_bar->Append(review_menu, u8(MsgId::MenuReview));
 
     auto* view_menu = new wxMenu();
     // 再読み込み（F5）。監視不能環境/取りこぼし時のオンデマンド再同期（要件11.2・design 5.2）。
@@ -955,24 +955,23 @@ void MainFrame::update_preview()
     if (main_split)
     {
         const bool need_both = layout.show_editor && layout.webview_active;
-        if (main_split->IsSplit())
+        // 単一ペイン間の遷移（プレビューのみ⇔ソースのみ）でも確実に出し分けるため、まず「分割」へ
+        // 正規化してから不要側を Unsplit で畳む。Initialize による単一窓の差し替えは再描画/サイズ
+        // 更新が安定せず、プレビュー単独で固まる（実機 F-003）。
+        main_split->Freeze();
+        if (!main_split->IsSplit())
         {
-            main_split->Unsplit(); // いったん解消してから必要構成へ組み直す
+            main_split->SplitVertically(notebook_, preview_, -360);
         }
-        notebook_->Show(layout.show_editor || !layout.webview_active);
-        preview_->Show(layout.webview_active);
-        if (need_both)
+        notebook_->Show(true);
+        preview_->Show(true);
+        if (!need_both)
         {
-            main_split->SplitVertically(notebook_, preview_, -360); // 分割（エディタ＋プレビュー）
+            // プレビュー/差分のみならエディタを、ソースのみならプレビューを畳む。
+            main_split->Unsplit(layout.webview_active ? static_cast<wxWindow*>(notebook_)
+                                                      : static_cast<wxWindow*>(preview_));
         }
-        else if (layout.webview_active)
-        {
-            main_split->Initialize(preview_); // 差分面のみ/プレビューのみ
-        }
-        else
-        {
-            main_split->Initialize(notebook_); // ソース（エディタのみ）
-        }
+        main_split->Thaw();
     }
     if (!layout.webview_active)
     {
@@ -1042,6 +1041,13 @@ void MainFrame::on_preview_navigate(const std::string& url)
     }
     // 委譲先スキームは許可リストで絞る（多層防御）。file:/UNC/カスタムプロトコルの自動起動を防ぐ。
     auto starts_with = [&url](const char* p) { return url.rfind(p, 0) == 0; };
+    // 内部仮想ホスト（プレビュー本体・同梱アセット・相対リンク）は外部ブラウザへ出さない。
+    // 相対 .md/.html のタブ解決は後続（B7 精緻化）。現状は誤起動を防いで無視する。
+    if (starts_with("https://doc.pika/") || starts_with("https://app.pika/") ||
+        starts_with("data:"))
+    {
+        return;
+    }
     if (starts_with("http://") || starts_with("https://") || starts_with("mailto:"))
     {
         wxLaunchDefaultBrowser(u8(url));
