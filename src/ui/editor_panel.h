@@ -13,6 +13,7 @@
 #include <wx/stc/stc.h>
 #include <wx/window.h>
 
+#include <functional>
 #include <string>
 
 namespace pika::ui
@@ -34,6 +35,23 @@ class EditorPanel : public wxStyledTextCtrl
 
     // 編集の有無（未保存判定。SCI のモディファイ状態）。
     bool is_dirty() const;
+
+    // dirty 変化の通知コールバック（true=未保存になった/false=クリーンに戻った）。
+    // Scintilla の savepoint 通知（SAVEPOINTLEFT/SAVEPOINTREACHED）から呼ぶ。
+    // MainFrame が TabManager の未保存フラグ・タブ記号へ結線する（design 5.3・要件5.3）。
+    void set_on_dirty_changed(std::function<void(bool)> cb);
+
+    // 保存成功後にクリーン状態を確定する（SCI の savepoint を現在位置へ張り直す）。
+    // 以後の編集で再び SAVEPOINTLEFT が発火し、未保存記号が付くようにする。
+    void mark_clean();
+
+  private:
+    // 編集で savepoint を離れた＝dirty。
+    void on_save_point_left(wxStyledTextEvent& evt);
+    // undo 等で savepoint に戻った＝clean。
+    void on_save_point_reached(wxStyledTextEvent& evt);
+
+    std::function<void(bool)> on_dirty_changed_;
 };
 
 } // namespace pika::ui

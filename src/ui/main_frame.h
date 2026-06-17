@@ -143,6 +143,10 @@ class MainFrame : public wxFrame
     void on_notebook_page_close(wxAuiNotebookEvent& evt);
     void on_sys_colour_changed(wxSysColourChangedEvent& evt);
 
+    // エディタの dirty 変化（Scintilla savepoint 通知）を TabManager の未保存フラグへ反映し、
+    // タブ記号・ステータスを更新する（F-010。閉じ/終了確認の前提となる dirty 結線。設計原則1）。
+    void on_editor_dirty_changed(const std::string& abs, bool dirty);
+
     // タブ見出しの状態記号（削除済み ＞ 未保存 ＞ 差分あり）を display_mark から結線する（ui-design
     // 5章）。保存・確認・外部変更・ページ切替の各経路から呼んで SetPageText を更新する。
     void refresh_tab_title(std::size_t index); // 1 タブ分

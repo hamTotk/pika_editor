@@ -215,9 +215,11 @@ void MainFrame::build_layout()
     auto* main_split = new wxSplitterWindow(splitter, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                             wxSP_LIVE_UPDATE | wxSP_3DSASH);
 
+    // C7: タブ溢れ時に全タブ一覧ドロップダウン（WINDOWLIST_BUTTON）を出す。
+    // 隠れた未読タブのバッジ表示はカスタム wxAuiTabArt が必要なため今回はやらない（後回し）。
     notebook_ = new wxAuiNotebook(main_split, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                   wxAUI_NB_TOP | wxAUI_NB_TAB_MOVE | wxAUI_NB_SCROLL_BUTTONS |
-                                      wxAUI_NB_CLOSE_ON_ACTIVE_TAB);
+                                      wxAUI_NB_WINDOWLIST_BUTTON | wxAUI_NB_CLOSE_ON_ACTIVE_TAB);
     notebook_->Bind(wxEVT_AUINOTEBOOK_PAGE_CHANGED, &MainFrame::on_notebook_page_changed, this);
     notebook_->Bind(wxEVT_AUINOTEBOOK_PAGE_CLOSE, &MainFrame::on_notebook_page_close, this);
 
@@ -456,6 +458,19 @@ void MainFrame::open_file(const std::string& file_abs)
     notebook_->AddPage(editor, u8(title), /*select*/ true);
     // 追加直後に状態記号を反映する（新規タブは記号なしだが、経路を 1 本化する）。
     refresh_tab_title(idx);
+    // dirty 結線（F-010）。set_text_utf8 が clean savepoint を張った後に束縛するので、初期ロード
+    // で dirty=true は飛ばない（SAVEPOINTREACHED が来ても false で実害なし）。以後の編集で
+    // savepoint を離れると未保存フラグ・タブ記号へ反映される（設計原則1の前提）。
+    editor->set_on_dirty_changed(
+        [this, file_abs](bool dirty) { on_editor_dirty_changed(file_abs, dirty); });
+    update_status();
+}
+
+void MainFrame::on_editor_dirty_changed(const std::string& abs, bool dirty)
+{
+    // Scintilla の savepoint 通知 → TabManager の未保存フラグ → タブ記号（● 未保存）へ反映する。
+    tabs_.set_unsaved(abs, dirty);
+    refresh_tab_title(tabs_.index_of(abs));
     update_status();
 }
 
@@ -754,6 +769,8 @@ controller::SaveDecision MainFrame::perform_save(EditorPanel* editor, const std:
         mit->second.has_bom = with_bom;
     }
     tabs_.set_unsaved(abs, false);
+    // Scintilla 内部の dirty もリセットして savepoint を張り直す（保存後の再編集で再び ● が付く）。
+    editor->mark_clean();
     refresh_tab_title(tabs_.index_of(abs));
     if (plan.conflict)
     {
