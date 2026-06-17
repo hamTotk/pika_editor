@@ -632,8 +632,7 @@ void MainFrame::on_char_hook(wxKeyEvent& evt)
 
 void MainFrame::on_save(wxCommandEvent&)
 {
-    // 保存・衝突退避（design 5.3）。判断は controller::DocumentController（wx 非依存・gtest
-    // 済み）に 委ね、ここは index の load→操作→save と実ディスク I/O・通知だけを担う。
+    // 保存・衝突退避（design 5.3）。実保存は perform_save に集約する（不変条件を 1 経路に閉じる）。
     EditorPanel* editor = active_editor();
     const std::string abs = active_file_path();
     const std::string rel = rel_path_for(abs);
@@ -642,6 +641,39 @@ void MainFrame::on_save(wxCommandEvent&)
         return;
     }
 
+    // 読み込み時のエンコーディング/BOM で保存する（原文維持。design 5.3 手順5）。
+    const auto mit = doc_meta_.find(abs);
+    const util::Encoding enc = mit != doc_meta_.end() ? mit->second.encoding : util::Encoding::Utf8;
+    const bool with_bom = mit != doc_meta_.end() && mit->second.has_bom;
+
+    const controller::SaveDecision decision = perform_save(editor, abs, rel, enc, with_bom);
+    if (decision != controller::SaveDecision::BlockedEncoding)
+    {
+        return; // Proceed=保存済み、その他 Blocked=perform_save 内で通知済み。
+    }
+
+    // 表現不能文字で中断した（C3・要件5.2）。無確認の文字欠落を起こさず、UTF-8 救済を選ばせる。
+    // ファイルはまだ一切変更していない（perform_save は prepare_save 段で止まっている）。
+    wxMessageDialog dlg(this, u8(MsgId::NotifyBlockedEncodingChoice), u8(MsgId::AppTitle),
+                        wxYES_NO | wxICON_WARNING);
+    dlg.SetYesNoLabels(u8(MsgId::SaveAsUtf8), u8(MsgId::ConfirmCancel));
+    if (dlg.ShowModal() != wxID_YES)
+    {
+        return; // キャンセル＝保存中断（ファイルは無変更＝文字欠落なし）。
+    }
+
+    // UTF-8（BOM なし）へ切り替えて保存し直す。全 Unicode を表現でき BlockedEncoding は解消する。
+    // 改行・退避・アトミック書き込みは perform_save の通常経路をそのまま通る（独自 write
+    // は書かない）。
+    perform_save(editor, abs, rel, util::Encoding::Utf8, false);
+}
+
+controller::SaveDecision MainFrame::perform_save(EditorPanel* editor, const std::string& abs,
+                                                 const std::string& rel, util::Encoding encoding,
+                                                 bool with_bom)
+{
+    // 判断は controller::DocumentController（wx 非依存・gtest 済み）に委ね、ここは index の
+    // load→操作→save と実ディスク I/O・通知だけを担う。
     const std::string snapshots_root = data_root_ + "\\snapshots";
     // 退避結合の対象キー。ワークスペース配下なら workspace_key、単体ファイルは file_key
     // で同じ仕組みへ。
@@ -663,7 +695,7 @@ void MainFrame::on_save(wxCommandEvent&)
     ctx.disk_content = disk.is_ok() ? disk.value() : std::string{};
     const auto mit = doc_meta_.find(abs);
     ctx.last_loaded_hash = mit != doc_meta_.end() ? mit->second.last_loaded_hash : std::string{};
-    ctx.encoding = mit != doc_meta_.end() ? mit->second.encoding : util::Encoding::Utf8;
+    ctx.encoding = encoding; // 保存に使うエンコーディング（救済時は UTF-8 を渡す）。
     ctx.cls = active_content_class();
     ctx.time = static_cast<std::int64_t>(::time(nullptr));
 
@@ -671,28 +703,27 @@ void MainFrame::on_save(wxCommandEvent&)
     if (!plan.ok())
     {
         // 退避結合の Result を握り潰さず通知へ変換する（データを失わない。design 1章）。
-        MsgId mid = MsgId::NotifyStashFailed;
+        // BlockedEncoding は呼び出し側（on_save）が救済選択を出すため、ここでは通知せず decision
+        // を返す。
         if (plan.decision == controller::SaveDecision::BlockedEncoding)
         {
-            mid = MsgId::NotifyBlockedEncoding;
+            return plan.decision;
         }
-        else if (plan.decision == controller::SaveDecision::BlockedUnstashable)
-        {
-            mid = MsgId::NotifyBlockedUnstashable;
-        }
+        MsgId mid = plan.decision == controller::SaveDecision::BlockedUnstashable
+                        ? MsgId::NotifyBlockedUnstashable
+                        : MsgId::NotifyStashFailed;
         wxMessageBox(u8(mid), u8(MsgId::AppTitle), wxOK | wxICON_WARNING, this);
-        return;
+        return plan.decision;
     }
 
-    // 退避が取れた（または衝突なし）＝アトミック置換に進む。エンコーディング/改行は読み込み時の記録
-    // どおりに復元する（design 5.3 手順5。原文維持）。表現可能性は prepare_save で検査済み。
-    const bool with_bom = mit != doc_meta_.end() && mit->second.has_bom;
-    const auto encoded = util::encode(ctx.buffer_content, ctx.encoding, with_bom);
+    // 退避が取れた（または衝突なし）＝アトミック置換に進む。改行は content の原文どおり維持される
+    // （encode は改行を変換しない）。表現可能性は prepare_save で検査済み。
+    const auto encoded = util::encode(ctx.buffer_content, encoding, with_bom);
     if (encoded.is_err())
     {
         wxMessageBox(u8(MsgId::NotifyBlockedEncoding), u8(MsgId::AppTitle), wxOK | wxICON_WARNING,
                      this);
-        return;
+        return controller::SaveDecision::BlockedEncoding;
     }
     const auto written = util::write_atomic(abs, encoded.value());
     if (written.is_err())
@@ -703,7 +734,7 @@ void MainFrame::on_save(wxCommandEvent&)
                      this);
         push_notification(controller::NotificationKind::Conflict, abs,
                           message(MsgId::NotifySaveIoFailed));
-        return;
+        return controller::SaveDecision::BlockedStashFailed;
     }
 
     // incoming 退避が起きていれば index を保存しておく（退避 object のダングリングを防ぐ）。失敗は
@@ -715,9 +746,12 @@ void MainFrame::on_save(wxCommandEvent&)
     }
 
     // 保存後の状態を更新する（次回保存の衝突基準を保存内容へ。自己保存抑制は watcher 側で済む）。
+    // 救済で UTF-8 へ切り替えたときは以降の保存も UTF-8 になるよう encoding/has_bom も書き戻す。
     if (mit != doc_meta_.end())
     {
         mit->second.last_loaded_hash = util::xxh3_64_lf_hex(ctx.buffer_content);
+        mit->second.encoding = encoding;
+        mit->second.has_bom = with_bom;
     }
     tabs_.set_unsaved(abs, false);
     refresh_tab_title(tabs_.index_of(abs));
@@ -728,6 +762,7 @@ void MainFrame::on_save(wxCommandEvent&)
                           message(MsgId::NotifyConflict));
     }
     status_->SetStatusText(plan.conflict ? u8(MsgId::NotifyConflict) : u8(MsgId::StatusSaved), 0);
+    return controller::SaveDecision::Proceed;
 }
 
 void MainFrame::on_confirm(wxCommandEvent&)

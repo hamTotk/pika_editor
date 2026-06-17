@@ -47,10 +47,12 @@ enum class MsgId
     StatusSaved,        // 保存完了
     StatusLinkNotFound, // プレビュー内リンク先が見つからない（新規空タブを作らず通知。B6/B7・I5）
     NotifyConflict,     // 衝突: 外部内容を退避して上書きした旨（要件7.3。警告色運用）
-    NotifyBlockedEncoding,    // 表現不能文字で保存中断（要件5.2・G2）
-    NotifyBlockedUnstashable, // 退避不能で保存/巻き戻しをブロック（要件7.3・D3）
-    NotifyStashFailed,        // 退避 I/O 失敗で上書き/確認をブロック（データを失わない）
-    NotifySaveIoFailed,       // 保存の書き込み失敗（再試行/別名保存/属性確認を促す。失っていない）
+    NotifyBlockedEncoding,       // 表現不能文字で保存中断（要件5.2・G2）
+    NotifyBlockedEncodingChoice, // 表現不能文字の保存選択ダイアログ本文（UTF-8 保存/中断。C3）
+    SaveAsUtf8,                  // 選択ダイアログのボタン: UTF-8で保存（C3）
+    NotifyBlockedUnstashable,    // 退避不能で保存/巻き戻しをブロック（要件7.3・D3）
+    NotifyStashFailed,           // 退避 I/O 失敗で上書き/確認をブロック（データを失わない）
+    NotifySaveIoFailed,    // 保存の書き込み失敗（再試行/別名保存/属性確認を促す。失っていない）
     NotifyIndexSaveFailed, // 退避台帳(index.json)の保存失敗（退避 object は保存済み・再操作で復旧）
     NotifyRollbackWriteFailed, // 巻き戻しの書き戻し失敗（退避済みで内容は安全・再試行を促す）
     NotifyConfirmAllSkipped,   // すべて確認済みで一部スキップ（並行変化/退避失敗で未確認が残る）
