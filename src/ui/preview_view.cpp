@@ -15,6 +15,7 @@
 
 #include <wx/event.h>
 #include <wx/ffile.h>
+#include <wx/log.h>
 #include <wx/sizer.h>
 #include <wx/webview.h>
 
@@ -246,6 +247,9 @@ class DocPikaHandler : public wxWebViewHandler
             return;
         }
         // 実ファイルを読んで返す。読めない場合はエラー（白紙ではなく欠落として扱う）。
+        // 欠落サブリソース（壊れた相対画像など）は想定内の事象。wxFFile/wxLog が既定ログ先で
+        // モーダルを出さないよう wxLogNull で抑止する（固まらない・内部パス非漏洩。F-006）。
+        wxLogNull no_log;
         wxFFile file(u8(abs), "rb");
         if (!file.IsOpened())
         {
@@ -312,6 +316,8 @@ class AppPikaHandler : public wxWebViewHandler
             response->FinishWithError();
             return;
         }
+        // 欠落アセットでも既定ログ先のモーダルを出さない（固まらない。F-006）。
+        wxLogNull no_log;
         wxFFile file(u8(abs), "rb");
         if (!file.IsOpened())
         {
