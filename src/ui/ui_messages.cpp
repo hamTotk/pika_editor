@@ -77,6 +77,8 @@ std::string message(MsgId id)
     case MsgId::NotifyConfirmAllSkipped:
         // 件数つきの文言は notify_confirm_all_skipped(count) を使う（ここは件数なしの汎用文言）。
         return "一部のファイルは並行変化/退避失敗のため未確認のまま残りました";
+    case MsgId::NotifyOpenInBrowser:
+        return "既定のブラウザで開く";
     case MsgId::ConfirmClosePrompt:
         return "保存していない変更があります。閉じる前に保存しますか？";
     case MsgId::ConfirmExitPrompt:

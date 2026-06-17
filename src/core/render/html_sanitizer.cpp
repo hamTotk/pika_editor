@@ -45,9 +45,11 @@ const std::unordered_set<std::string>& forbidden_subtree_tags()
 {
     // 注: title/marquee は subtree 抑制しない（title は SVG の許可タグと衝突するため許可側で扱い、
     // marquee は非危険＝未知タグ扱いでタグだけ落とす）。
+    // 注: style はここに入れない。要件6.3/6.4「インライン CSS を完全レンダリング」のため、
+    // style 属性と同じ基準（is_css_safe）で「安全な <style> は保持・危険 CSS のみ除去」を別途行う。
     static const std::unordered_set<std::string> s = {
-        "script", "iframe", "object", "style",    "template", "noscript", "form",
-        "button", "select", "option", "textarea", "applet",   "frameset", "foreignobject"};
+        "script", "iframe", "object",   "template", "noscript", "form",         "button",
+        "select", "option", "textarea", "applet",   "frameset", "foreignobject"};
     return s;
 }
 
@@ -276,6 +278,12 @@ std::string sanitize_html(std::string_view html)
     int suppress_depth = 0;
     std::string suppress_tag; // 抑制を開始したタグ名（対応する終了で解除）
 
+    // <style> はサブツリー除去しない（要件6.3/6.4「インライン CSS を完全レンダリング」）。
+    // 開始タグ直後の生テキスト（CSS 本文）を is_css_safe で検査し、安全なら <style> ごと原文保持、
+    // 危険なら丸ごと落とす（style 属性と同じ基準）。
+    bool style_pending = false; // <style> 開始済みで CSS 本文（次の Text）待ち
+    bool style_open = false;    // 安全と判定して <style> を出力中（対応する </style> を出す）
+
     for (const auto& tok : tokens)
     {
         // 抑制中：対応する終了タグでのみ解除し、それ以外は一切出力しない。
@@ -295,6 +303,19 @@ std::string sanitize_html(std::string_view html)
         switch (tok.type)
         {
         case TokenType::Text:
+            if (style_pending)
+            {
+                // <style> 直後の CSS 本文。安全なら原文保持（実体参照化すると CSS が壊れる）。
+                // 生テキスト要素なので </style> は含まれない（tokenizer 保証）。
+                style_pending = false;
+                if (is_css_safe(tok.text))
+                {
+                    out += "<style>";
+                    out += tok.text;
+                    style_open = true;
+                }
+                break;
+            }
             append_escaped_text(out, tok.text);
             break;
 
@@ -304,6 +325,17 @@ std::string sanitize_html(std::string_view html)
             break;
 
         case TokenType::EndTag:
+            // <style> の終了：安全と判定して開いていれば閉じる。落とした場合は何も出さない。
+            if (tok.name == "style")
+            {
+                if (style_open)
+                {
+                    out += "</style>";
+                }
+                style_open = false;
+                style_pending = false; // 本文無しの空 <style> 等への保険
+                break;
+            }
             // 許可タグの終了のみ出力（void 要素は終了タグを持たないが、来ても無害）。
             if (allowed_tags().count(tok.name) != 0)
             {
@@ -314,6 +346,15 @@ std::string sanitize_html(std::string_view html)
             break;
 
         case TokenType::StartTag: {
+            // <style>：サブツリー除去せず、次に来る CSS 本文の安全性で出力可否を決める。
+            if (tok.name == "style")
+            {
+                if (!tok.self_closing)
+                {
+                    style_pending = true;
+                }
+                break;
+            }
             // 危険サブツリー：開始から終了まで中身ごと落とす。
             if (forbidden_subtree_tags().count(tok.name) != 0)
             {
