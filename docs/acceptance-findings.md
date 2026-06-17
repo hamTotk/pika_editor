@@ -87,6 +87,39 @@
   THIRD_PARTY_NOTICES が必要）。対応方針はユーザー判断待ち。
 - **状態**: 未対応（要対応判断）
 
+## F-005 HTML プレビューが Markdown 経由で描画され、インライン `<style>` が消える／JS 検知通知が出ない
+
+- **重大度**: 中（要件6.3/6.4 の「インライン CSS を完全レンダリング」「自己完結 HTML がブラウザ同等表示」が
+  満たせない。B3 の JS 検知通知バーも欠落）
+- **対応章**: B2（自己完結 HTML）・B3（スクリプト入り HTML）
+- **現象**:
+  - B2: `selfcontained.html`（`<head><style>` に罫線/影/カード）をプレビューすると、見出し・段落・表は
+    出るが**罫線/影/カードが付かない**（インライン `<style>` が効いていない）。
+  - B3: `withscript.html` をプレビューすると JS は実行されない（背景赤化・alert なし＝合格）が、
+    「JavaScript を含む（無効化）／既定のブラウザで開く」**通知バーが出ない**。
+- **根本原因（複合）**:
+  1. `src/ui/main_frame.cpp` の `update_preview` ワーカーが**種別に関係なく** `render_markdown(source)` を
+     呼んでいた。HTML 文書も Markdown として解釈され、`sanitize_html` 直送経路（design 6章）に乗らない。
+  2. `src/core/render/html_sanitizer.cpp` の `forbidden_subtree_tags()` に `"style"` が入っており、
+     **すべての `<style>` を中身ごと除去**していた。これは要件6.3/6.4「インライン CSS を完全レンダリング」・
+     ヘッダ契約・design 6章「CSS `url()`/`@import` の遮断（=保持）」・CSP `style-src 'unsafe-inline'` と矛盾。
+     正しくは style 属性と同じく「**危険 CSS（url()/@import/expression() 等）を含む `<style>` だけ丸ごと落とし、
+     安全な `<style>` は中身ごと保持**」。
+  3. `inspect_html`（JS 依存/外部リソース検知）が UI から**一度も呼ばれず**、`JsDetected`/`RemoteResource`
+     通知が発火していなかった（モデル・種別文言・`wxLaunchDefaultBrowser` は既存）。通知バーもテキストのみで
+     アクションボタン非対応だった。
+- **対応**:
+  - サニタイザ: `style` をサブツリー除去から外し、`<style>` 専用処理を追加（生テキスト CSS を `is_css_safe`
+    で検査→安全なら `<style>…</style>` を原文保持、危険なら丸ごと除去）。既存の @import テストは維持し、
+    安全 style 保持の回帰テストを追加。
+  - `update_preview`: HTML 種別は `sanitize_html` 直送に分岐。あわせて `inspect_html` を実行し、
+    `depends_on_js()` 時に `JsDetected` 通知（idempotent）を発火。
+  - 通知バー: `JsDetected` 行に「既定のブラウザで開く」ボタンを追加（`row.tab_path` を `file:///` で起動）。
+- **状態**: 検証済 ✅（B2: 罫線/影/カード/青見出し/明背景が描画。B3: JS 不実行のまま通知バー
+  「文書に JavaScript が含まれています（プレビューで無効化）」＋「既定のブラウザで開く」ボタンが出現。
+  gtest `KeepsSafeStyleBlock` 追加・x64-core-test PASS。B10 外部リソース opt-in は同じボタン基盤を
+  流用して B 章後半で対応）
+
 ## 確認済み（自動・準備フェーズ）
 
 | 項目 | 結果 | 根拠 |
