@@ -112,10 +112,23 @@ TEST(HtmlSanitizerTest, BlocksCssUrlInStyleAttribute)
 TEST(HtmlSanitizerTest, BlocksCssImport)
 {
     std::string out = sanitize_html("<style>@import url(http://evil/a.css);</style><p>t</p>");
-    // <style> は丸ごとサブツリー除去されるため @import は出力されない。
+    // 危険 CSS（@import/url()）を含む <style> は丸ごと落とす（style 属性と同じ基準）。
     EXPECT_FALSE(icontains(out, "@import"));
     EXPECT_FALSE(icontains(out, "<style"));
     EXPECT_TRUE(icontains(out, "t"));
+}
+
+TEST(HtmlSanitizerTest, KeepsSafeStyleBlock)
+{
+    // 要件6.3/6.4「インライン CSS を完全レンダリング」。安全な <style> は中身ごと保持する。
+    std::string out = sanitize_html(
+        "<style>.card{border:1px solid #ccc;box-shadow:0 2px 6px rgba(0,0,0,.1)}</style>"
+        "<div class=\"card\">t</div>");
+    EXPECT_TRUE(icontains(out, "<style"));
+    EXPECT_TRUE(icontains(out, "</style>"));
+    EXPECT_TRUE(icontains(out, "box-shadow"));
+    EXPECT_TRUE(icontains(out, "border:1px solid"));
+    EXPECT_TRUE(icontains(out, "class=\"card\""));
 }
 
 TEST(HtmlSanitizerTest, KeepsSafeStyleAttribute)

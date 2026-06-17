@@ -147,6 +147,8 @@ class MainFrame : public wxFrame
     // tab_path 空＝グローバル通知（タブ非依存）。detail 空なら種別の既定文言で表示する。
     void push_notification(controller::NotificationKind kind, const std::string& tab_path,
                            const std::string& detail);
+    // HTML プレビューの JS 検知通知を更新する（検知時のみ JsDetected を 1 件・idempotent。B3）。
+    void update_js_notification(const std::string& path, bool js_detected);
     // 通知集合をアクティブタブ文脈で集約し、通知バー領域へ反映する（最大3本＋他N件）。
     void refresh_notifications();
 

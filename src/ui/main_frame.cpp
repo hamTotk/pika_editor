@@ -8,6 +8,8 @@
 #include "controller/tree_view_messages.h"
 #include "controller/tree_view_model.h"
 #include "core/diff/diff_engine.h"
+#include "core/render/html_inspector.h"
+#include "core/render/html_sanitizer.h"
 #include "core/render/markdown_renderer.h"
 #include "core/snapshot/sensitive.h"
 #include "core/snapshot/snapshot_store.h"
@@ -24,6 +26,7 @@
 #include "util/hash.h"
 
 #include <wx/accel.h>
+#include <wx/button.h>
 #include <wx/dirdlg.h>
 #include <wx/filename.h>
 #include <wx/menu.h>
@@ -996,15 +999,32 @@ void MainFrame::update_preview()
 
     // 重い変換（render_markdown・差分計算）をワーカーで実行し UI をブロックしない（design 4章）。
     // 完了後 UI スレッドへ戻し、stamp/key がまだ最新なら apply_document でナビゲートする。
-    tasks_.submit([this, stamp, key, source, kind, show_diff, grid]() {
+    tasks_.submit([this, stamp, key, source, kind, show_diff, grid, path]() {
         // ワーカースレッド: コア（wx 非依存・スレッドセーフな純変換）だけを呼ぶ。
         controller::PreviewDoc doc;
         doc.kind = kind;
-        const auto rendered = core::render::render_markdown(source);
-        // 本文生成失敗時は白紙にせず最小フォールバック本文を出す（ui-design 15章 Error）。
-        doc.body_html = rendered.is_ok()
-                            ? rendered.value()
-                            : "<p class=\"pika-placeholder\">プレビューを生成できませんでした</p>";
+        if (kind == controller::PreviewKind::Html)
+        {
+            // HTML 文書はサニタイズ直送（Markdown 解釈しない）。インライン <style> は保持し、
+            // <script>・危険 CSS のみ除去する（要件6.3/6.4・design 6章）。
+            doc.body_html = core::render::sanitize_html(source);
+        }
+        else
+        {
+            const auto rendered = core::render::render_markdown(source);
+            // 本文生成失敗時は白紙にせず最小フォールバック本文を出す（ui-design 15章 Error）。
+            doc.body_html =
+                rendered.is_ok()
+                    ? rendered.value()
+                    : "<p class=\"pika-placeholder\">プレビューを生成できませんでした</p>";
+        }
+
+        // HTML プレビューは JS 依存を検知して通知バー導線（既定ブラウザで開く）を出す。
+        bool js_detected = false;
+        if (kind == controller::PreviewKind::Html && !show_diff)
+        {
+            js_detected = core::render::inspect_html(source).depends_on_js();
+        }
 
         std::string full_html;
         if (show_diff)
@@ -1025,8 +1045,9 @@ void MainFrame::update_preview()
         // 差分面は pika 生成の信頼済み HTML（JS 有効＝Markdown 相当）。プレビューは種別どおり。
         const controller::PreviewKind js_kind =
             show_diff && !grid ? controller::PreviewKind::Markdown : kind;
-        CallAfter([this, stamp, key, full_html, js_kind]() {
+        CallAfter([this, stamp, key, full_html, js_kind, path, js_detected]() {
             preview_->apply_document(stamp, key, full_html, js_kind);
+            update_js_notification(path, js_detected);
         });
     });
 }
@@ -1310,6 +1331,26 @@ void MainFrame::push_notification(controller::NotificationKind kind, const std::
     refresh_notifications();
 }
 
+void MainFrame::update_js_notification(const std::string& path, bool js_detected)
+{
+    // 同一ファイルの古い JS 検知通知を畳んでから検知時のみ 1 件積む（再プレビューでの重複防止）。
+    notifications_.erase(std::remove_if(notifications_.begin(), notifications_.end(),
+                                        [&](const controller::Notification& n) {
+                                            return n.kind ==
+                                                       controller::NotificationKind::JsDetected &&
+                                                   n.tab_path == path;
+                                        }),
+                         notifications_.end());
+    if (js_detected && !path.empty())
+    {
+        push_notification(controller::NotificationKind::JsDetected, path, std::string{});
+    }
+    else
+    {
+        refresh_notifications();
+    }
+}
+
 void MainFrame::refresh_notifications()
 {
     if (notification_area_ == nullptr)
@@ -1333,8 +1374,31 @@ void MainFrame::refresh_notifications()
         // detail があればそれを、無ければ種別の既定文言を出す（design 10章 K9）。
         const std::string text =
             row.detail.empty() ? notification_kind_label(row.kind) : row.detail;
-        auto* label = new wxStaticText(notification_area_, wxID_ANY, u8(text));
-        sizer->Add(label, 0, wxEXPAND | wxALL, 2);
+
+        // JS 検知行は「既定のブラウザで開く」ボタンを併置する（B3。design 6章）。
+        const bool js_row =
+            row.kind == controller::NotificationKind::JsDetected && !row.tab_path.empty();
+        if (js_row)
+        {
+            auto* line = new wxBoxSizer(wxHORIZONTAL);
+            auto* label = new wxStaticText(notification_area_, wxID_ANY, u8(text));
+            line->Add(label, 1, wxALIGN_CENTER_VERTICAL | wxALL, 2);
+            auto* btn = new wxButton(notification_area_, wxID_ANY, u8(MsgId::NotifyOpenInBrowser));
+            const std::string target = row.tab_path;
+            btn->Bind(wxEVT_BUTTON, [target](wxCommandEvent&) {
+                // ローカル HTML を既定ブラウザで開く（パス区切りは file URL 用に正規化）。
+                wxString u = wxString::FromUTF8(target.c_str(), target.size());
+                u.Replace("\\", "/");
+                wxLaunchDefaultBrowser("file:///" + u);
+            });
+            line->Add(btn, 0, wxALL, 2);
+            sizer->Add(line, 0, wxEXPAND);
+        }
+        else
+        {
+            auto* label = new wxStaticText(notification_area_, wxID_ANY, u8(text));
+            sizer->Add(label, 0, wxEXPAND | wxALL, 2);
+        }
     }
     if (view.overflow > 0)
     {
