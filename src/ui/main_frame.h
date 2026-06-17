@@ -114,7 +114,14 @@ class MainFrame : public wxFrame
 
     // 中心体験④『確認済みにする』と保存・衝突退避（sprint6。判断は
     // controller::DocumentController）。
-    void on_save(wxCommandEvent& evt);        // Ctrl+S（design 5.3 保存・衝突退避）
+    void on_save(wxCommandEvent& evt); // Ctrl+S（design 5.3 保存・衝突退避）
+    // 指定エンコーディング/BOM で 1 タブを保存する（prepare_save→encode→write_atomic→退避/通知/
+    // マーク更新まで。design 5.3 の不変条件を 1 経路に集約）。BlockedEncoding を救済で UTF-8 へ切替
+    // 保存する経路と通常保存が同じ手順を共有する。戻り値は
+    // SaveDecision（呼び出し側が後続判断に使う）。
+    controller::SaveDecision perform_save(EditorPanel* editor, const std::string& abs,
+                                          const std::string& rel, util::Encoding encoding,
+                                          bool with_bom);
     void on_confirm(wxCommandEvent& evt);     // 確認済みにする（design 5.4）
     void on_confirm_all(wxCommandEvent& evt); // すべて確認済みにする（design 5.4・J6）
     void on_rollback(wxCommandEvent& evt);    // 確認済み時点に戻す（巻き戻し。design 5.4）

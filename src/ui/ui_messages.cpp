@@ -63,6 +63,12 @@ std::string message(MsgId id)
         return "外部の変更を退避してから上書き保存しました";
     case MsgId::NotifyBlockedEncoding:
         return "現在のエンコーディングで表現できない文字があるため保存を中断しました";
+    case MsgId::NotifyBlockedEncodingChoice:
+        // 文字欠落を起こす前にユーザーへ救済選択を提示する（C3・要件5.2）。
+        return "現在のエンコーディングで表現できない文字があります。"
+               "UTF-8 で保存しますか？（キャンセルで保存を中断します）";
+    case MsgId::SaveAsUtf8:
+        return "UTF-8で保存";
     case MsgId::NotifyBlockedUnstashable:
         return "退避を取れないファイル（10MB以上・画像・機密）のため操作をブロックしました";
     case MsgId::NotifyStashFailed:
