@@ -1,6 +1,7 @@
 #include "ui/file_tree_panel.h"
 
 #include "controller/tree_view_messages.h"
+#include "ui/ui_messages.h"
 
 #include <wx/generic/dataview.h>
 #include <wx/sizer.h>
@@ -248,8 +249,10 @@ FileTreePanel::FileTreePanel(wxWindow* parent)
     view_ = view;
     view_->AssociateModel(model_.get());
     // 1 列に「状態記号＋アイコン＋テキスト」を共存させる（design 10章・ui-design 6章）。
-    view_->AppendTextColumn("ファイル", 0, wxDATAVIEW_CELL_INERT, -1, wxALIGN_LEFT,
-                            wxDATAVIEW_COL_RESIZABLE);
+    // 見出しは生文字列を書かず単一メッセージ定義経由で UTF-8→wx 変換する（design 10章 K9）。
+    const std::string header = message(MsgId::TreePaneTitle);
+    view_->AppendTextColumn(wxString::FromUTF8(header.c_str(), header.size()), 0,
+                            wxDATAVIEW_CELL_INERT, -1, wxALIGN_LEFT, wxDATAVIEW_COL_RESIZABLE);
 
 #if wxUSE_ACCESSIBILITY
     // 行ごとのアクセシブルネームに状態・種別ラベルを供給する（視覚は据え置き）。

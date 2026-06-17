@@ -26,6 +26,11 @@ namespace pika::ui
 namespace
 {
 
+// doc.pika 仮想ホスト上の予約パス。生成済みプレビュー HTML をページ本体として配信する固定名。
+// ここへ実ナビゲート（LoadURL）することで、ページ URL=https://doc.pika/ となり本文中の相対
+// 画像/リンクが doc.pika 基準で解決される（preview_builder.cpp:170 の設計前提）。
+constexpr const char* kPreviewDocName = "__pika_preview__.html";
+
 wxString u8(const std::string& s)
 {
     return wxString::FromUTF8(s.c_str(), s.size());
@@ -184,24 +189,23 @@ bool strip_host_prefix(const std::string& uri, const char* host, std::string& re
 class DocPikaHandler : public wxWebViewHandler
 {
   public:
-    explicit DocPikaHandler(const std::string* doc_root)
-        : wxWebViewHandler("https"), root_ptr_(doc_root)
+    DocPikaHandler(const std::string* doc_root, const std::string* preview_html)
+        : wxWebViewHandler("doc.pika"), root_ptr_(doc_root), preview_html_ptr_(preview_html)
     {
+        // scheme 名は virtual host と一致させる。"https" にすると wxWebViewEdge::LoadURL の
+        // カスタムプロトコル・エミュレーションが "https://..." を誤って書き換え host を二重化する
+        // （実機 F-002）。WebResourceRequested の照合・フィルタは virtual host で行われるため、
+        // scheme 名を doc.pika にしても https://doc.pika/* の横取りは不変。
         SetVirtualHost("doc.pika");
     }
 
     void StartRequest(const wxWebViewHandlerRequest& request,
                       wxSharedPtr<wxWebViewHandlerResponse> response) override
     {
-        const std::string root = root_ptr_ ? *root_ptr_ : std::string{};
-        if (root.empty())
-        {
-            // 対象消滅時はマッピング解除＝すべて拒否する（文書外の露出面を作らない）。
-            response->FinishWithError();
-            return;
-        }
         std::string rel;
-        const std::string uri(request.GetURI().ToUTF8().data());
+        // GetRawURI() を使う（実 URL）。GetURI() は wxWebViewEdge では "name:path" 形式で host を
+        // 落とすため strip_host_prefix("https://host/") と噛み合わない（実機 F-002）。
+        const std::string uri(request.GetRawURI().ToUTF8().data());
         if (!strip_host_prefix(uri, "doc.pika", rel))
         {
             response->FinishWithError();
@@ -209,6 +213,24 @@ class DocPikaHandler : public wxWebViewHandler
         }
         // (1) 1 回だけ URL デコードして %2e%2e%2f 等を実体化する。
         rel = url_decode_once(rel);
+        // (予約) 生成済みプレビュー HTML をページ本体として配信する（root に依らず先に判定）。
+        // バイト列を保ったまま返し（UTF-8）、charset=utf-8 をヘッダで宣言する。文書外の実ファイル
+        // ではなく pika 生成の信頼済み HTML。
+        if (rel == kPreviewDocName)
+        {
+            const std::string html = preview_html_ptr_ ? *preview_html_ptr_ : std::string{};
+            wxString content(html.data(), wxConvISO8859_1, html.size());
+            response->SetContentType("text/html; charset=utf-8");
+            response->Finish(content, wxConvISO8859_1);
+            return;
+        }
+        const std::string root = root_ptr_ ? *root_ptr_ : std::string{};
+        if (root.empty())
+        {
+            // 対象消滅時はマッピング解除＝すべて拒否する（文書外の露出面を作らない）。
+            response->FinishWithError();
+            return;
+        }
         // (2) `..` を畳んで絶対化し、root の配下（接頭辞一致）に収まることを検証する（C7）。
         const std::string abs = core::ipc::normalize_to_absolute(rel, root);
         if (!under_root(abs, root))
@@ -241,7 +263,8 @@ class DocPikaHandler : public wxWebViewHandler
     }
 
   private:
-    const std::string* root_ptr_; // PreviewView::doc_root_ を指す（所有しない）
+    const std::string* root_ptr_;         // PreviewView::doc_root_ を指す（所有しない）
+    const std::string* preview_html_ptr_; // PreviewView::preview_html_ を指す（所有しない）
 };
 
 // app.pika の同梱アセットハンドラ（design 6章 C6・must#4「仮想ホスト app.pika（同梱アセット）」）。
@@ -251,8 +274,9 @@ class AppPikaHandler : public wxWebViewHandler
 {
   public:
     explicit AppPikaHandler(const std::string* asset_dir)
-        : wxWebViewHandler("https"), dir_ptr_(asset_dir)
+        : wxWebViewHandler("app.pika"), dir_ptr_(asset_dir)
     {
+        // scheme 名を virtual host と一致させる（DocPikaHandler と同理由。実機 F-002）。
         SetVirtualHost("app.pika");
     }
 
@@ -266,7 +290,9 @@ class AppPikaHandler : public wxWebViewHandler
             return;
         }
         std::string rel;
-        const std::string uri(request.GetURI().ToUTF8().data());
+        // GetRawURI() を使う（実 URL）。GetURI() は wxWebViewEdge では "name:path" 形式で host を
+        // 落とすため strip_host_prefix("https://host/") と噛み合わない（実機 F-002）。
+        const std::string uri(request.GetRawURI().ToUTF8().data());
         if (!strip_host_prefix(uri, "app.pika", rel))
         {
             response->FinishWithError();
@@ -349,7 +375,8 @@ void PreviewView::ensure_webview()
     // 仮想ホストのカスタムリソースハンドラ（design 6章 C6/C7）。
     //   doc.pika … 表示中文書の親フォルダ配下のみ（../ 遮断・許可拡張子）。
     //   app.pika … exe 隣 assets/ の同梱信頼アセット（preview.css 等）。
-    web_->RegisterHandler(wxSharedPtr<wxWebViewHandler>(new DocPikaHandler(&doc_root_)));
+    web_->RegisterHandler(
+        wxSharedPtr<wxWebViewHandler>(new DocPikaHandler(&doc_root_, &preview_html_)));
     web_->RegisterHandler(wxSharedPtr<wxWebViewHandler>(new AppPikaHandler(&asset_dir_)));
 
     // 表示専用に絞る（コンテキストメニュー・開発者ツールを無効化。design 6章）。
@@ -410,8 +437,16 @@ void PreviewView::navigate(const std::string& full_html, controller::PreviewKind
     js_enabled_ = (kind == controller::PreviewKind::Markdown);
     apply_script_enabled(js_enabled_);
     nav_in_flight_ = true;
-    // base は doc.pika。CSP（script-src https://app.pika）が JS の実効境界を担う（C6 二重防御）。
-    web_->SetPage(u8(full_html), "https://doc.pika/");
+    // 生成 HTML は doc.pika の予約パスから本体配信し、ページ URL=https://doc.pika/ へ実ナビゲート
+    // する（preview_builder.cpp:170 の前提）。これで本文中の相対画像/リンクが doc.pika 基準で解決
+    // される。wxWebViewEdge::SetPage は baseUrl を無視し NavigateToString を使うため相対解決できず
+    // 初回ロードも Veto されていた（実機 F-002）。CSP が JS の実効境界を担う（C6 二重防御）。
+    // 同一 URL でも内容差し替えで再ロードさせるため ?g=世代 を付す（クエリはハンドラ側で破棄）。
+    preview_html_ = full_html;
+    ++nav_gen_;
+    const std::string url =
+        std::string("https://doc.pika/") + kPreviewDocName + "?g=" + std::to_string(nav_gen_);
+    web_->LoadURL(u8(url));
 }
 
 void PreviewView::show_preview(const controller::OccupancyKey& key,
@@ -479,17 +514,21 @@ void PreviewView::suspend_if_idle()
 
 void PreviewView::on_navigating(wxWebViewEvent& evt)
 {
-    // 全キャンセルして pika 側へ振り分ける（プレビュー内のページ遷移を許さない。design 6章）。
-    // 初回の SetPage/doc.pika は内部ロードなのでキャンセルしない（振り分け対象は外部 URL）。
+    // 生成プレビュー本体（doc.pika の予約パス）と WebView2 内部の初期ロード（空 URL 生成時の
+    // about:blank 等）は通す。それ以外のトップレベル遷移＝プレビュー内のページ遷移（リンク
+    // クリック等）は許さず pika 側へ振り分ける（design 6章）。サブリソース（CSS/画像）は
+    // ハンドラ経由で NAVIGATING を起こさないため、ここに来るのはトップレベル遷移のみ。
     const std::string url(evt.GetURL().ToUTF8().data());
-    const bool is_internal = url.rfind("https://doc.pika/", 0) == 0 ||
-                             url.rfind("https://app.pika/", 0) == 0 || url == "about:blank";
-    if (is_internal)
+    const std::string preview_doc = std::string("https://doc.pika/") + kPreviewDocName;
+    const bool is_preview_doc = url.rfind(preview_doc, 0) == 0;
+    const bool is_internal_blank =
+        url == "about:blank" || url.rfind("about:", 0) == 0 || url.rfind("data:", 0) == 0;
+    if (is_preview_doc || is_internal_blank)
     {
         evt.Skip(); // 内部ロードは通す
         return;
     }
-    evt.Veto(); // 外部遷移はキャンセル
+    evt.Veto(); // ユーザー操作によるトップレベル遷移はキャンセル
     if (on_navigate_)
     {
         on_navigate_(url); // 相対 .md/.html はタブ・他は既定ブラウザ（MainFrame が判定）

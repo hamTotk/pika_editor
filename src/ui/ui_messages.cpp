@@ -25,6 +25,8 @@ std::string message(MsgId id)
         return "すべて確認済みにする\tCtrl+Alt+Enter";
     case MsgId::MenuRollback:
         return "確認済み時点に戻す";
+    case MsgId::MenuReview:
+        return "レビュー(&R)";
     case MsgId::MenuView:
         return "表示(&V)";
     case MsgId::MenuRefresh:

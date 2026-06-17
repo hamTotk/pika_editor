@@ -28,6 +28,7 @@ enum class MsgId
     MenuConfirm,     // 「確認済みにする」（Ctrl+Enter / Ctrl+Shift+Enter。design 5.4・10章 J3）
     MenuConfirmAll,  // 「すべて確認済みにする」（Ctrl+Alt+Enter。design 5.4・10章 J6）
     MenuRollback,    // 「確認済み時点に戻す」（巻き戻し。design 5.4）
+    MenuReview,      // 「レビュー」メニュー見出し（中心体験④。design 10章 J6）
     MenuView,        // 「表示」
     MenuRefresh,     // 「再読み込み」（F5）
     MenuModeSource,  // 「ソース」（表示モード。ui-design 8章）

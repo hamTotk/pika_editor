@@ -100,6 +100,11 @@ class PreviewView : public wxPanel
     controller::OccupancyTracker occupancy_;
     std::string doc_root_;  // doc.pika の許可フォルダ（'/' 区切り絶対パス・空＝拒否）
     std::string asset_dir_; // app.pika の同梱アセットフォルダ（絶対パス・空＝拒否）
+    // 生成済みプレビュー HTML（doc.pika の予約パスから本体配信する。base=doc.pika で相対解決させる
+    // ため SetPage ではなく LoadURL で実ナビゲートする。wxWebViewEdge::SetPage は baseUrl を無視
+    // するため相対画像/リンクが解決できず・初回ロードも Veto される＝実機 F-002）。
+    std::string preview_html_;
+    std::uint64_t nav_gen_ = 0; // 同一 URL でも内容差し替えで再ロードさせるキャッシュ無効化カウンタ
     NavigateRequest on_navigate_;
     bool js_enabled_ = true; // 現在の JS 有効状態（Markdown/差分=有効・HTML=無効）
     bool suspended_ = false; // TrySuspend 済みか（次回表示で Resume）
