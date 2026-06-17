@@ -79,6 +79,8 @@ std::string message(MsgId id)
         return "一部のファイルは並行変化/退避失敗のため未確認のまま残りました";
     case MsgId::NotifyOpenInBrowser:
         return "既定のブラウザで開く";
+    case MsgId::StatusLinkNotFound:
+        return "リンク先が見つかりません";
     case MsgId::ConfirmClosePrompt:
         return "保存していない変更があります。閉じる前に保存しますか？";
     case MsgId::ConfirmExitPrompt:

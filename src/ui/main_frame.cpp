@@ -8,6 +8,7 @@
 #include "controller/tree_view_messages.h"
 #include "controller/tree_view_model.h"
 #include "core/diff/diff_engine.h"
+#include "core/ipc/path_normalizer.h"
 #include "core/render/html_inspector.h"
 #include "core/render/html_sanitizer.h"
 #include "core/render/markdown_renderer.h"
@@ -41,6 +42,7 @@
 #include <wx/utils.h>
 
 #include <algorithm>
+#include <cctype>
 #include <ctime>
 #include <optional>
 
@@ -1054,21 +1056,85 @@ void MainFrame::update_preview()
 
 void MainFrame::on_preview_navigate(const std::string& url)
 {
-    // プレビュー内リンクの振り分け（design 6章）。相対 .md/.html はタブで開き、他は既定ブラウザへ。
-    // 本結線では外部 URL を既定ブラウザへ委譲する（相対リンクのタブ解決は後続で精緻化）。
+    // プレビュー内リンクの振り分け（design 6章・要件6.2/6.3）。相対 .md/.html はタブで開き、
+    // 存在しなければ通知（新規空タブを作らない）。外部 http(s)/mailto は既定ブラウザへ委譲する。
     if (url.empty())
     {
         return;
     }
     // 委譲先スキームは許可リストで絞る（多層防御）。file:/UNC/カスタムプロトコルの自動起動を防ぐ。
     auto starts_with = [&url](const char* p) { return url.rfind(p, 0) == 0; };
-    // 内部仮想ホスト（プレビュー本体・同梱アセット・相対リンク）は外部ブラウザへ出さない。
-    // 相対 .md/.html のタブ解決は後続（B7 精緻化）。現状は誤起動を防いで無視する。
-    if (starts_with("https://doc.pika/") || starts_with("https://app.pika/") ||
-        starts_with("data:"))
+
+    // 内部の同梱アセット・データ URI・about: は遷移対象でない（誤起動を防いで無視する）。
+    if (starts_with("https://app.pika/") || starts_with("data:") || starts_with("about:"))
     {
         return;
     }
+
+    // doc.pika 相対リンク：ワークスペース根（base href=doc.pika 根）基準でローカルパスへ解決し、
+    // .md/.html はタブで開く。doc.pika の根は set_document_root(workspace_) と一致する（B7）。
+    constexpr const char* kDocPrefix = "https://doc.pika/";
+    if (starts_with(kDocPrefix))
+    {
+        std::string rel = url.substr(std::char_traits<char>::length(kDocPrefix));
+        // クエリ（?g= 等）・フラグメント（#...）を落としてパス部分だけにする。
+        const auto cut = rel.find_first_of("?#");
+        if (cut != std::string::npos)
+        {
+            rel = rel.substr(0, cut);
+        }
+        if (rel.empty() || workspace_.empty())
+        {
+            return;
+        }
+        // 拡張子を小文字で取り出す（最後のセグメントのドット以降）。
+        auto lower_ext = [](const std::string& s) {
+            const auto dot = s.find_last_of('.');
+            const auto sep = s.find_last_of("/\\");
+            if (dot == std::string::npos || (sep != std::string::npos && dot < sep))
+            {
+                return std::string{};
+            }
+            std::string e = s.substr(dot + 1);
+            for (char& c : e)
+            {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            return e;
+        };
+        const std::string ext = lower_ext(rel);
+        const bool is_doc =
+            ext == "md" || ext == "markdown" || ext == "html" || ext == "htm" || ext == "txt";
+        // ../ はワークスペース根でクランプされ範囲外へは出ない（path_normalizer・C7）。
+        const std::string abs = core::ipc::normalize_to_absolute(rel, workspace_);
+        const bool exists = wxFileName::FileExists(u8(abs));
+        if (is_doc)
+        {
+            if (exists)
+            {
+                open_file(abs); // 既存タブならアクティブ化、無ければ新規タブ（重複は開かない）。
+            }
+            else
+            {
+                // 新規空タブを作らず、状態バーで知らせる（要件6.3 I5・データを汚さない）。
+                status_->SetStatusText(u8(MsgId::StatusLinkNotFound), 0);
+            }
+            return;
+        }
+        // .md/.html 以外の相対リンクは既定ブラウザでローカルファイルを開く（design 6章）。
+        if (exists)
+        {
+            wxString file_url = u8(abs);
+            file_url.Replace("\\", "/");
+            wxLaunchDefaultBrowser("file:///" + file_url);
+        }
+        else
+        {
+            status_->SetStatusText(u8(MsgId::StatusLinkNotFound), 0);
+        }
+        return;
+    }
+
     if (starts_with("http://") || starts_with("https://") || starts_with("mailto:"))
     {
         wxLaunchDefaultBrowser(u8(url));
