@@ -202,6 +202,31 @@
 - **状態**: C3 選択肢=検証済 ✅（実機で UTF-8/BOMなし/CRLF維持/絵文字保存を確認）。C2/C4/C6/C9 は未対応
   （要対応判断・後回し）。
 
+## F-010 編集してもタブが未保存にならない（●記号なし・閉じ/終了確認が出ず編集消失リスク）／タブ一覧ボタン欠如
+
+- **重大度**: 高（未保存編集を**無確認で閉じて失える**＝設計原則1「データを失わない」に反する。C10/C11 不能）
+- **対応章**: C10（タブ状態記号）・C11（未保存の閉じ/終了確認）・C7（タブ一覧）
+- **現象**:
+  - 文書を編集してもタブに **●（未保存）が付かない**（C10）。
+  - 未保存タブを Ctrl+W/×/終了しても**確認ダイアログが出ず黙って閉じる**（C11）。
+  - タブ溢れ時に左右スクロールボタンは出るが**全タブ一覧ドロップダウンが無い**・隠れ未読バッジも無い（C7）。
+- **根本原因**:
+  - dirty 追跡の結線が**欠落**。`TabState.unsaved` フラグと `confirm_discard_unsaved`/`has_unsaved_tabs`
+    （unsaved を見る）・タブ記号の畳み込みは実装済みだが、`set_unsaved(abs,true)` を**どこからも呼んで
+    いない**（呼ぶのは保存時の false のみ）。`EditorPanel` は `is_dirty()`（SCI GetModify）を持つが、
+    Scintilla の編集イベント（savepoint）を `MainFrame`→`TabManager` へ伝える結線が無い。
+  - C7: `wxAuiNotebook` 生成スタイルに `wxAUI_NB_WINDOWLIST_BUTTON` が無い（main_frame.cpp:218-220）。
+    隠れ未読バッジはカスタム `wxAuiTabArt` が要るため別件。
+- **対応方針**: (1) `EditorPanel` に Scintilla の savepoint 通知（`wxEVT_STC_SAVEPOINTLEFT`/
+  `SAVEPOINTREACHED`）を結線し dirty 変化コールバックを公開。`set_text_utf8` 後は `SetSavePoint`+
+  `EmptyUndoBuffer` で初期クリーン。保存成功時に `SetSavePoint`（mark_clean）。(2) `MainFrame` が
+  `open_file` でコールバックを `tabs_.set_unsaved(abs,dirty)`＋`refresh_tab_title` へ結線。(3) ノートブックに
+  `wxAUI_NB_WINDOWLIST_BUTTON` を追加。隠れ未読バッジは後回し。
+- **状態**: 検証済 ✅（dev-generator 実装。EditorPanel に savepoint 通知→dirty コールバック・保存後
+  mark_clean、MainFrame open_file で結線。実機で C10 ●表示/保存解除/再編集再表示、C11 ×/Ctrl+W/終了の
+  確認ダイアログ（保存/破棄/キャンセル・キャンセルで残る）、C7 全タブ一覧ドロップダウンを確認。ctest 647 PASS。
+  隠れ未読バッジ（カスタム wxAuiTabArt）は後回し）
+
 ## 確認済み（自動・準備フェーズ）
 
 | 項目 | 結果 | 根拠 |
