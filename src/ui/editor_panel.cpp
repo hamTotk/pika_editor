@@ -32,6 +32,10 @@ EditorPanel::EditorPanel(wxWindow* parent, wxWindowID id)
     // 行番号余白（design 10章のエディタ体裁。最小骨格）。
     SetMarginType(0, wxSTC_MARGIN_NUMBER);
     SetMarginWidth(0, 40);
+    // Scintilla の savepoint 通知で dirty 変化を拾う（GetModify をポーリングせず idiomatic に）。
+    // 編集で savepoint を離れたら未保存、undo 等で savepoint に戻ったらクリーンに復帰する。
+    Bind(wxEVT_STC_SAVEPOINTLEFT, &EditorPanel::on_save_point_left, this);
+    Bind(wxEVT_STC_SAVEPOINTREACHED, &EditorPanel::on_save_point_reached, this);
 }
 
 void EditorPanel::apply_config(const controller::EditorConfig& cfg)
@@ -76,6 +80,33 @@ std::string EditorPanel::text_utf8() const
 bool EditorPanel::is_dirty() const
 {
     return GetModify();
+}
+
+void EditorPanel::set_on_dirty_changed(std::function<void(bool)> cb)
+{
+    on_dirty_changed_ = std::move(cb);
+}
+
+void EditorPanel::mark_clean()
+{
+    // 保存成功後にクリーン状態を確定する。SAVEPOINTREACHED が発火し dirty=false が伝わる。
+    SetSavePoint();
+}
+
+void EditorPanel::on_save_point_left(wxStyledTextEvent&)
+{
+    if (on_dirty_changed_)
+    {
+        on_dirty_changed_(true);
+    }
+}
+
+void EditorPanel::on_save_point_reached(wxStyledTextEvent&)
+{
+    if (on_dirty_changed_)
+    {
+        on_dirty_changed_(false);
+    }
 }
 
 } // namespace pika::ui
