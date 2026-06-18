@@ -180,7 +180,11 @@
 - **対応方針**: E 章作業として、(1) スナップショット index からアクティブ文書のベースライン有無を判定して
   `has_baseline` を立て、(2) 差分計算でベースライン content を `old` に供給する（ワーカー I/O・必要なら
   キャッシュ）。確認/巻き戻し（E章本体）と一体で結線する。
-- **状態**: 未対応（E 章で対応予定。B11 は本結線後に再評価）
+- **状態**: 検証済 ✅（段階2実装。`update_diff_toggle_state` の `has_baseline` を `has_diffable_baseline`
+  （index の baseline_object 有無）で実値化＝差分トグルが確認済みベースラインありで有効化。`update_preview`
+  worker で `restore_baseline(index, rel)` を旧側に供給し `engine.compute(old, current)` で累積差分を生成。
+  確認/巻き戻し後に `update_preview` を呼び差分面を更新。実機で確認→外部変更→差分(±/単語強調/+-記号)を
+  確認(E1/E2/E6 合格)。ctest 654 PASS。B11 はトグル有効化済みで再評価可。）
 
 ## F-009 C章の未実装/部分実装（C3 UTF-8保存選択肢／C2 エンコ開き直し／C4 新規／C6 検索置換／C9 200MB）
 
