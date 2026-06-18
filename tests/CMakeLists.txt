@@ -5,6 +5,7 @@ find_package(GTest CONFIG REQUIRED)
 
 add_executable(pika_tests
     controller/app_controller_test.cpp
+    controller/baseline_merge_test.cpp
     controller/data_root_test.cpp
     controller/degrade_model_test.cpp
     controller/diff_mode_model_test.cpp

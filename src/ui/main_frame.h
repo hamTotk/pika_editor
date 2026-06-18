@@ -68,6 +68,8 @@ class MainFrame : public wxFrame
     void build_layout();
     void refresh_tree();
     void update_status();
+    // 開いた時点のベースライン確立＋起動時未読判定（design 5.1 手順4・9章。F-013）。
+    void establish_baseline();
 
     // 監視配線（sprint4）。監視スレッドの生イベント/再同期合図を UI スレッドで受けて反映する。
     void start_watching(); // ワークスペースの監視（or ポーリング）を開始する
