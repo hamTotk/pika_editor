@@ -17,6 +17,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace pika::ui
 {
@@ -38,6 +39,13 @@ class FileTreePanel : public wxPanel
 
     // ファイルアクティブ化のハンドラを設定する。
     void set_on_file_activated(OnFileActivated cb);
+
+    // 現在展開中のフォルダノードの相対パス列（state.json 保存用。要件10.1・F1）。
+    std::vector<std::string> expanded_rel_paths() const;
+
+    // 相対パス列に該当するフォルダノードを展開する（state.json 復元・ベストエフォート）。
+    // 現在ツリーに存在しないパスは無視する（落ちない＝データを失わない・設計原則1）。
+    void expand_rel_paths(const std::vector<std::string>& rel_paths);
 
   private:
     void on_item_activated(wxDataViewEvent& evt);

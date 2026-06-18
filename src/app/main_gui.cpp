@@ -20,10 +20,12 @@
 #include "app/pipe_server.h"
 #include "controller/app_controller.h"
 #include "controller/data_root.h"
+#include "controller/restore_plan.h"
 #include "core/ipc/cli_parser.h"
 #include "core/ipc/ipc_message.h"
 #include "core/ipc/pipe_security.h"
 #include "core/settings/settings.h"
+#include "core/state/state_io.h"
 #include "ui/main_frame.h"
 #include "util/logger.h"
 
@@ -257,14 +259,23 @@ class PikaApp : public wxApp
         frame_->Show(true);
 
         // 6. 表示後にワークスペース列挙・タブを開く（design 5.1 手順4。表示をブロックしない）。
-        if (!plan.folder.empty())
+        if (plan.restore_previous)
         {
-            frame_->open_workspace(plan.folder);
+            // 引数なし起動＝前回セッションを復元する（要件10.1・F1）。破損・未知 version・状態
+            // ファイル無しは復元せず通常の空起動へフォールバック（restore_previous_session 内）。
+            restore_previous_session(data_root);
         }
-        const std::vector<std::string> files = file_paths(plan);
-        if (!files.empty())
+        else
         {
-            frame_->apply_open_targets(files);
+            if (!plan.folder.empty())
+            {
+                frame_->open_workspace(plan.folder);
+            }
+            const std::vector<std::string> files = file_paths(plan);
+            if (!files.empty())
+            {
+                frame_->apply_open_targets(files);
+            }
         }
         return true;
     }
@@ -279,6 +290,30 @@ class PikaApp : public wxApp
     }
 
   private:
+    // 前回セッション（state.json）を読み復元する（要件10.1・F1）。判断は controller/core の
+    // 純ロジック（load_state・build_restore_plan。gtest 済み）に委ね、ここは結線のみ。
+    // 空 data_root・破損・未知 version・無し・restorable=false では何もしない（空起動へ）。
+    void restore_previous_session(const std::string& data_root)
+    {
+        if (data_root.empty())
+        {
+            return; // 退避先未確定では復元しない（保存もされていない）。
+        }
+        const std::string state_path = data_root + "\\state.json";
+        const auto loaded = pika::core::state::load_state(state_path);
+        if (loaded.is_err())
+        {
+            return; // 破損(Io)・未知 version(Unsupported)＝復元せず空起動（安全側。K2）。
+        }
+        const pika::controller::RestorePlan plan =
+            pika::controller::build_restore_plan(loaded.value());
+        if (!plan.restorable)
+        {
+            return;
+        }
+        frame_->restore_session(plan);
+    }
+
     std::unique_ptr<pika::app::PipeServer> pipe_;
     pika::ui::MainFrame* frame_ = nullptr;
 };

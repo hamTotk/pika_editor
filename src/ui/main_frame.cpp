@@ -16,6 +16,8 @@
 #include "core/snapshot/sensitive.h"
 #include "core/snapshot/snapshot_store.h"
 #include "core/snapshot/snapshot_types.h"
+#include "core/state/state_io.h"
+#include "core/state/state_types.h"
 #include "core/watcher/fs_probe.h"
 #include "core/watcher/resync.h"
 #include "core/workspace/workspace_model.h"
@@ -31,6 +33,7 @@
 #include <wx/button.h>
 #include <wx/dirdlg.h>
 #include <wx/filename.h>
+#include <wx/log.h>
 #include <wx/menu.h>
 #include <wx/menuitem.h>
 #include <wx/msgdlg.h>
@@ -107,6 +110,42 @@ std::string asset_dir()
         }
     }
     return p;
+}
+
+// グローバル表示モード (view_mode_, diff_on_) を state.json の mode 文字列へ逆変換する
+// （controller::normalize_mode の逆。差分ON は "diff"、それ以外はモード名）。要件10.1・F1。
+std::string mode_to_string(controller::ViewMode mode, bool diff_on)
+{
+    if (diff_on)
+    {
+        // 差分トグル ON は "diff" として保存（復元時に source+diff_on へ正規化される）。
+        return "diff";
+    }
+    switch (mode)
+    {
+    case controller::ViewMode::Split:
+        return "split";
+    case controller::ViewMode::Preview:
+        return "preview";
+    case controller::ViewMode::Source:
+    default:
+        return "source";
+    }
+}
+
+// settings の Theme を state.json の theme.current 文字列へ写す（System→"system"）。
+std::string theme_to_string(core::settings::Theme theme)
+{
+    switch (theme)
+    {
+    case core::settings::Theme::Light:
+        return "light";
+    case core::settings::Theme::Dark:
+        return "dark";
+    case core::settings::Theme::System:
+    default:
+        return "system";
+    }
 }
 
 } // namespace
@@ -571,6 +610,77 @@ void MainFrame::apply_open_targets(const std::vector<std::string>& file_abs_list
     // 転送を受けた既存ウィンドウは前面化する（単一インスタンス転送の UX。design 5.1）。
     Raise();
     RequestUserAttention();
+}
+
+void MainFrame::restore_session(const controller::RestorePlan& plan)
+{
+    if (!plan.restorable)
+    {
+        return; // 未知 version・破損では復元しない（既定の空起動。K2）。
+    }
+
+    // 1. ウィンドウ位置・サイズ・最大化（要件10.1）。幅・高さが有効なときのみ当てる。
+    if (plan.has_window_geometry)
+    {
+        SetSize(static_cast<int>(plan.window_x), static_cast<int>(plan.window_y),
+                static_cast<int>(plan.window_width), static_cast<int>(plan.window_height));
+    }
+    if (plan.window_maximized)
+    {
+        Maximize(true);
+    }
+
+    // 2. 直前のワークスペース（既存の establish_baseline / start_watching 経路がそのまま走る）。
+    if (!plan.last_workspace.empty())
+    {
+        open_workspace(plan.last_workspace);
+    }
+
+    // 3. 各タブを開き、キャレット位置・先頭可視行を復元する。存在しないファイルはスキップする
+    //    （消失タブの安全遷移は別項目。ここでは実在するもののみ＝落ちないことを最優先・設計原則1）。
+    for (const auto& t : plan.tabs)
+    {
+        if (!wxFileName::FileExists(u8(t.path)))
+        {
+            continue;
+        }
+        open_file(t.path);
+        // open_file 直後は当該タブが選択中＝active_editor() がそれ。範囲外値は SCI が丸める。
+        if (auto* editor = active_editor())
+        {
+            editor->set_caret_position(t.caret);
+            editor->set_first_visible_line(t.scroll);
+        }
+    }
+
+    // 4. グローバル表示モードを active_tab（無ければ先頭タブ）の (mode, diff_on) から設定する。
+    //    現 GUI は表示モードがウィンドウ全体で 1 つのため、代表タブの値を採用する。
+    if (!plan.tabs.empty())
+    {
+        std::size_t rep = 0;
+        if (plan.active_tab >= 0 && plan.active_tab < static_cast<std::int64_t>(plan.tabs.size()))
+        {
+            rep = static_cast<std::size_t>(plan.active_tab);
+        }
+        view_mode_ = plan.tabs[rep].mode;
+        diff_on_ = plan.tabs[rep].diff_on;
+        update_preview();
+    }
+
+    // 5. アクティブタブを選択する（範囲内のときのみ。notebook のページ index と一致）。
+    if (plan.active_tab >= 0 &&
+        plan.active_tab < static_cast<std::int64_t>(notebook_->GetPageCount()))
+    {
+        notebook_->SetSelection(static_cast<std::size_t>(plan.active_tab));
+    }
+
+    // 6. ツリー展開（ベストエフォート）。set_root 後に当てる。存在しないノードは無視する。
+    if (tree_ != nullptr && !plan.tree_expanded.empty())
+    {
+        tree_->expand_rel_paths(plan.tree_expanded);
+    }
+
+    // 7. tree_pane_collapsed: 現 GUI にツリーペイン収納機能が無いため何もしない（N/A）。
 }
 
 void MainFrame::update_status()
@@ -1575,8 +1685,75 @@ void MainFrame::on_close_window(wxCloseEvent& evt)
         }
         // Veto できない強制終了（OS シャットダウン等）は止められない＝既存挙動で終了する。
     }
+    // 終了確定後・破棄前にセッションを退避する（次回の引数なし起動で完全復元する。要件10.1・F1）。
+    // 失敗しても終了は妨げない（save_session_state 内で握り潰す＝ベストエフォート）。
+    save_session_state();
     stop_watching(); // 監視スレッドを畳んでから破棄する（デストラクタと二重でも安全）。
     Destroy();
+}
+
+void MainFrame::save_session_state()
+{
+    if (data_root_.empty())
+    {
+        return; // 退避先未確定では何もしない（設計原則1）。
+    }
+
+    namespace cs = core::state;
+    cs::AppState state;
+    state.version = cs::kStateVersion;
+
+    // ウィンドウ位置・サイズ。最大化中は GetRect が最大化サイズになるが、MVP ではその値を保存し
+    // maximized フラグで上書き復元する（最大化解除後の位置がややずれても可。F1 範囲外）。
+    const wxRect rect = GetRect();
+    state.window.x = rect.GetX();
+    state.window.y = rect.GetY();
+    state.window.width = rect.GetWidth();
+    state.window.height = rect.GetHeight();
+    state.window.maximized = IsMaximized();
+
+    state.last_workspace = workspace_;
+
+    // 開いている各タブ（TabManager の index と notebook のページ index は同順）。
+    const std::string mode_str = mode_to_string(view_mode_, diff_on_);
+    const std::size_t tab_count = std::min<std::size_t>(tabs_.count(), notebook_->GetPageCount());
+    for (std::size_t i = 0; i < tab_count; ++i)
+    {
+        const controller::TabState* tab = tabs_.at(i);
+        if (tab == nullptr)
+        {
+            continue;
+        }
+        cs::TabState ts;
+        ts.path = tab->path;
+        if (auto* editor = dynamic_cast<EditorPanel*>(notebook_->GetPage(i)))
+        {
+            ts.caret = editor->caret_position();
+            ts.scroll = editor->first_visible_line();
+        }
+        // 現 GUI は表示モードがウィンドウ全体で 1 つ（タブ毎でない）。全タブに現在の値を書く。
+        ts.mode = mode_str;
+        ts.preview_scroll = 0; // WebView2 のスクロール復元は本タスク範囲外（0 固定）。
+        state.tabs.push_back(std::move(ts));
+    }
+    state.active_tab = notebook_->GetSelection(); // タブ無しは wxNOT_FOUND(-1)。
+
+    if (tree_ != nullptr)
+    {
+        state.tree_expanded = tree_->expanded_rel_paths();
+    }
+
+    // mode_by_type（種別毎モード記憶）は現 GUI 未実装＝空。recent（ジャンプリスト）も後回し＝空。
+    state.theme_current = theme_to_string(settings_.theme);
+
+    const std::string path = data_root_ + "\\state.json";
+    const auto result = cs::save_state(path, state);
+    if (result.is_err())
+    {
+        // 保存失敗は終了を妨げない（次回は前回の state.json or 空起動へフォールバック）。
+        // 診断はログのみ（ユーザー内容・絶対パスは書かない＝診断ログ規約・要件12.3）。
+        wxLogDebug("pika: state.json save failed");
+    }
 }
 
 // ---- タブ見出しの状態記号結線（display_mark。ui-design 5章） ----

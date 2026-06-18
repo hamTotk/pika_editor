@@ -14,6 +14,7 @@
 #include "controller/diff_mode_model.h"
 #include "controller/document_controller.h"
 #include "controller/notification_model.h"
+#include "controller/restore_plan.h"
 #include "controller/shortcut_table.h"
 #include "controller/tab_manager.h"
 #include "controller/workspace_controller.h"
@@ -63,6 +64,11 @@ class MainFrame : public wxFrame
     // line/column は将来のカーソル移動用（本 sprint はファイルを開くまで）。
     void apply_open_targets(const std::vector<std::string>& file_abs_list);
 
+    // 引数なし起動の前回セッション復元（要件10.1・F1）。RestorePlan（controller・wx 非依存）を
+    // 機械的に消費し、ウィンドウ位置・ワークスペース・タブ・キャレット/スクロール・表示モードを当てる。
+    // 存在しないファイルはスキップ（落ちない＝データを失わない・設計原則1）。
+    void restore_session(const controller::RestorePlan& plan);
+
   private:
     void build_menu();
     void build_layout();
@@ -92,6 +98,11 @@ class MainFrame : public wxFrame
     // ウィンドウ終了（X/Alt+F4/終了メニュー）。未保存タブがあれば確認し、キャンセルなら Veto する
     // （データを失わない。要件5.7・設計原則1）。
     void on_close_window(wxCloseEvent& evt);
+
+    // 終了時に現在のセッション（窓・タブ・キャレット/スクロール・モード・ツリー展開・テーマ）を
+    // state.json へ書き出す（要件10.1・F1）。data_root_ が空なら何もしない。
+    // 失敗は握り潰し（終了を妨げない＝状態保存はベストエフォート・設計原則1）。
+    void save_session_state();
 
     // 未保存タブの有無（終了/フォルダ切替の確認要否）。
     bool has_unsaved_tabs() const;

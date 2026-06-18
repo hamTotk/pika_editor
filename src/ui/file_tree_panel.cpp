@@ -6,8 +6,10 @@
 #include <wx/generic/dataview.h>
 #include <wx/sizer.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace pika::ui
@@ -151,7 +153,32 @@ class FileTreeModel : public wxDataViewModel
         return node != nullptr ? node->rel_path : std::string();
     }
 
+    // 全フォルダノードを (相対パス, item) で列挙する（展開状態の収集・復元に使う。state.json）。
+    std::vector<std::pair<std::string, wxDataViewItem>> dir_items() const
+    {
+        std::vector<std::pair<std::string, wxDataViewItem>> out;
+        if (root_)
+        {
+            collect_dirs(root_.get(), out);
+        }
+        return out;
+    }
+
   private:
+    static void collect_dirs(const controller::TreeRowVm* node,
+                             std::vector<std::pair<std::string, wxDataViewItem>>& out)
+    {
+        for (const auto& child : node->children)
+        {
+            if (child.is_dir)
+            {
+                out.emplace_back(child.rel_path,
+                                 wxDataViewItem(const_cast<controller::TreeRowVm*>(&child)));
+                collect_dirs(&child, out);
+            }
+        }
+    }
+
     static const controller::TreeRowVm* to_node(const wxDataViewItem& item)
     {
         return static_cast<const controller::TreeRowVm*>(item.GetID());
@@ -278,6 +305,32 @@ void FileTreePanel::set_root(const controller::TreeRowVm& root)
 void FileTreePanel::set_on_file_activated(OnFileActivated cb)
 {
     on_activated_ = std::move(cb);
+}
+
+std::vector<std::string> FileTreePanel::expanded_rel_paths() const
+{
+    std::vector<std::string> out;
+    for (const auto& [rel, item] : model_->dir_items())
+    {
+        if (view_->IsExpanded(item))
+        {
+            out.push_back(rel);
+        }
+    }
+    return out;
+}
+
+void FileTreePanel::expand_rel_paths(const std::vector<std::string>& rel_paths)
+{
+    // 現ツリーに存在する相対パスのみ展開する（消えたパスは無視＝落ちない。設計原則1）。
+    // 親→子の順で当てたいので dir_items の列挙順（深さ優先・親が先）に沿って照合する。
+    for (const auto& [rel, item] : model_->dir_items())
+    {
+        if (std::find(rel_paths.begin(), rel_paths.end(), rel) != rel_paths.end())
+        {
+            view_->Expand(item);
+        }
+    }
 }
 
 void FileTreePanel::on_item_activated(wxDataViewEvent& evt)
