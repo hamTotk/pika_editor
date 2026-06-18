@@ -227,6 +227,41 @@
   確認ダイアログ（保存/破棄/キャンセル・キャンセルで残る）、C7 全タブ一覧ドロップダウンを確認。ctest 647 PASS。
   隠れ未読バッジ（カスタム wxAuiTabArt）は後回し）
 
+## F-011 自己保存抑制が未結線—pika 自身の保存が外部変更として未読化される（D8）
+
+- **重大度**: 中（中心体験の未読＝外部/AI変更のはずが、自分の保存も未読/差分マーク化して誤誘導。
+  データ損失ではない）
+- **対応章**: D8（自己保存抑制）。C1 で「自分が保存した sjis-crlf.md が ◆/未読化」した観察の正体。
+- **根本原因**: `WatcherCore::register_self_save(path, hash_lf, at)`（＋`SelfSaveGuard`・ハッシュ一致主条件）
+  は実装済みだが、保存経路（`MainFrame::perform_save`/`on_save`）から**一度も呼ばれていない**。
+  トークン未登録のため watcher は自分の書き込みを抑制できず外部変更として扱う。
+- **対応方針**: `perform_save` の `write_atomic` 成功後に
+  `watcher_->register_self_save(rel, core::watcher::content_hash_lf(abs).value(), GetTickCount64())`
+  を呼ぶ。要点＝(1) path は監視ルート相対（`rel`。HashProbe が `root+"/"+rel`、FsEvent.path も rel）、
+  (2) hash は HashProbe と同じ `content_hash_lf`（ディスク実バイトの LF 正規化ハッシュ。メモリ上の
+  UTF-8 buffer ではなく書込済みファイルを読む）、(3) 時刻は watcher poll と同じ `::GetTickCount64()`
+  クロック。UI スレッドで write 直後に同期登録＝後続の on_raw_event(CallAfter) より先に登録され順序安全。
+- **状態**: 未対応（dev-generator で実装予定。D1〜D7 と合わせて実機検証）
+
+## F-012 クリーンな開タブへの外部変更がライブリロードされない（D3・中心体験の核）
+
+- **重大度**: 中〜高（pika の主目的＝AIの外部変更を確認する伴走。開いている文書が外部変更で更新されない
+  のは中心体験「外部変更の反映」の欠落。データ損失ではない）
+- **対応章**: D3（クリーンタブのライブリロード）。D1（ツリー未読バッジ）は動作。
+- **現象**: `target.md` を開いた状態（未編集=クリーン）で外部から書き換えると、ツリーにバッジは付く（D1◯）
+  が、**開いているエディタの内容が古いまま差し替わらない**（未保存にはならない）。
+- **根本原因**: `MainFrame::apply_fs_events` は UnreadMarked でツリー未読化のみ行い、**開いているタブの
+  Scintilla 内容を再読込する処理が無い**。`EditorPanel::set_text_utf8` のコメントにも「外部変更反映の
+  単一 Undo は sprint4」とあり未着手だった。
+- **対応方針**: (1) `EditorPanel` に `reload_text_utf8(utf8)` を追加＝`BeginUndoAction`/`EndUndoAction`
+  で**単一 Undo** にまとめて全文置換し（`EmptyUndoBuffer` は呼ばない＝Ctrl+Z で旧内容に戻せる）、
+  最後に `SetSavePoint()` でクリーン（ディスク一致）にする。(2) `apply_fs_events` の UnreadMarked で、
+  対象が開タブ かつ **クリーン（`is_dirty()`==false）** のとき、`read_all`+`decode_auto` で再読込し
+  `reload_text_utf8` で反映。`doc_meta_` の last_loaded_hash/encoding/has_bom も更新（次回保存の衝突基準
+  を新内容へ）。アクティブタブならプレビューも更新。(3) **dirty タブは再読込しない**（編集を守る＝衝突は
+  保存時の prepare_save が退避。D4）。未読バッジ（D1）は維持。
+- **状態**: 未対応（dev-generator で実装予定。D2/D4〜D7 と合わせて実機検証）
+
 ## 確認済み（自動・準備フェーズ）
 
 | 項目 | 結果 | 根拠 |
