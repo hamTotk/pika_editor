@@ -54,21 +54,23 @@ enum class MsgId
     NotifyStashFailed,           // 退避 I/O 失敗で上書き/確認をブロック（データを失わない）
     NotifySaveIoFailed,    // 保存の書き込み失敗（再試行/別名保存/属性確認を促す。失っていない）
     NotifyIndexSaveFailed, // 退避台帳(index.json)の保存失敗（退避 object は保存済み・再操作で復旧）
-    NotifyRollbackWriteFailed, // 巻き戻しの書き戻し失敗（退避済みで内容は安全・再試行を促す）
-    NotifyConfirmAllSkipped,   // すべて確認済みで一部スキップ（並行変化/退避失敗で未確認が残る）
-    NotifyConfirmStaleRediff,  // 単一確認の確定直前再照合で外部変更検知（差分更新を促す。E2）
-    NotifyConfirmNeedsSave,    // 単一確認の前に未保存編集あり（保存を促し中断。design 5.4）
-    NotifyOpenInBrowser,       // 通知バーのボタン: JS 入り HTML を既定ブラウザで開く（B3）
-    ConfirmClosePrompt,        // タブを閉じる前の未保存確認（保存/破棄/キャンセル。要件5.7）
-    ConfirmExitPrompt,         // 終了前の未保存確認（保存して終了/保存しない/キャンセル。要件5.7）
-    ConfirmSave,               // 確認ダイアログのボタン: 保存
-    ConfirmSaveAll,            // 確認ダイアログのボタン: すべて保存
-    ConfirmDiscard,            // 確認ダイアログのボタン: 破棄
-    ConfirmDiscardExit,        // 確認ダイアログのボタン: 保存しない（終了）
-    ConfirmCancel,             // 確認ダイアログのボタン: キャンセル
-    OverflowNotices,           // 通知バーの「他N件」集約行（{n} は呼び出し側で差し込む）
-    EmptyNoFolder,             // 中央: フォルダ未オープンの空状態
-    NotificationArea           // 通知バー領域のアクセシブルネーム
+    NotifyRollbackWriteFailed,   // 巻き戻しの書き戻し失敗（退避済みで内容は安全・再試行を促す）
+    NotifyConfirmAllSkipped,     // すべて確認済みで一部スキップ（並行変化/退避失敗で未確認が残る）
+    NotifyConfirmStaleRediff,    // 単一確認の確定直前再照合で外部変更検知（差分更新を促す。E2）
+    NotifyConfirmNeedsSave,      // 単一確認の前に未保存編集あり（保存を促し中断。design 5.4）
+    NotifyOpenInBrowser,         // 通知バーのボタン: JS 入り HTML を既定ブラウザで開く（B3）
+    NotifySettingsInvalidValues, // settings.toml の一部が不正で既定値を使用（要件10.3・F-016）
+    NotifySettingsParseFailed,   // settings.toml 読取不能で直前の有効設定を維持（F4・要件10.3）
+    ConfirmClosePrompt,          // タブを閉じる前の未保存確認（保存/破棄/キャンセル。要件5.7）
+    ConfirmExitPrompt,  // 終了前の未保存確認（保存して終了/保存しない/キャンセル。要件5.7）
+    ConfirmSave,        // 確認ダイアログのボタン: 保存
+    ConfirmSaveAll,     // 確認ダイアログのボタン: すべて保存
+    ConfirmDiscard,     // 確認ダイアログのボタン: 破棄
+    ConfirmDiscardExit, // 確認ダイアログのボタン: 保存しない（終了）
+    ConfirmCancel,      // 確認ダイアログのボタン: キャンセル
+    OverflowNotices,    // 通知バーの「他N件」集約行（{n} は呼び出し側で差し込む）
+    EmptyNoFolder,      // 中央: フォルダ未オープンの空状態
+    NotificationArea    // 通知バー領域のアクセシブルネーム
 };
 
 // ID → 日本語文言（UTF-8）。未定義 ID は空文字を返さず ID 名を返さない（網羅を保つ）。

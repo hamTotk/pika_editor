@@ -378,7 +378,17 @@
     旧ハングプロセスへ転送した誤観測。以後 5回以上のグレースフル終了は全てクリーン＆state.json 保存）。
   - **F2 △ 部分対応**: restore は消失ファイルをスキップ（落ちない）・ワークスペース消失は空状態。
     「削除済み」タブとして開く挙動は未実装。
-  - **F3/F4 未対応（次段で dev-generator 実装予定）**。F5/F6 後回し。
+  - **F3/F4 ✅ 実装・実機検証済み**: コントローラ層（`settings_view::apply_settings`・`to_ui_settings`・
+    `NotificationKind::SettingsError`）は実装済みだったので GUI 結線のみ追加。`MainFrame::load_and_watch_settings`
+    （起動直後・タブを開く前に main_gui から1回）→`reload_settings_from_disk`（`<data_root>\settings.toml` を
+    `read_all`→`load_settings(text, settings_)`→`apply_settings`：apply=true で settings_ 更新＋
+    `reapply_settings_to_ui`〔全エディタへ make_editor_config→apply_config・ツリー除外は refresh_tree〕、
+    parse_failed は settings_ 非更新＝直前値維持、warning/parse_failed は SettingsError 通知）。監視は
+    wxTimer の poll（2秒・mtime+size プレスクリーン。`core::watcher::probe`）。MsgId 2件追加。実機: 起動中の
+    wordWrap 編集→約2秒で long.md 折り返し変化(F3)／壊れTOML→警告＋直前値維持＋クラッシュなし(F4)。
+    既知の軽微点: 初回ロード後に poll 基準値を seed しないため、起動時に既に警告/破損ファイルがある場合のみ
+    初回ロードと初回pollで通知が二重化しうる（起動後編集の通常経路では発生しない・未修正）。
+  - **F5/F6 後回し（ユーザー判断）**。F2 △ 部分対応のまま。
 
 | 項目 | 結果 | 根拠 |
 |------|------|------|

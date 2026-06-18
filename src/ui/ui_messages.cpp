@@ -90,6 +90,10 @@ std::string message(MsgId id)
         return "未保存の変更があります。保存してから確認済みにしてください";
     case MsgId::NotifyOpenInBrowser:
         return "既定のブラウザで開く";
+    case MsgId::NotifySettingsInvalidValues:
+        return "設定の一部が不正なため既定値を使用しました（settings.toml）";
+    case MsgId::NotifySettingsParseFailed:
+        return "settings.toml を読み取れないため、直前の有効な設定を維持しています";
     case MsgId::StatusLinkNotFound:
         return "リンク先が見つかりません";
     case MsgId::ConfirmClosePrompt:

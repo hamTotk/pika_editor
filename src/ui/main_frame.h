@@ -69,11 +69,21 @@ class MainFrame : public wxFrame
     // 存在しないファイルはスキップ（落ちない＝データを失わない・設計原則1）。
     void restore_session(const controller::RestorePlan& plan);
 
+    // settings.toml の初回読込＋監視開始（F3/F4・F-016）。main_gui が表示直後・タブを開く前に 1 回
+    // 呼ぶ（開くエディタへ正しい設定を乗せる。design 5.1）。pika は settings.toml
+    // を読み取り専用で扱う。
+    void load_and_watch_settings();
+
   private:
     void build_menu();
     void build_layout();
     void refresh_tree();
     void update_status();
+
+    // settings.toml の読込・監視・反映（F3/F4・F-016。read-only）。
+    void reload_settings_from_disk();         // 初回＋監視検知時に呼ぶ（読込→apply→反映/通知）
+    void reapply_settings_to_ui();            // 新 settings を開いている全エディタへ再適用する
+    void on_settings_poll(wxTimerEvent& evt); // poll タイマ: settings.toml の変化検知
     // 開いた時点のベースライン確立＋起動時未読判定（design 5.1 手順4・9章。F-013）。
     void establish_baseline();
 
@@ -200,6 +210,14 @@ class MainFrame : public wxFrame
     std::unique_ptr<core::watcher::WatcherCore> watcher_; // 合成・自己保存抑制（非スレッドセーフ）
     std::unique_ptr<app::WatchThread> watch_thread_;      // ReadDirectoryChangesW 監視スレッド
     wxTimer debounce_timer_; // デバウンス窓経過後に poll を再実行する単発タイマー
+
+    // settings.toml の poll 監視（F3/F4・F-016）。読み取り専用・低頻度変更のため軽量な poll で十分
+    // （ReadDirectoryChangesW は使わない＝「軽い」原則）。前回観測した mtime/size と比較して変化時
+    // のみ再読込する。settings_seen_ は初回 probe 済みフラグ（未配置→配置の検知に使う）。
+    wxTimer settings_poll_timer_;
+    bool settings_seen_ = false;
+    std::uint64_t settings_mtime_ns_ = 0;
+    std::uint64_t settings_size_ = 0;
 
     // 重い変換（render_markdown・差分計算）を UI スレッドから外すワーカー（design 4章）。
     util::TaskRunner tasks_;

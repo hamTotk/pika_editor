@@ -225,7 +225,8 @@ class PikaApp : public wxApp
 
         // 3. 設定の同期読み（起動最序盤。design 5.1 手順1）。読み取り専用。
         pika::core::settings::Settings settings = pika::core::settings::default_settings();
-        // settings.toml の実配置・監視配線は sprint7。本 sprint は既定値で起動する。
+        // 初期 settings は既定値で渡し、settings.toml の実読込・監視は表示直後の
+        // load_and_watch_settings に一本化する（二重読込を避ける。F3/F4・F-016）。
 
         // 4. サーバー公開（受信リスナー起動）を**ウィンドウ表示の前に**完了する（TOCTOU 回避。
         //    design 5.1 手順2「サーバー公開はウィンドウ表示前」）。受信は UI
@@ -257,6 +258,13 @@ class PikaApp : public wxApp
         // 5. MainFrame 生成・表示（最短経路。design 5.1 手順3）。
         SetTopWindow(frame_);
         frame_->Show(true);
+
+        // 5.5 settings.toml を読み込み settings_
+        // を確定させ、監視（poll）を開始する（F3/F4・F-016）。
+        //     タブが開く前（restore/open の前）に呼び、開くエディタへ正しい設定を乗せる（design
+        //     5.1）。MainFrame には既定値を渡しているので、ここで実配置の settings.toml
+        //     に一本化する。
+        frame_->load_and_watch_settings();
 
         // 6. 表示後にワークスペース列挙・タブを開く（design 5.1 手順4。表示をブロックしない）。
         if (plan.restore_previous)

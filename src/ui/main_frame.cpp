@@ -6,6 +6,7 @@
 #include "controller/dir_lister.h"
 #include "controller/editor_view_model.h"
 #include "controller/preview_builder.h"
+#include "controller/settings_view.h"
 #include "controller/tree_view_messages.h"
 #include "controller/tree_view_model.h"
 #include "core/diff/diff_engine.h"
@@ -160,6 +161,9 @@ MainFrame::MainFrame(const core::settings::Settings& settings, const std::string
     // デバウンス窓経過後に poll を再実行し、バースト最後のイベントを確定させる（単発タイマー）。
     debounce_timer_.SetOwner(this);
     Bind(wxEVT_TIMER, &MainFrame::on_debounce_timer, this, debounce_timer_.GetId());
+    // settings.toml の poll 監視タイマー（F3/F4）。load_and_watch_settings で Start する。
+    settings_poll_timer_.SetOwner(this);
+    Bind(wxEVT_TIMER, &MainFrame::on_settings_poll, this, settings_poll_timer_.GetId());
     // フォーカス別ショートカット（Ctrl+Enter 等）を全体で 1 か所に集約して捌く（design 10章 J3）。
     Bind(wxEVT_CHAR_HOOK, &MainFrame::on_char_hook, this);
     // 終了（X/Alt+F4/終了メニュー）の未保存確認・Veto を 1 か所で受ける（要件5.7・設計原則1）。
@@ -168,6 +172,7 @@ MainFrame::MainFrame(const core::settings::Settings& settings, const std::string
 
 MainFrame::~MainFrame()
 {
+    settings_poll_timer_.Stop();
     stop_watching();
 }
 
@@ -390,6 +395,110 @@ void MainFrame::stop_watching()
         watch_thread_.reset();
     }
     watcher_.reset();
+}
+
+// ---- settings.toml の読込・監視・反映（F3/F4・F-016） ----
+
+void MainFrame::load_and_watch_settings()
+{
+    // 起動最序盤で 1 回ディスクから読み、settings_ を確定させる（タブが開く前に呼ぶ前提＝main_gui
+    // の Show 直後・restore/open の前。開くエディタへ正しい設定が乗る。design 5.1）。
+    reload_settings_from_disk();
+    // 以後は poll タイマで mtime/size の変化を検知して再読込する（読み取り専用・低頻度変更のため、
+    // ReadDirectoryChangesW を張らず軽量 poll で十分＝「軽い」原則）。間隔は 2 秒固定。
+    settings_poll_timer_.Start(2000);
+}
+
+void MainFrame::reload_settings_from_disk()
+{
+    if (data_root_.empty())
+    {
+        return; // 退避先未確定（ポータブル判定不能等）。既定のまま動く。
+    }
+    const std::string path = data_root_ + "\\settings.toml";
+    const auto bytes = util::read_all(path);
+    if (bytes.is_err())
+    {
+        return; // 未配置/読めない＝初回未配置は正常。既定 or 直前値を維持し警告も出さない。
+    }
+    // previous=現在の settings_（＝直前の有効値）。構文破損時は load 側が previous を返す。
+    const auto load = core::settings::load_settings(bytes.value(), settings_);
+    const controller::SettingsApplyResult r = controller::apply_settings(load);
+    if (r.apply)
+    {
+        // 適用可（parse_ok=true）。settings_ を更新し、開いている全エディタへ即時反映する（F3）。
+        settings_ = load.settings;
+        reapply_settings_to_ui();
+    }
+    // parse_failed（構文破損）は settings_
+    // を更新しない＝直前値維持でちらつかせない（F4・設計原則）。 通知はグローバル（tab_path
+    // 空）。正常（warning なし）のときは通知しない。
+    if (r.parse_failed)
+    {
+        push_notification(controller::NotificationKind::SettingsError, std::string{},
+                          message(MsgId::NotifySettingsParseFailed));
+    }
+    else if (r.warning_count > 0)
+    {
+        push_notification(controller::NotificationKind::SettingsError, std::string{},
+                          message(MsgId::NotifySettingsInvalidValues));
+    }
+}
+
+void MainFrame::reapply_settings_to_ui()
+{
+    // 開いている全エディタへ新 settings を再適用する（F3 の主眼＝エディタ設定の即時反映）。
+    // Newline::None は eol_mode
+    // を変えない指標（差分トグル再適用と同じ）＝ファイル毎の検出値を壊さない。
+    const std::size_t n = notebook_->GetPageCount();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        if (auto* editor = dynamic_cast<EditorPanel*>(notebook_->GetPage(i)))
+        {
+            editor->apply_config(controller::make_editor_config(settings_, util::Newline::None));
+        }
+    }
+    // ツリー除外（settings_.exclude）の即時反映: refresh_tree は enumerate_shallow_tree で exclude
+    // を
+    // 再適用するため、ワークスペースが開いていれば再列挙で反映する（タブ/状態に副作用なし＝ツリー再描画
+    // のみ）。未オープンなら no-op。
+    if (!workspace_.empty())
+    {
+        refresh_tree();
+    }
+    // 他の設定（巨大ファイル閾値・リモート許可・スナップショット容量等）は settings_ 更新だけで次回
+    // オンデマンド参照時に効くため、能動適用は不要。
+}
+
+void MainFrame::on_settings_poll(wxTimerEvent& evt)
+{
+    // settings_poll_timer_ 以外のタイマー（debounce 等）はここで扱わない。
+    if (evt.GetId() != settings_poll_timer_.GetId())
+    {
+        evt.Skip();
+        return;
+    }
+    if (data_root_.empty())
+    {
+        return;
+    }
+    const std::string path = data_root_ + "\\settings.toml";
+    const core::watcher::FileStat st = core::watcher::probe(path);
+    if (!st.exists)
+    {
+        // 未配置/削除。次に配置されたら mtime/size 変化として検知する（settings_seen_
+        // は据え置く）。
+        return;
+    }
+    // 前回観測と mtime/size が同じなら変化なし（軽量プレスクリーン。design 9章と同方式）。
+    if (settings_seen_ && st.mtime_ns == settings_mtime_ns_ && st.size == settings_size_)
+    {
+        return;
+    }
+    settings_seen_ = true;
+    settings_mtime_ns_ = st.mtime_ns;
+    settings_size_ = st.size;
+    reload_settings_from_disk();
 }
 
 void MainFrame::on_raw_event(const core::watcher::RawEvent& ev)
