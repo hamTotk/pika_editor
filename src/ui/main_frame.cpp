@@ -392,6 +392,8 @@ void MainFrame::apply_fs_events(const std::vector<core::watcher::FsEvent>& event
         case controller::FsChangeEffect::UnreadMarked:
             // 外部の作成/変更で未読化（タブは ± 差分あり／新規 ◆）。記号体系はツリーと一元化する。
             tabs_.set_unread(abs, true, /*has_baseline*/ !c.is_new);
+            // クリーンな開タブは新内容へライブリロードする（D3 中心体験。未読バッジは維持）。
+            reload_open_tab_if_clean(abs);
             break;
         case controller::FsChangeEffect::RenamedCarried:
             // rename 追従はパス同一性の付け替えであり、タブ側パスの更新は本タスクの範囲外（後続）。
@@ -403,6 +405,54 @@ void MainFrame::apply_fs_events(const std::vector<core::watcher::FsEvent>& event
     refresh_tree();
     refresh_all_tab_titles();
     update_status();
+}
+
+void MainFrame::reload_open_tab_if_clean(const std::string& abs)
+{
+    // 開いているタブのうち「クリーン（ディスク一致＝未編集）」のものだけを再読込する。
+    const std::size_t idx = tabs_.index_of(abs);
+    if (idx == controller::TabManager::kNoActive || idx >= notebook_->GetPageCount())
+    {
+        return; // 開いていない（ツリー未読化のみ）。
+    }
+    auto* editor = dynamic_cast<EditorPanel*>(notebook_->GetPage(idx));
+    if (!editor || editor->is_dirty())
+    {
+        // dirty タブは再読込しない（未保存編集を守る＝設計原則1）。
+        // 衝突は保存時 prepare_save が退避（D4）。
+        return;
+    }
+
+    // open_file の読込ロジックに倣う（read_all→decode_auto・失敗フォールバック）。
+    const auto bytes = util::read_all(abs);
+    if (!bytes.is_ok())
+    {
+        return; // 読めない（削除途中など）。古い内容を保持し、未読バッジだけ残す。
+    }
+    const auto decoded = util::decode_auto(bytes.value());
+    util::DecodedText text;
+    if (decoded.is_ok())
+    {
+        text = decoded.value();
+    }
+    else
+    {
+        text.content = bytes.value();
+    }
+    editor->reload_text_utf8(text.content);
+
+    // 次回保存の衝突基準を新内容に合わせる（open_file の DocMeta 設定と同じ）。
+    DocMeta meta;
+    meta.last_loaded_hash = util::xxh3_64_lf_hex(text.content);
+    meta.encoding = text.encoding;
+    meta.has_bom = text.has_bom;
+    doc_meta_[abs] = meta;
+
+    // アクティブタブならプレビュー/差分面も新内容へ更新する。
+    if (abs == active_file_path())
+    {
+        update_preview();
+    }
 }
 
 void MainFrame::open_file(const std::string& file_abs)
@@ -769,6 +819,19 @@ controller::SaveDecision MainFrame::perform_save(EditorPanel* editor, const std:
         mit->second.has_bom = with_bom;
     }
     tabs_.set_unsaved(abs, false);
+    // 自己保存トークンを登録する（書き込み直後）。watcher が自分の書き込みを外部変更として
+    // 誤検知し未読化するのを防ぐ（design 5.2 自己保存抑制）。キーは監視ルート相対 rel・
+    // ハッシュは書き込み済みディスク内容の LF 正規化値・時刻は poll と同じ単調クロックで揃える
+    // （rel が空＝ワークスペース外単体は監視対象外なのでスキップ）。
+    if (!rel.empty() && watcher_)
+    {
+        const auto self_hash = core::watcher::content_hash_lf(abs);
+        if (self_hash.is_ok())
+        {
+            watcher_->register_self_save(rel, self_hash.value(),
+                                         static_cast<core::watcher::TimeMs>(::GetTickCount64()));
+        }
+    }
     // Scintilla 内部の dirty もリセットして savepoint を張り直す（保存後の再編集で再び ● が付く）。
     editor->mark_clean();
     refresh_tab_title(tabs_.index_of(abs));

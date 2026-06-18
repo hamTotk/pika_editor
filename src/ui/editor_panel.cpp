@@ -69,6 +69,25 @@ void EditorPanel::set_text_utf8(const std::string& utf8)
     }
 }
 
+void EditorPanel::reload_text_utf8(const std::string& utf8)
+{
+    const bool was_read_only = GetReadOnly();
+    if (was_read_only)
+    {
+        SetReadOnly(false);
+    }
+    // 全文置換を単一 Undo にまとめる（EmptyUndoBuffer は呼ばない＝Ctrl+Z で旧内容へ戻せる）。
+    BeginUndoAction();
+    SetText(wxString::FromUTF8(utf8.c_str(), utf8.size()));
+    EndUndoAction();
+    // ディスク一致＝クリーン（dirty=false）。Ctrl+Z で旧内容へ戻すと自然に dirty になり ● が付く。
+    SetSavePoint();
+    if (was_read_only)
+    {
+        SetReadOnly(true);
+    }
+}
+
 std::string EditorPanel::text_utf8() const
 {
     // SCI の内部表現は UTF-8（CP_UTF8）。改行・空白を変換せず原文のまま取り出す。

@@ -78,6 +78,8 @@ class MainFrame : public wxFrame
     // デバウンス窓経過後の確定ドレイン（バースト最後の1件を拾う）。
     void on_debounce_timer(wxTimerEvent& evt);
     void apply_fs_events(const std::vector<core::watcher::FsEvent>& events); // 反映共通処理
+    // クリーンな開タブを外部変更後の新内容へ再読込する（D3。dirty タブは守る）。
+    void reload_open_tab_if_clean(const std::string& abs);
 
     void on_open_folder(wxCommandEvent& evt);
     void on_close_tab(wxCommandEvent& evt);
