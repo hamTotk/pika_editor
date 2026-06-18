@@ -83,6 +83,11 @@ std::string message(MsgId id)
     case MsgId::NotifyConfirmAllSkipped:
         // 件数つきの文言は notify_confirm_all_skipped(count) を使う（ここは件数なしの汎用文言）。
         return "一部のファイルは並行変化/退避失敗のため未確認のまま残りました";
+    case MsgId::NotifyConfirmStaleRediff:
+        return "外部変更を検出しました。差分を更新したので、内容を確認してから再度確認済みにして"
+               "ください";
+    case MsgId::NotifyConfirmNeedsSave:
+        return "未保存の変更があります。保存してから確認済みにしてください";
     case MsgId::NotifyOpenInBrowser:
         return "既定のブラウザで開く";
     case MsgId::StatusLinkNotFound:
