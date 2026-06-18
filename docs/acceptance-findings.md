@@ -262,6 +262,28 @@
   保存時の prepare_save が退避。D4）。未読バッジ（D1）は維持。
 - **状態**: 未対応（dev-generator で実装予定。D2/D4〜D7 と合わせて実機検証）
 
+## F-013 F5/resync がベースライン未確立で全ファイルを差分あり化（D6・F-008 と同根）
+
+- **重大度**: 中（F5 でレビュー状態が壊れる＝全ファイル未読化。データ損失ではない）
+- **対応章**: D6（F5 全体再スキャン）。B11/F-008（差分ベースライン）と同根。
+- **現象**: F5 を押すと「再同期中」は一瞬（または見えず）・固まらないが、**ツリーの全ファイルに「差分あり」が
+  付く**。
+- **根本原因**: `open_workspace` が `WorkspaceController::set_baseline(...)` を呼ばず**ベースラインが空**
+  （main_frame.cpp:249 で `WorkspaceController(workspace_)` 生成のみ・コメントに「ベースライン本体の供給
+  は sprint6 結線」とある）。`on_resync_needed` の `resync(workspace_, workspace_ctl_.baseline())` が
+  空ベースラインと突き合わせ、`resync` は baseline 不在のファイルを Created（新規）として全件イベント化
+  → `apply_fs_events` が全件 UnreadMarked。
+  - resync のプレスクリーンは「baseline の mtime+size と一致なら無変化（ハッシュも見ない）」なので、
+    **開いた時点の (size,mtime,hash) でベースラインを seed すれば F5/ポーリングは正しく無変化判定する**。
+- **対応方針**: `open_workspace` で現ファイル列挙から `BaselineMap`（rel→{size,mtime_ns,hash_lf}）を作り
+  `set_baseline` する（＝起動時未読判定の基準＝design 9章）。ハッシュ全計算の起動コストが問題なら
+  TaskRunner でバックグラウンド seed も検討。これは F-008（差分ビューのベースライン）・E章（確認/巻き戻し）
+  と同じ「sprint6 ベースライン確立」であり、まとめて実装すると D6/B11/E が一気に解ける。
+- **状態**: 検証済 ✅（段階1実装。`build_baseline_from_disk`＋`merge_index_into_baseline`（gtest 追加）で
+  open 時にベースライン確立＝`MainFrame::establish_baseline`。未確認ファイルは現 size+mtime で seed しクリーン、
+  確認済みは index の永続ベースラインで上書き→起動時 resync で確認後変更分のみ未読化。F5 は同 baseline を
+  使うため無変更ならマーク無し。実機確認済み。ctest 654 PASS。差分内容/トグル（F-008/B11）は段階2で対応）
+
 ## 確認済み（自動・準備フェーズ）
 
 | 項目 | 結果 | 根拠 |
