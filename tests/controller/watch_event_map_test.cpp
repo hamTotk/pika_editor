@@ -87,4 +87,13 @@ TEST(WatchEventMapTest, MakeRawEventDropsEmptyPath)
     EXPECT_FALSE(make_raw_event(kActionAdded, "", 1).has_value());
 }
 
+TEST(WatchEventMapTest, MakeRawEventDropsPikaTempFile)
+{
+    // pika 自身のアトミック書き込み一時ファイルは未読/差分へ流さない（F-014「幽霊未読」対策）。
+    EXPECT_FALSE(make_raw_event(kActionAdded, "report.md.pika-1234-5678.tmp", 1).has_value());
+    EXPECT_FALSE(make_raw_event(kActionRemoved, "sub\\doc.md.pika-1-2.tmp", 1).has_value());
+    // ユーザーの普通の `.tmp` は drop しない（イベントを返す）。
+    EXPECT_TRUE(make_raw_event(kActionAdded, "notes.tmp", 1).has_value());
+}
+
 } // namespace

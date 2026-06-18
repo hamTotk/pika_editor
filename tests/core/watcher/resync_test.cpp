@@ -26,6 +26,7 @@ using pika::core::watcher::BaselineMap;
 using pika::core::watcher::build_baseline_from_disk;
 using pika::core::watcher::FileStat;
 using pika::core::watcher::FsEventKind;
+using pika::core::watcher::is_pika_temp_file;
 using pika::core::watcher::probe;
 using pika::core::watcher::resync;
 
@@ -232,6 +233,60 @@ TEST_F(ResyncTest, BuildBaselineFromDiskExcludesGitAndNodeModules)
     auto base = build_baseline_from_disk(root_str());
     ASSERT_EQ(base.size(), 1u);
     EXPECT_EQ(base.count("real.md"), 1u);
+}
+
+// ---- is_pika_temp_file（純関数・F-014） ----
+
+TEST(IsPikaTempFileTest, MatchesAtomicWriteTempNames)
+{
+    // make_temp_path の出力 `<name>.pika-<pid>-<tick>.tmp` を捕捉する。
+    EXPECT_TRUE(is_pika_temp_file("report.pika-1234-5678.tmp"));
+    EXPECT_TRUE(is_pika_temp_file("report.md.pika-1234-5678.tmp"));
+    EXPECT_TRUE(is_pika_temp_file("sub/doc.md.pika-1-2.tmp"));
+    EXPECT_TRUE(is_pika_temp_file("sub\\doc.md.pika-1-2.tmp")); // '\\' 区切りでも抽出できる
+    EXPECT_TRUE(is_pika_temp_file("日本語.md.pika-7-9.tmp"));   // 非ASCII名でも捕捉
+}
+
+TEST(IsPikaTempFileTest, DoesNotMatchOrdinaryFiles)
+{
+    // ユーザーの普通の `.tmp`（`.pika-` を含まない）は除外しない。
+    EXPECT_FALSE(is_pika_temp_file("notes.tmp"));
+    EXPECT_FALSE(is_pika_temp_file("readme.md"));
+    // `.pika-` を含むが `.tmp` 末尾でないものは除外しない。
+    EXPECT_FALSE(is_pika_temp_file("a.pika-x.md"));
+    // ".tmp" 単体・末尾だけのケースは保守的に false。
+    EXPECT_FALSE(is_pika_temp_file(".tmp"));
+    EXPECT_FALSE(is_pika_temp_file(""));
+    // ディレクトリ名に `.pika-` があってもファイル名は普通＝除外しない。
+    EXPECT_FALSE(is_pika_temp_file("x.pika-1-2.tmp/child.md"));
+}
+
+TEST_F(ResyncTest, ResyncIgnoresPikaTempFiles)
+{
+    // pika
+    // の一時ファイルが再列挙で拾われない（起動時判定/F5/オーバーフロー回復で幽霊未読を生まない）。
+    write("real.md", "content");
+    // make_temp_path 相当の一時ファイルを実 FS に置く（write_atomic は rename
+    // 後に消えるため直接生成）。
+    write("real.md.pika-4321-9999.tmp", "leftover temp bytes");
+
+    BaselineMap base; // 空ベースライン（全実在ファイルが新規候補）。
+    auto events = resync(root_str(), base);
+
+    ASSERT_EQ(events.size(), 1u); // 一時ファイルは Created にならない
+    EXPECT_EQ(events[0].path, "real.md");
+    EXPECT_EQ(events[0].kind, FsEventKind::Created);
+}
+
+TEST_F(ResyncTest, BuildBaselineFromDiskExcludesPikaTempFiles)
+{
+    write("real.md", "content");
+    write("real.md.pika-1-2.tmp", "leftover");
+
+    auto base = build_baseline_from_disk(root_str());
+    ASSERT_EQ(base.size(), 1u);
+    EXPECT_EQ(base.count("real.md"), 1u);
+    EXPECT_EQ(base.count("real.md.pika-1-2.tmp"), 0u);
 }
 
 } // namespace

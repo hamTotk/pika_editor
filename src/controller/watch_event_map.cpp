@@ -1,5 +1,7 @@
 #include "controller/watch_event_map.h"
 
+#include "core/watcher/resync.h"
+
 namespace pika::controller
 {
 
@@ -59,6 +61,11 @@ std::optional<wat::RawEvent> make_raw_event(unsigned int action_code, const std:
     if (rel.empty())
     {
         // ルート自身・空パスは監視対象ファイルではない（呼び出し側は投入しない）。
+        return std::nullopt;
+    }
+    if (wat::is_pika_temp_file(rel))
+    {
+        // pika 自身のアトミック書き込み一時ファイルは未読/差分に流さない（F-014「幽霊未読」対策）。
         return std::nullopt;
     }
     wat::RawEvent ev;

@@ -18,6 +18,27 @@ bool is_excluded_dir(std::string_view name)
     return name == ".git" || name == "node_modules";
 }
 
+bool is_pika_temp_file(std::string_view rel_or_name)
+{
+    // ファイル名部分を取り出す（'/' '\\' 両対応・防御的）。
+    const std::size_t slash = rel_or_name.find_last_of("/\\");
+    const std::string_view name =
+        slash == std::string_view::npos ? rel_or_name : rel_or_name.substr(slash + 1);
+    // make_temp_path の出力 `<name>.pika-<digits>-<digits>.tmp` を捕捉する。
+    // `.pika-` 中置かつ `.tmp` 末尾（ユーザーの普通の `foo.tmp` は `.pika-` を含まず除外しない）。
+    constexpr std::string_view kMid = ".pika-";
+    constexpr std::string_view kSuffix = ".tmp";
+    if (name.size() <= kSuffix.size())
+    {
+        return false;
+    }
+    if (name.substr(name.size() - kSuffix.size()) != kSuffix)
+    {
+        return false;
+    }
+    return name.find(kMid) != std::string_view::npos;
+}
+
 namespace
 {
 
@@ -71,6 +92,10 @@ void enumerate(const fs::path& root, std::vector<Enumerated>& out)
         }
         Enumerated e;
         e.rel = rel_of(root, p);
+        if (is_pika_temp_file(e.rel))
+        {
+            continue; // pika 自身の一時ファイルは監視・再列挙とも不可視（F-014）
+        }
         e.st = probe(pika::util::path_to_utf8(p));
         if (e.st.exists)
         {
