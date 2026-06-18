@@ -933,6 +933,9 @@ void MainFrame::on_confirm(wxCommandEvent&)
     refresh_tab_title(tabs_.index_of(abs));
     refresh_tree();
     update_status();
+    // 新ベースライン基準で差分面を即更新する（確認直後は差分なしになる。E3）。トグル有効状態も
+    // 再評価される（diff_on_ は勝手に ON にしない＝ユーザー操作）。
+    update_preview();
     status_->SetStatusText(u8(MsgId::StatusConfirmed), 0);
 }
 
@@ -1064,6 +1067,28 @@ void MainFrame::on_rollback(wxCommandEvent&)
     // 巻き戻しで未保存編集が破棄され、ディスク＝ベースラインに揃った。タブの未保存記号を落とす。
     tabs_.set_unsaved(abs, false);
     refresh_tab_title(tabs_.index_of(abs));
+    // 巻き戻し後の差分面を更新する（ディスク＝ベースラインなので差分なしになる）。
+    update_preview();
+}
+
+bool MainFrame::has_diffable_baseline(const std::string& abs) const
+{
+    // 差分可能＝内容 object を持つ確認済みベースラインがあること（前回確認時点へ差分できる）。
+    const std::string rel = rel_path_for(abs);
+    if (data_root_.empty() || rel.empty())
+    {
+        return false;
+    }
+    const std::string snapshots_root = data_root_ + "\\snapshots";
+    core::snapshot::SnapshotStore store(snapshots_root, core::snapshot::workspace_key(workspace_));
+    auto loaded = store.load();
+    if (loaded.is_err())
+    {
+        return false; // index 未作成/破損は安全側で非活性（差分しない）。
+    }
+    const core::snapshot::IndexEntry* e = loaded.value().find(rel);
+    // baseline_object 空＝ハッシュのみ（10MB以上・画像・機密）。entry なし＝未確認。共に非活性。
+    return e != nullptr && !e->baseline_object.empty();
 }
 
 void MainFrame::update_diff_toggle_state()
@@ -1079,8 +1104,11 @@ void MainFrame::update_diff_toggle_state()
     controller::DiffToggleContext ctx;
     ctx.diffable_type = !path.empty() && controller::is_diffable_type(path);
     ctx.webview_available = PreviewView::webview_available();
-    // ベースライン（前回確認時点）の供給は core/snapshot 結線（sprint6）。現状は未取得。
-    ctx.has_baseline = false;
+    // ベースライン（前回確認時点）の有無を index.json から判定する。内容 object を持つ確認済み
+    // エントリ（baseline_object 非空）のみ差分可。ハッシュのみ（10MB以上・画像・機密）や未確認は
+    // false＝トグル無効のまま（design D2）。index.json は小さいので UI スレッド同期ロードで可
+    // （重くなるなら将来キャッシュ化する）。
+    ctx.has_baseline = has_diffable_baseline(path);
     ctx.content_bytes = editor ? editor->text_utf8().size() : 0;
 
     const controller::DiffDisableReason reason = controller::evaluate_diff_toggle(ctx);
@@ -1152,9 +1180,17 @@ void MainFrame::update_preview()
     const bool show_diff = layout.show_diff;
     const bool grid = layout.preview_diff_grid;
 
+    // 差分旧側（前回確認時点）のベースライン読み出しに要る値をワーカー投入前にキャプチャする
+    // （UI 状態をワーカーから触らない。実 I/O＝load/restore_baseline はワーカーで読み取りのみ）。
+    const std::string rel = rel_path_for(path);
+    const std::string snapshots_root =
+        data_root_.empty() ? std::string{} : data_root_ + "\\snapshots";
+    const std::string ws_key = core::snapshot::workspace_key(workspace_);
+
     // 重い変換（render_markdown・差分計算）をワーカーで実行し UI をブロックしない（design 4章）。
     // 完了後 UI スレッドへ戻し、stamp/key がまだ最新なら apply_document でナビゲートする。
-    tasks_.submit([this, stamp, key, source, kind, show_diff, grid, path]() {
+    tasks_.submit([this, stamp, key, source, kind, show_diff, grid, path, rel, snapshots_root,
+                   ws_key]() {
         // ワーカースレッド: コア（wx 非依存・スレッドセーフな純変換）だけを呼ぶ。
         controller::PreviewDoc doc;
         doc.kind = kind;
@@ -1184,11 +1220,27 @@ void MainFrame::update_preview()
         std::string full_html;
         if (show_diff)
         {
-            // 前回確認時点（ベースライン）と現内容の累積差分（コア DiffEngine・色非依存 +/-）。
-            // ベースライン供給は core/snapshot 結線（sprint6）。今は旧側を空で渡す。
+            // 前回確認時点（ベースライン）の内容を旧側として読み出す（ワーカー内・読み取りのみ・
+            // UI 非接触）。SnapshotStore はラムダ内でローカル生成し共有しない（並行ワーカー間で
+            // 同一 store を触らない）。restore_baseline 失敗・内容なし（ハッシュのみ）は old 空＝
+            // 全行追加表示にフォールバックする。
+            std::string old_content;
+            if (!snapshots_root.empty() && !rel.empty())
+            {
+                core::snapshot::SnapshotStore store(snapshots_root, ws_key);
+                auto idx = store.load();
+                if (idx.is_ok())
+                {
+                    auto b = store.restore_baseline(idx.value(), rel);
+                    if (b.is_ok())
+                    {
+                        old_content = b.value();
+                    }
+                }
+            }
+            // 前回確認時点（ベースライン）→現内容の累積差分（コア DiffEngine・色非依存 +/-）。
             const core::diff::DiffEngine engine;
-            const core::diff::DiffResult diff =
-                engine.compute(/*old*/ std::string_view{}, /*new*/ source);
+            const core::diff::DiffResult diff = engine.compute(/*old*/ old_content, /*new*/ source);
             full_html = grid ? controller::build_preview_diff_grid_document(doc, diff)
                              : controller::build_diff_document(
                                    diff, core::render::RemoteResourcePolicy::Blocked);
