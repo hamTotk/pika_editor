@@ -46,4 +46,13 @@ bool is_excluded_dir(std::string_view name);
 // 昇順（決定論）。本関数は baseline を書き換えない（呼び出し側が反映する）。
 std::vector<FsEvent> resync(std::string_view root, const BaselineMap& baseline);
 
+// root を再列挙し、実在ファイルの現 size+mtime をそのままベースラインとする BaselineMap を作る。
+// 「開いた時点で存在する各ファイル＝現内容をベースライン」とみなすための起動時用ヘルパ
+// （design.md 5.1 手順4・9章・要件9.2）。プレスクリーンが一致＝クリーン扱いになる。
+//   - 除外ディレクトリ（is_excluded_dir）は resync と同じく枝刈りする。
+//   - 各 rel に { size, mtime_ns, hash_lf=0 }
+//   を入れる（ハッシュは計算しない＝起動時に固まらない）。
+//     確認済みファイルの永続ベースライン（hash 付き）は呼び出し側が index からマージで上書きする。
+BaselineMap build_baseline_from_disk(std::string_view root);
+
 } // namespace pika::core::watcher

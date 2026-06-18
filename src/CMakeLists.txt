@@ -71,6 +71,8 @@ find_path(DTL_INCLUDE_DIR NAMES dtl/dtl.hpp REQUIRED)
 add_library(pika_core STATIC
     controller/app_controller.cpp
     controller/app_controller.h
+    controller/baseline_merge.cpp
+    controller/baseline_merge.h
     controller/data_root.cpp
     controller/data_root.h
     controller/degrade_model.cpp

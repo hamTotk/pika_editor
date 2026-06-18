@@ -1,6 +1,7 @@
 #include "ui/main_frame.h"
 
 #include "app/dir_enumerator.h"
+#include "controller/baseline_merge.h"
 #include "controller/diff_mode_model.h"
 #include "controller/dir_lister.h"
 #include "controller/editor_view_model.h"
@@ -252,10 +253,47 @@ void MainFrame::open_workspace(const std::string& folder_abs)
     {
         preview_->set_document_root(workspace_);
     }
+    // 中心体験の土台＝開いた時点のベースライン確立（design 5.1 手順4・9章・要件9.2。F-013）。
+    establish_baseline();
     refresh_tree();
     update_status();
     // 表示後にツリー列挙・監視開始（design 5.1 手順4。表示をブロックしない）。
     start_watching();
+}
+
+void MainFrame::establish_baseline()
+{
+    if (workspace_.empty())
+    {
+        return;
+    }
+    // 確認済みの永続ベースライン（baselineHash 付き）を index.json からロードする
+    // （on_confirm/perform_save と同じ要領）。data_root_ 未設定・load 失敗時は空 index で続行。
+    core::snapshot::SnapshotIndex index;
+    if (!data_root_.empty())
+    {
+        const std::string snapshots_root = data_root_ + "\\snapshots";
+        core::snapshot::SnapshotStore store(snapshots_root,
+                                            core::snapshot::workspace_key(workspace_));
+        auto loaded = store.load();
+        if (loaded.is_ok())
+        {
+            index = loaded.value();
+        }
+    }
+
+    // 開いた時点の現 size+mtime をベースライン化（未確認はプレスクリーン任せ＝クリーン）。
+    // 確認済みファイルは index の永続ベースライン（hash 付き）で上書きする。
+    // 注: 起動時のハッシュ全計算はしない（未確認は hash_lf=0）。確認済みのみ後段の resync が
+    // ハッシュ照合する。大規模フォルダ向けのバックグラウンド化は将来課題（現状は同期で十分軽い）。
+    auto base = core::watcher::build_baseline_from_disk(workspace_);
+    base = controller::merge_index_into_baseline(std::move(base), index);
+    workspace_ctl_.set_baseline(base);
+
+    // 起動時未読判定: 確認後に変わったファイルだけを未読化する（未確認はクリーン）。
+    // F5（on_resync_needed）も同じ baseline を使うため、本結線だけで正常化する。
+    const auto events = core::watcher::resync(workspace_, workspace_ctl_.baseline());
+    apply_fs_events(events);
 }
 
 void MainFrame::refresh_tree()

@@ -23,6 +23,7 @@ namespace fs = std::filesystem;
 
 using pika::core::watcher::BaselineEntry;
 using pika::core::watcher::BaselineMap;
+using pika::core::watcher::build_baseline_from_disk;
 using pika::core::watcher::FileStat;
 using pika::core::watcher::FsEventKind;
 using pika::core::watcher::probe;
@@ -192,6 +193,45 @@ TEST_F(ResyncTest, SubdirectoryFilesAreEnumerated)
     ASSERT_EQ(events.size(), 1u);
     EXPECT_EQ(events[0].path, "sub/deep/a.md");
     EXPECT_EQ(events[0].kind, FsEventKind::Created);
+}
+
+TEST_F(ResyncTest, BuildBaselineFromDiskCapturesPresentFiles)
+{
+    // 開いた時点の各実在ファイルが size+mtime でベースライン化される（ハッシュは 0）。
+    write("a.md", "hello");
+    write("sub/b.md", "longer content here");
+
+    auto base = build_baseline_from_disk(root_str());
+
+    ASSERT_EQ(base.size(), 2u);
+    ASSERT_EQ(base.count("a.md"), 1u);
+    ASSERT_EQ(base.count("sub/b.md"), 1u);
+    EXPECT_EQ(base["a.md"].size, probe(abs_of("a.md")).size);
+    EXPECT_EQ(base["a.md"].mtime_ns, probe(abs_of("a.md")).mtime_ns);
+    EXPECT_EQ(base["a.md"].hash_lf, 0u); // 起動時はハッシュを計算しない
+    EXPECT_EQ(base["sub/b.md"].size, probe(abs_of("sub/b.md")).size);
+}
+
+TEST_F(ResyncTest, BuildBaselineFromDiskThenResyncIsClean)
+{
+    // 開いた直後（無変更）は build_baseline_from_disk のベースラインで resync が空＝クリーン。
+    write("x.md", "content");
+    write("y.md", "more");
+
+    auto base = build_baseline_from_disk(root_str());
+    auto events = resync(root_str(), base);
+    EXPECT_TRUE(events.empty());
+}
+
+TEST_F(ResyncTest, BuildBaselineFromDiskExcludesGitAndNodeModules)
+{
+    write(".git/config", "[core]");
+    write("node_modules/pkg/index.js", "x");
+    write("real.md", "content");
+
+    auto base = build_baseline_from_disk(root_str());
+    ASSERT_EQ(base.size(), 1u);
+    EXPECT_EQ(base.count("real.md"), 1u);
 }
 
 } // namespace

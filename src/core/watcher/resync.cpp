@@ -160,4 +160,21 @@ std::vector<FsEvent> resync(std::string_view root, const BaselineMap& baseline)
     return out;
 }
 
+BaselineMap build_baseline_from_disk(std::string_view root)
+{
+    const fs::path root_path = pika::util::utf8_to_path(root);
+
+    std::vector<Enumerated> disk;
+    enumerate(root_path, disk); // resync と同じ除外枝刈り・実在ファイルのみ
+
+    BaselineMap base;
+    base.reserve(disk.size());
+    for (const auto& e : disk)
+    {
+        // 現 size+mtime をベースライン化（プレスクリーン一致＝クリーン）。ハッシュは計算しない。
+        base[e.rel] = BaselineEntry{e.st.size, e.st.mtime_ns, /*hash_lf=*/0};
+    }
+    return base;
+}
+
 } // namespace pika::core::watcher
