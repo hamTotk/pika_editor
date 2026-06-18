@@ -56,6 +56,8 @@ enum class MsgId
     NotifyIndexSaveFailed, // 退避台帳(index.json)の保存失敗（退避 object は保存済み・再操作で復旧）
     NotifyRollbackWriteFailed, // 巻き戻しの書き戻し失敗（退避済みで内容は安全・再試行を促す）
     NotifyConfirmAllSkipped,   // すべて確認済みで一部スキップ（並行変化/退避失敗で未確認が残る）
+    NotifyConfirmStaleRediff,  // 単一確認の確定直前再照合で外部変更検知（差分更新を促す。E2）
+    NotifyConfirmNeedsSave,    // 単一確認の前に未保存編集あり（保存を促し中断。design 5.4）
     NotifyOpenInBrowser,       // 通知バーのボタン: JS 入り HTML を既定ブラウザで開く（B3）
     ConfirmClosePrompt,        // タブを閉じる前の未保存確認（保存/破棄/キャンセル。要件5.7）
     ConfirmExitPrompt,         // 終了前の未保存確認（保存して終了/保存しない/キャンセル。要件5.7）

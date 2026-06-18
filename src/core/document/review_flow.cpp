@@ -76,6 +76,21 @@ Result<StashEntry> ReviewFlow::stash_conflict_before_take(SnapshotIndex& index,
 
 Result<IndexEntry> ReviewFlow::confirm(SnapshotIndex& index, const ReviewTarget& target)
 {
+    // 確定直前の再照合（要件8.3 / design 5.4 E2）。ユーザーが見た内容（expected_hash）と現ディスク
+    // 内容（target.content）のハッシュが不一致なら、差分描画後に外部変更が入った＝見ていない内容を
+    // ベースライン化することになるため中断する（中断・再差分は呼び出し側が行う）。expected_hash が
+    // 空の経路（見た内容の基準が無い＝タブ未オープン等）は従来どおり再照合せずベースライン化する。
+    if (!target.expected_hash.empty())
+    {
+        const std::string current = pika::util::xxh3_64_lf_hex(target.content);
+        if (target.expected_hash != current)
+        {
+            return Result<IndexEntry>::err(
+                ErrorCode::Cancelled,
+                "確定直前の再照合で内容が変わりました（見ていない内容のベースライン化を中止）");
+        }
+    }
+
     // ディスク内容でベースラインを更新し未読を解除する（要件8.3 / 5.4）。内容を持たない（10MB以上・
     // 画像・機密）ファイルはハッシュベースラインのみ更新する（D3。SnapshotStore に委譲）。
     return store_.set_baseline(index, target.rel_path, target.content, target.mtime,

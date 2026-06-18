@@ -901,6 +901,20 @@ void MainFrame::on_confirm(wxCommandEvent&)
     core::snapshot::SnapshotIndex index =
         loaded.is_ok() ? loaded.value() : core::snapshot::SnapshotIndex{};
 
+    // ユーザーが見た内容＝差分新側＝エディタ内容。clean なら source==ディスク内容。これを再照合の
+    // 基準にする（design 5.4 E2「見ていない内容をベースライン化しない」）。
+    EditorPanel* editor = active_editor();
+    const std::string source = editor ? editor->text_utf8() : std::string{};
+
+    // 未保存ガード（design 5.4「未保存があれば先に保存を促す」）。未保存編集はディスクに無く、
+    // ベースラインに反映できないため保存を促して中断する（ディスク読込より前に判定する）。
+    if (editor && editor->is_dirty())
+    {
+        wxMessageBox(u8(MsgId::NotifyConfirmNeedsSave), u8(MsgId::AppTitle),
+                     wxOK | wxICON_INFORMATION, this);
+        return;
+    }
+
     // 確認済みにする内容はディスクの実内容（確定直前に再読込。design 5.4 E2「見ていない内容を
     // ベースライン化しない」のための再照合の素材）。
     const auto disk = util::read_all(abs);
@@ -913,10 +927,26 @@ void MainFrame::on_confirm(wxCommandEvent&)
     target.content = disk.value();
     target.mtime = static_cast<std::int64_t>(::time(nullptr));
     target.cls = active_content_class();
+    // エディタがある＝見た内容の基準があるときのみ再照合する（無ければ未設定＝従来挙動）。
+    if (editor)
+    {
+        target.expected_hash = util::xxh3_64_lf_hex(source);
+    }
 
     auto out = doc.confirm(index, workspace_ctl_.unread_mut(), target);
     if (out.is_err())
     {
+        if (out.code() == util::ErrorCode::Cancelled)
+        {
+            // 確定直前の再照合で不一致＝外部変更が入った。ベースライン化を中止し（未読は維持）、
+            // 新ディスク内容へリロード＋差分を再描画してから通知する（design 5.4
+            // E2「中断・再差分」）。
+            reload_open_tab_if_clean(abs);
+            update_preview();
+            push_notification(controller::NotificationKind::Conflict, abs,
+                              message(MsgId::NotifyConfirmStaleRediff));
+            return;
+        }
         // 退避/更新失敗。未読は維持され、通知へ変換する（データを失わない）。
         wxMessageBox(u8(MsgId::NotifyStashFailed), u8(MsgId::AppTitle), wxOK | wxICON_WARNING,
                      this);

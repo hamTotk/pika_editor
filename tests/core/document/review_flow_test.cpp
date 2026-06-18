@@ -259,6 +259,68 @@ TEST_F(ReviewFlowTest, ConfirmLargeOrImageUpdatesHashBaselineOnly)
     EXPECT_EQ(restored.code(), ErrorCode::Unsupported);
 }
 
+// --- 確定直前の再照合（F-015 / design 5.4 E2） ------------------------------
+
+TEST_F(ReviewFlowTest, ConfirmRediffMatchUpdatesBaseline)
+{
+    // expected_hash
+    // が現ディスク内容（content）と一致＝ユーザーが見た内容のまま。ベースライン更新成功。
+    SnapshotStore store(snapshots_root(), workspace_key("C:/ws"));
+    ReviewFlow flow(store);
+    SnapshotIndex index;
+    ASSERT_TRUE(store.set_baseline(index, "a.md", "古い内容\n", 1, false, true).is_ok());
+    index.find("a.md")->unread = true;
+
+    const std::string disk = "確認したディスク内容\n";
+    ReviewTarget t = target("a.md", disk, 99);
+    t.expected_hash = pika::util::xxh3_64_lf_hex(disk); // 見た内容＝現ディスク内容
+
+    auto e = flow.confirm(index, t);
+    ASSERT_TRUE(e.is_ok());
+    EXPECT_FALSE(e.value().unread);
+    EXPECT_EQ(e.value().baseline_hash, pika::util::xxh3_64_lf_hex(disk)); // ディスク内容で更新
+}
+
+TEST_F(ReviewFlowTest, ConfirmRediffMismatchCancelsWithoutBaselineChange)
+{
+    // expected_hash が現ディスク内容と不一致＝差分描画後に外部変更が入った。Cancelled で中断し
+    // ベースラインは旧のまま（未読維持できる前提。設計原則1「データを失わない」）。
+    SnapshotStore store(snapshots_root(), workspace_key("C:/ws"));
+    ReviewFlow flow(store);
+    SnapshotIndex index;
+    ASSERT_TRUE(store.set_baseline(index, "a.md", "旧ベースライン\n", 1, false, true).is_ok());
+    const std::string old_hash = index.find("a.md")->baseline_hash;
+    index.find("a.md")->unread = true;
+
+    const std::string disk = "外部変更後の現ディスク内容\n";
+    ReviewTarget t = target("a.md", disk, 99);
+    t.expected_hash = pika::util::xxh3_64_lf_hex("ユーザーが見ていた古い内容\n"); // 不一致
+
+    auto e = flow.confirm(index, t);
+    ASSERT_TRUE(e.is_err());
+    EXPECT_EQ(e.code(), ErrorCode::Cancelled);              // 中断（再差分は呼び出し側）
+    EXPECT_EQ(index.find("a.md")->baseline_hash, old_hash); // ベースライン未変更
+    EXPECT_TRUE(index.find("a.md")->unread);                // 未読は維持
+}
+
+TEST_F(ReviewFlowTest, ConfirmEmptyExpectedHashSkipsRediff)
+{
+    // expected_hash 空＝再照合しない（タブ未オープン等）。後方互換で従来どおり更新成功する。
+    SnapshotStore store(snapshots_root(), workspace_key("C:/ws"));
+    ReviewFlow flow(store);
+    SnapshotIndex index;
+    ASSERT_TRUE(store.set_baseline(index, "a.md", "古い内容\n", 1, false, true).is_ok());
+    index.find("a.md")->unread = true;
+
+    const std::string disk = "確認したディスク内容\n";
+    ReviewTarget t = target("a.md", disk, 99); // expected_hash は空のまま
+
+    auto e = flow.confirm(index, t);
+    ASSERT_TRUE(e.is_ok());
+    EXPECT_FALSE(e.value().unread);
+    EXPECT_EQ(e.value().baseline_hash, pika::util::xxh3_64_lf_hex(disk));
+}
+
 // --- 巻き戻し非活性判定（D3） ------------------------------------------------
 
 TEST_F(ReviewFlowTest, CanRollbackOnlyWhenBaselineObjectPresent)
