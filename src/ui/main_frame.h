@@ -113,6 +113,9 @@ class MainFrame : public wxFrame
     void update_preview();
     // 差分トグルの可否を再評価し、メニュー項目の Enable/Check とステータス文言へ反映する。
     void update_diff_toggle_state();
+    // 指定パスに差分可能なベースライン（内容 object を持つ確認済みエントリ）があるか
+    // index.json で判定する（ハッシュのみ/未確認は false。design D2）。UI スレッド同期ロード。
+    bool has_diffable_baseline(const std::string& abs) const;
     // プレビュー内リンクの振り分け（相対 .md/.html はタブ・他は既定ブラウザ。design 6章）。
     void on_preview_navigate(const std::string& url);
 
