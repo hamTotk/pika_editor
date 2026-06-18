@@ -20,6 +20,7 @@ using pika::controller::build_tree_view_model;
 using pika::controller::classify_icon;
 using pika::controller::icon_category_label;
 using pika::controller::IconCategory;
+using pika::controller::merge_deleted_into_view_model;
 using pika::controller::NodeStateInput;
 using pika::controller::resolve_file_mark;
 using pika::controller::state_mark_label;
@@ -290,6 +291,120 @@ TEST(BuildTreeViewModelTest, PreservesFolderFirstNaturalOrder)
     EXPECT_EQ(vm.children[1].name, "zdir");
     EXPECT_EQ(vm.children[2].name, "file2.txt");
     EXPECT_EQ(vm.children[3].name, "file10.txt");
+}
+
+// ---- 削除パスの後段マージ（F-017：取り消し線リーフをツリーへ補う） ----
+
+TEST(MergeDeletedTest, TopLevelDeletedLeafIsInserted)
+{
+    // ディスク再列挙には残った 1 件だけ。削除された gone.md をマージで補う。
+    std::vector<Entry> entries = {{"keep.md", false}};
+    TreeNode root = build_tree(entries, {});
+    UnreadSet unread;
+    TreeRowVm vm = build_tree_view_model(root, unread);
+
+    merge_deleted_into_view_model(vm, {"gone.md"});
+
+    const TreeRowVm* gone = find_child(vm, "gone.md");
+    ASSERT_NE(gone, nullptr);
+    EXPECT_EQ(gone->mark, StateMark::Deleted); // 取り消し線（記号なし）
+    EXPECT_FALSE(gone->is_dir);
+    EXPECT_EQ(gone->rel_path, "gone.md");
+    EXPECT_EQ(gone->icon, IconCategory::Text); // .md → Text
+    // 既存の keep.md はそのまま。
+    ASSERT_NE(find_child(vm, "keep.md"), nullptr);
+}
+
+TEST(MergeDeletedTest, DeletedLeafUnderExistingFolderIsInserted)
+{
+    // src フォルダは残り（兄弟ファイルあり）、src/gone.md だけ削除された。
+    std::vector<Entry> entries = {{"src", true}, {"src/keep.md", false}};
+    TreeNode root = build_tree(entries, {});
+    UnreadSet unread;
+    TreeRowVm vm = build_tree_view_model(root, unread);
+
+    merge_deleted_into_view_model(vm, {"src/gone.md"});
+
+    const TreeRowVm* src = find_child(vm, "src");
+    ASSERT_NE(src, nullptr);
+    const TreeRowVm* gone = find_child(*src, "gone.md");
+    ASSERT_NE(gone, nullptr);
+    EXPECT_EQ(gone->mark, StateMark::Deleted);
+    EXPECT_EQ(gone->rel_path, "src/gone.md");
+    // 既存ファイルは保持。
+    ASSERT_NE(find_child(*src, "keep.md"), nullptr);
+}
+
+TEST(MergeDeletedTest, ExistingPathIsSkippedNoDuplicate)
+{
+    // ディスクに在る（＝削除されていない/再作成済み）パスはスキップして二重挿入しない。
+    std::vector<Entry> entries = {{"live.md", false}};
+    TreeNode root = build_tree(entries, {});
+    UnreadSet unread;
+    unread.mark("live.md");
+    TreeRowVm vm = build_tree_view_model(root, unread); // live.md は Diff
+
+    merge_deleted_into_view_model(vm, {"live.md"});
+
+    // 子は 1 件のまま（重複なし）。既存マークは Deleted で上書きされない。
+    int count = 0;
+    for (const auto& c : vm.children)
+    {
+        if (c.name == "live.md")
+        {
+            ++count;
+        }
+    }
+    EXPECT_EQ(count, 1);
+    const TreeRowVm* live = find_child(vm, "live.md");
+    ASSERT_NE(live, nullptr);
+    EXPECT_EQ(live->mark, StateMark::Diff); // 既存表示のまま（削除扱いにしない）
+}
+
+TEST(MergeDeletedTest, MissingIntermediateFolderIsCreated)
+{
+    // 親フォルダごと外部削除され、ディスク再列挙には現れない。中間フォルダを作成して補う。
+    std::vector<Entry> entries = {{"other.md", false}};
+    TreeNode root = build_tree(entries, {});
+    UnreadSet unread;
+    TreeRowVm vm = build_tree_view_model(root, unread);
+
+    merge_deleted_into_view_model(vm, {"dir/sub/gone.md"});
+
+    const TreeRowVm* dir = find_child(vm, "dir");
+    ASSERT_NE(dir, nullptr);
+    EXPECT_TRUE(dir->is_dir);
+    EXPECT_EQ(dir->mark, StateMark::None); // 作成フォルダに伝播マークは付けない
+    EXPECT_EQ(dir->rel_path, "dir");
+    const TreeRowVm* sub = find_child(*dir, "sub");
+    ASSERT_NE(sub, nullptr);
+    EXPECT_TRUE(sub->is_dir);
+    EXPECT_EQ(sub->rel_path, "dir/sub");
+    const TreeRowVm* gone = find_child(*sub, "gone.md");
+    ASSERT_NE(gone, nullptr);
+    EXPECT_EQ(gone->mark, StateMark::Deleted);
+    EXPECT_EQ(gone->rel_path, "dir/sub/gone.md");
+}
+
+TEST(MergeDeletedTest, SamePathMergedTwiceInsertsOnce)
+{
+    // 同一 rel_path を二度渡しても 1 件だけ挿入する（重複防止）。
+    std::vector<Entry> entries = {{"keep.md", false}};
+    TreeNode root = build_tree(entries, {});
+    UnreadSet unread;
+    TreeRowVm vm = build_tree_view_model(root, unread);
+
+    merge_deleted_into_view_model(vm, {"gone.md", "gone.md"});
+
+    int count = 0;
+    for (const auto& c : vm.children)
+    {
+        if (c.name == "gone.md")
+        {
+            ++count;
+        }
+    }
+    EXPECT_EQ(count, 1);
 }
 
 // ---- メッセージ写像（should：列挙値 → 記号/日本語ラベルの単一定義） ----

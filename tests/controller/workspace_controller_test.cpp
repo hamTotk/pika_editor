@@ -99,6 +99,44 @@ TEST(WorkspaceControllerTest, RemovedReportsPathRemovedAndClearsUnread)
     EXPECT_NE(wc.states().find("gone.md"), wc.states().end());
 }
 
+// ---- 削除パス集合のライフサイクル（F-017：ツリー取り消し線マージ素材） ----
+
+TEST(WorkspaceControllerTest, RemovedAddsToDeletedPaths)
+{
+    WorkspaceController wc("C:/ws");
+    EXPECT_TRUE(wc.deleted_paths().empty());
+
+    wc.apply_events({make_event(FsEventKind::Removed, "gone.md")});
+    ASSERT_EQ(wc.deleted_paths().size(), 1u);
+    EXPECT_EQ(wc.deleted_paths()[0], "gone.md");
+
+    // 同一パスの再削除イベントでも重複しない。
+    wc.apply_events({make_event(FsEventKind::Removed, "gone.md")});
+    EXPECT_EQ(wc.deleted_paths().size(), 1u);
+}
+
+TEST(WorkspaceControllerTest, RecreatedPathIsRemovedFromDeletedPaths)
+{
+    WorkspaceController wc("C:/ws");
+    wc.apply_events({make_event(FsEventKind::Removed, "gone.md")});
+    ASSERT_EQ(wc.deleted_paths().size(), 1u);
+
+    // 再びディスクに現れた（Created）→ 削除表示を解除する。
+    wc.apply_events({make_event(FsEventKind::Created, "gone.md")});
+    EXPECT_TRUE(wc.deleted_paths().empty());
+}
+
+TEST(WorkspaceControllerTest, RenameTargetIsRemovedFromDeletedPaths)
+{
+    // 一度削除されたパスが rename 先として再出現したら削除集合から外す。
+    WorkspaceController wc("C:/ws");
+    wc.apply_events({make_event(FsEventKind::Removed, "new.md")});
+    ASSERT_EQ(wc.deleted_paths().size(), 1u);
+
+    wc.apply_events({make_event(FsEventKind::Renamed, "new.md", "old.md")});
+    EXPECT_TRUE(wc.deleted_paths().empty());
+}
+
 // ---- rename 追従：未読・ベースラインを新パスへ引き継ぐ ----
 
 TEST(WorkspaceControllerTest, RenameCarriesUnreadToNewPath)

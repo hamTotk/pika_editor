@@ -93,6 +93,11 @@ class WorkspaceController
     // 握り潰さず UI/ログ（消失タブ安全遷移・退避保全の診断）へ流す素材として観測できる。
     const std::vector<std::string>& orphaned() const noexcept { return orphaned_; }
 
+    // 外部削除されたファイルの相対パス集合（要件11.5・ui-design 5章・F-017）。ディスク再列挙では
+    // 削除ファイルが落ちるため、ツリー ViewModel へ取り消し線リーフを補うマージ素材として保持する。
+    // Removed で追加、Created/Modified/rename で当該パスが再びディスクに現れたら除去する。
+    const std::vector<std::string>& deleted_paths() const noexcept { return deleted_; }
+
     // ツリーノード（build_tree の結果）から、現在の未読/新規状態を載せた ViewModel を構築する。
     // 純ロジックの集約点（tree_view_model.build_tree_view_model を現状態で呼ぶだけ）。
     TreeRowVm build_view_model(const core::workspace::TreeNode& tree) const;
@@ -122,6 +127,8 @@ class WorkspaceController
     // apply_renames の reevaluate/orphaned を握り潰さず累積する（UI/ログへ流す素材）。
     std::vector<std::string> reevaluate_;
     std::vector<std::string> orphaned_;
+    // 外部削除パス集合（取り消し線マージ素材。F-017）。重複を避けるため挿入時に存在確認する。
+    std::vector<std::string> deleted_;
 };
 
 } // namespace pika::controller

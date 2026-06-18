@@ -168,4 +168,132 @@ TreeRowVm build_tree_view_model(const core::workspace::TreeNode& root,
     return convert_node(root, unread, new_files);
 }
 
+namespace
+{
+
+// parent.children から名前 seg のフォルダ子を探す（無ければ nullptr）。
+TreeRowVm* find_dir_child(TreeRowVm& parent, std::string_view seg)
+{
+    for (auto& c : parent.children)
+    {
+        if (c.is_dir && c.name == seg)
+        {
+            return &c;
+        }
+    }
+    return nullptr;
+}
+
+// rel_path（'/' 区切り）が root
+// を起点にツリーへ既に存在するか（ディスクに在る＝削除されていない）。
+bool path_exists_in_tree(const TreeRowVm& root, std::string_view rel_path)
+{
+    const TreeRowVm* node = &root;
+    std::size_t pos = 0;
+    while (pos <= rel_path.size())
+    {
+        std::size_t slash = rel_path.find('/', pos);
+        std::string_view seg = rel_path.substr(
+            pos, slash == std::string_view::npos ? std::string_view::npos : slash - pos);
+        const TreeRowVm* next = nullptr;
+        for (const auto& c : node->children)
+        {
+            if (c.name == seg)
+            {
+                next = &c;
+                break;
+            }
+        }
+        if (next == nullptr)
+        {
+            return false;
+        }
+        node = next;
+        if (slash == std::string_view::npos)
+        {
+            return true;
+        }
+        pos = slash + 1;
+    }
+    return false;
+}
+
+// 削除パス 1 件をツリーへ挿入する。親フォルダ階層を辿り、無い中間フォルダは作成する。
+// リーフは StateMark::Deleted（取り消し線・記号なし）。同一フォルダ内の重複は挿入しない。
+void insert_deleted_leaf(TreeRowVm& root, std::string_view rel_path)
+{
+    TreeRowVm* parent = &root;
+    std::size_t pos = 0;
+    std::string accum; // 現在地までの相対パス（中間フォルダ作成時の rel_path 用）。
+    while (true)
+    {
+        std::size_t slash = rel_path.find('/', pos);
+        if (slash == std::string_view::npos)
+        {
+            // 最終セグメント＝削除リーフ。
+            std::string_view leaf = rel_path.substr(pos);
+            const std::string leaf_rel(rel_path);
+            // 同一フォルダ内の重複（同じ rel_path）は挿入しない。
+            for (const auto& c : parent->children)
+            {
+                if (c.rel_path == leaf_rel)
+                {
+                    return;
+                }
+            }
+            TreeRowVm node;
+            node.name.assign(leaf.begin(), leaf.end());
+            node.rel_path = leaf_rel;
+            node.is_dir = false;
+            node.icon = classify_icon(node.name);
+            node.mark = StateMark::Deleted;
+            parent->children.push_back(std::move(node));
+            return;
+        }
+
+        // 中間フォルダ。既存を辿り、無ければ作成する。
+        std::string_view seg = rel_path.substr(pos, slash - pos);
+        if (!accum.empty())
+        {
+            accum.push_back('/');
+        }
+        accum.append(seg.begin(), seg.end());
+
+        TreeRowVm* child = find_dir_child(*parent, seg);
+        if (child == nullptr)
+        {
+            TreeRowVm dir;
+            dir.name.assign(seg.begin(), seg.end());
+            dir.rel_path = accum;
+            dir.is_dir = true;
+            dir.icon = IconCategory::Folder;
+            dir.mark = StateMark::None; // 作成フォルダに伝播マークは付けない（足さない）。
+            parent->children.push_back(std::move(dir));
+            child = &parent->children.back();
+        }
+        parent = child;
+        pos = slash + 1;
+    }
+}
+
+} // namespace
+
+void merge_deleted_into_view_model(TreeRowVm& root,
+                                   const std::vector<std::string>& deleted_rel_paths)
+{
+    for (const auto& rel : deleted_rel_paths)
+    {
+        if (rel.empty())
+        {
+            continue;
+        }
+        // 既にツリーに在る（ディスクに在る＝削除されていない/再作成済み）はスキップ＝二重防止。
+        if (path_exists_in_tree(root, rel))
+        {
+            continue;
+        }
+        insert_deleted_leaf(root, rel);
+    }
+}
+
 } // namespace pika::controller
