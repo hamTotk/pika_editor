@@ -13,6 +13,7 @@
 #include <wx/stc/stc.h>
 #include <wx/window.h>
 
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -39,6 +40,13 @@ class EditorPanel : public wxStyledTextCtrl
 
     // 編集の有無（未保存判定。SCI のモディファイ状態）。
     bool is_dirty() const;
+
+    // キャレット位置・先頭可視行の取得/設定（state.json 復元。要件10.1・F1）。範囲外は Scintilla が
+    // 安全に丸めるため、復元前に内容を当てておけば不正値でも落ちない（データを失わない・設計原則1）。
+    std::int64_t caret_position() const;
+    void set_caret_position(std::int64_t pos);
+    std::int64_t first_visible_line() const;
+    void set_first_visible_line(std::int64_t line);
 
     // dirty 変化の通知コールバック（true=未保存になった/false=クリーンに戻った）。
     // Scintilla の savepoint 通知（SAVEPOINTLEFT/SAVEPOINTREACHED）から呼ぶ。

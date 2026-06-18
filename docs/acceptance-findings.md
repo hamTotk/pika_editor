@@ -341,7 +341,44 @@
 - **状態**: ✅ 修正済み・検証済み（GUI: ①未保存ガードのダイアログ表示 ②外部変更→確認で差分消去・誤通知
   なしの回帰を実機確認。不一致→中断経路は gtest 3件で担保。ctest x64-core-test 全 PASS=662件）
 
-## 確認済み（自動・準備フェーズ）
+## F-016 F章（状態復元・設定・テーマ・ジャンプリスト）の GUI 結線が未実装（sprint7 GUI 配線の欠落）
+
+- **重大度**: 中〜大（要件10章の主要機能が GUI で動かない。ただし core/controller は実装＆gtest 済みで、
+  欠落は「系統B/C の配線」に限定。データ損失には直結しない）
+- **対応章**: F1〜F6。実機 GUI 検証で初めて表面化（系統A の gtest は通っているため見落とされていた）。
+- **現象（コードで確認）**:
+  - **F1 完全復元（要件10.1・sprint7 must）**: `core/state/state_io`（state.json 読み書き）と
+    `controller/restore_plan`（RestorePlan 組み立て）は実装・gtest 済みだが GUI から呼ばれない。
+    `on_close_window`（main_frame.cpp 1566行）は state.json を**保存しない**。`app_controller` は
+    `restore_previous`（引数なし起動）を算出するが（app_controller.cpp 95行）、`main_gui.cpp` で
+    **消費されず**、`plan.folder` 指定時の `open_workspace` しか実行しない（main_gui.cpp 260行）。
+    →フォルダ/タブ/カーソル/表示モード/差分トグル/ツリー展開/ペイン/ウィンドウ位置の復元が動かない。
+  - **F2 消失タブの安全遷移（要件10.1）**: 復元（F1）に依存する部分が未配線（タブの「削除済み」表示
+    自体は存在）。
+  - **F3/F4 settings.toml の反映/破損時（要件10.3/10.4）**: `core/settings` は実装済みだが
+    `main_gui.cpp` は `default_settings()` で起動し（225-226行・「settings.toml の実配置・監視配線は
+    sprint7」コメント明記）、**settings.toml をディスクから読まず・監視もしない**。
+  - **F5 ジャンプリスト（要件10.2・should）**: 該当コードがプロジェクトに**皆無**（JumpList /
+    ICustomDestinationList 等の参照なし）。
+  - **F6 OS テーマ追従（要件10.3/11.4）**: `on_sys_colour_changed`（main_frame.cpp 1462行）は
+    `Refresh()` のみの骨格で「テーマトークンの再解決は sprint7」とコメント。実際の配色再適用は未実装。
+- **対応方針（候補）**: (1) F1 — `on_close_window` で AppState を組み立て `state_io` で保存、起動時
+  `restore_previous` なら `load_state`→`build_restore_plan`→MainFrame が機械的に消費して復元。
+  (2) F3/F4 — `main_gui` でデータルートの settings.toml を読込（破損時は既定＋警告・直前有効値維持）、
+  `core/watcher` で監視し変更を反映（読み取り専用＝書き戻さない）。(3) F6 — テーマトークンを
+  `wxSysColourChangedEvent` で再解決し配色再適用。(4) F5 — Win32 ジャンプリスト（should・優先度低）。
+- **状態（更新）**: ユーザー判断「must を実装（F1+F3/F4）」。
+  - **F1 ✅ 実装・実機検証済み**: `on_close_window` で `save_session_state()`（AppState 組み立て→
+    `state_io::save_state(<data_root>\state.json)`、失敗は握り潰しベストエフォート）。引数なし起動
+    （`plan.restore_previous`）で `load_state`→`build_restore_plan`→`MainFrame::restore_session`。
+    EditorPanel に caret/scroll の getter/setter、FileTreePanel に展開 get/set を追加。実機: フォルダ/
+    タブ3つ/アクティブタブ/カーソル位置(offset218)/ツリー展開(sub)/ウィンドウ位置を復元確認。
+    ctest 662 PASS。制限: 表示モードはウィンドウ単一(タブ毎でない)・preview_scroll 未対応・ペイン
+    収納は機能未実装でN/A。**初回のグレースフル終了ハング観測は再現せず**（単一インスタンス転送で
+    旧ハングプロセスへ転送した誤観測。以後 5回以上のグレースフル終了は全てクリーン＆state.json 保存）。
+  - **F2 △ 部分対応**: restore は消失ファイルをスキップ（落ちない）・ワークスペース消失は空状態。
+    「削除済み」タブとして開く挙動は未実装。
+  - **F3/F4 未対応（次段で dev-generator 実装予定）**。F5/F6 後回し。
 
 | 項目 | 結果 | 根拠 |
 |------|------|------|

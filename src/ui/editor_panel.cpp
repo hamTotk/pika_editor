@@ -101,6 +101,27 @@ bool EditorPanel::is_dirty() const
     return GetModify();
 }
 
+std::int64_t EditorPanel::caret_position() const
+{
+    return GetCurrentPos();
+}
+
+void EditorPanel::set_caret_position(std::int64_t pos)
+{
+    // 範囲外は Scintilla が安全に丸める（GotoPos は内部で文書長へクランプする）。
+    GotoPos(static_cast<int>(pos));
+}
+
+std::int64_t EditorPanel::first_visible_line() const
+{
+    return GetFirstVisibleLine();
+}
+
+void EditorPanel::set_first_visible_line(std::int64_t line)
+{
+    SetFirstVisibleLine(static_cast<int>(line));
+}
+
 void EditorPanel::set_on_dirty_changed(std::function<void(bool)> cb)
 {
     on_dirty_changed_ = std::move(cb);
