@@ -37,6 +37,14 @@ using BaselineMap = std::unordered_map<std::string, BaselineEntry>;
 // 完全一致のディレクトリ名で枝刈りする。
 bool is_excluded_dir(std::string_view name);
 
+// pika 自身のアトミック書き込み一時ファイル（util::write_atomic の make_temp_path 出力＝
+// `<最終名>.pika-<pid>-<tick>.tmp`）かを判定する純関数。ワークスペース内に作られる pika の
+// 一時ファイルを watcher のイベント生成・再列挙の両方から不可視にする（F-014「幽霊未読」対策）。
+//   - ファイル名部分（最後の '/' か '\\' 以降）が `.pika-` を含み、かつ `.tmp` 末尾を条件にする。
+//   - ユーザーの普通の `foo.tmp` は `.pika-` を含まないので除外しない（誤検知回避）。
+//   - rel は通常 '/' 区切りだが、防御的に '\\' でもファイル名を抽出する。
+bool is_pika_temp_file(std::string_view rel_or_name);
+
 // root を全再列挙し、baseline と突き合わせて再同期に必要な FsEvent 列を返す。
 //   - baseline に無い実在ファイル        → Created
 //   - baseline にあるが mtime/size 変化  → ハッシュ比較。異なれば Modified（同一なら何も出さない）
