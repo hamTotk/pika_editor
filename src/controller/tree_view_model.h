@@ -94,4 +94,14 @@ TreeRowVm build_tree_view_model(const core::workspace::TreeNode& root,
                                 const core::workspace::UnreadSet& unread,
                                 const std::vector<std::string>& new_files = {});
 
+// 外部削除されたファイルを取り消し線（StateMark::Deleted・記号なし・淡色）で残す後段マージ
+// （要件11.5・ui-design 5章・F-017）。build_tree_view_model はディスク再列挙ベースなので削除
+// ファイルを含まない。本関数で削除リーフをツリーへ補う。純粋関数（同一入力で同一出力）。
+// - deleted_rel_paths: 外部削除された相対パス（'/' 区切り）。WorkspaceController が保持する集合。
+// - 既にツリーに在るパス（再作成済み等）はスキップして二重表示を避ける。
+// - 親フォルダ階層を辿り、無い中間フォルダは作成して（is_dir=true・mark なし）リーフを挿入する。
+// - 同一パスの二重挿入は避ける。
+void merge_deleted_into_view_model(TreeRowVm& root,
+                                   const std::vector<std::string>& deleted_rel_paths);
+
 } // namespace pika::controller

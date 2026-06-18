@@ -9,6 +9,26 @@ namespace pika::controller
 namespace ws = pika::core::workspace;
 namespace wat = pika::core::watcher;
 
+namespace
+{
+
+// 削除パス集合へ追加する（重複は避ける）。F-017 のツリー取り消し線マージ素材。
+void add_deleted(std::vector<std::string>& deleted, const std::string& path)
+{
+    if (std::find(deleted.begin(), deleted.end(), path) == deleted.end())
+    {
+        deleted.push_back(path);
+    }
+}
+
+// 削除パス集合から除去する（パスが再びディスクに現れた＝再作成/rename 先）。
+void erase_deleted(std::vector<std::string>& deleted, const std::string& path)
+{
+    deleted.erase(std::remove(deleted.begin(), deleted.end(), path), deleted.end());
+}
+
+} // namespace
+
 WorkspaceController::WorkspaceController(std::string root) : root_(std::move(root)) {}
 
 void WorkspaceController::set_baseline(const wat::BaselineMap& baseline)
@@ -65,6 +85,8 @@ std::vector<FsChange> WorkspaceController::apply_events(const std::vector<wat::F
             auto it = states_.find(ev.path);
             const bool has_baseline = it != states_.end() && it->second.has_baseline;
             touch_unread(ev.path, has_baseline);
+            // 再びディスクに現れた＝削除表示を解除（削除→再作成。F-017）。
+            erase_deleted(deleted_, ev.path);
             FsChange c;
             c.effect = FsChangeEffect::UnreadMarked;
             c.path = ev.path;
@@ -78,6 +100,8 @@ std::vector<FsChange> WorkspaceController::apply_events(const std::vector<wat::F
             auto it = states_.find(ev.path);
             const bool has_baseline = it != states_.end() && it->second.has_baseline;
             touch_unread(ev.path, has_baseline);
+            // 再びディスクに現れた＝削除表示を解除（F-017）。
+            erase_deleted(deleted_, ev.path);
             FsChange c;
             c.effect = FsChangeEffect::UnreadMarked;
             c.path = ev.path;
@@ -90,6 +114,8 @@ std::vector<FsChange> WorkspaceController::apply_events(const std::vector<wat::F
             // ただし引き継ぎ状態（退避 ID・ベースライン）は孤立保全で残す（消失タブの安全遷移・
             // 90日GC に委ねる。design.md 5.1 手順4・要件4.2/7.2）。タブ側は削除済み表示へ遷移する。
             unread_.clear(ev.path);
+            // ツリーで取り消し線表示を残すための削除パス集合へ追加する（要件11.5・F-017）。
+            add_deleted(deleted_, ev.path);
             FsChange c;
             c.effect = FsChangeEffect::PathRemoved;
             c.path = ev.path;
@@ -138,6 +164,10 @@ void WorkspaceController::apply_rename_run(const std::vector<wat::FsEvent>& even
         {
             unread_.mark(ev.path);
         }
+        // 新パスがディスクに現れた＝削除表示を解除（rename 先。F-017）。旧パスは消えたので
+        // 削除扱いのままでよいが、後段マージはディスク列挙に在るパスを必ずスキップするため、
+        // 旧パスが再利用されても二重表示にはならない。
+        erase_deleted(deleted_, ev.path);
         FsChange c;
         c.effect = FsChangeEffect::RenamedCarried;
         c.path = ev.path;

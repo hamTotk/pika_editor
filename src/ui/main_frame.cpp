@@ -350,7 +350,11 @@ void MainFrame::refresh_tree()
     }
     const core::workspace::TreeNode root = enumerate_shallow_tree(workspace_, settings_);
     // 状態マーク（±/◆/取消線・伝播±淡）は WorkspaceController の未読集合から付与する（sprint4）。
-    tree_->set_root(workspace_ctl_.build_view_model(root));
+    controller::TreeRowVm vm = workspace_ctl_.build_view_model(root);
+    // 外部削除されたファイルはディスク再列挙に含まれない。取り消し線リーフを後段マージで補い、
+    // 色非依存の削除表示（取り消し線）をツリーに残す（要件11.5・ui-design 5章・F-017）。
+    controller::merge_deleted_into_view_model(vm, workspace_ctl_.deleted_paths());
+    tree_->set_root(vm);
 }
 
 void MainFrame::start_watching()

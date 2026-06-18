@@ -404,7 +404,11 @@
 - **対応方針（候補）**: ツリーが「既知の削除済みパス」（ベースラインを持つ確認済みファイルが消えた・または
   開いているタブのファイルが消えた）を保持し、ディスク列挙へ deleted=true ノードとしてマージする
   （サブディレクトリ階層への挿入が要る）。データ安全は満たされているため過剰実装は避ける（軽い・足さない）。
-- **状態**: 未対応（G章一括でユーザー判断）
+- **修正**: `WorkspaceController` に `deleted_` 集合（`Removed` で add・`Created`/`Modified`/rename 先で erase
+  ＝再作成で通常表示へ復帰）＋accessor。controller 純粋関数 `merge_deleted_into_view_model(TreeRowVm&,
+  deleted_rel_paths)`（ディスク列挙済みはスキップ＝二重防止・中間フォルダ作成・削除リーフは StateMark::Deleted）。
+  `refresh_tree` で build_view_model 後にマージしてから set_root。テスト8件追加。
+- **状態**: ✅ 修正済み・実機検証済み（外部削除した f017-victim.md がツリーに取り消し線で残る。ctest 666件 PASS）
 
 ## F-018 F6/Shift+F6 のペイン間フォーカス循環が未実装（G4）
 
