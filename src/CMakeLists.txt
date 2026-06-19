@@ -87,6 +87,8 @@ add_library(pika_core STATIC
     controller/editor_view_model.h
     controller/notification_model.cpp
     controller/notification_model.h
+    controller/open_view_model.cpp
+    controller/open_view_model.h
     controller/preview_builder.cpp
     controller/preview_builder.h
     controller/restore_plan.cpp
@@ -186,10 +188,14 @@ add_library(pika_core STATIC
     core/workspace/workspace_model.h
     util/atomic_file.cpp
     util/atomic_file.h
+    util/binary_detect.cpp
+    util/binary_detect.h
     util/encoding.cpp
     util/encoding.h
     util/hash.cpp
     util/hash.h
+    util/image_header.cpp
+    util/image_header.h
     util/logger.cpp
     util/logger.h
     util/path_util.h

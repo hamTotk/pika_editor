@@ -1,5 +1,6 @@
 #include "util/atomic_file.h"
 
+#include <cstdint>
 #include <string>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -167,6 +168,61 @@ Result<std::string> read_all(std::string_view path)
     ::CloseHandle(h);
     out.resize(read_total);
     return Result<std::string>::ok(std::move(out));
+}
+
+Result<FileHead> read_head(std::string_view path, std::size_t max_bytes)
+{
+    if (path.empty())
+    {
+        return Result<FileHead>::err(ErrorCode::InvalidArgument, "パスが空です");
+    }
+    const std::wstring wpath = to_wide(path);
+    HANDLE h = ::CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        const DWORD e = ::GetLastError();
+        if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND)
+        {
+            return Result<FileHead>::err(ErrorCode::NotFound, "ファイルが存在しません");
+        }
+        return Result<FileHead>::err(ErrorCode::Io, "ファイルを開けませんでした");
+    }
+
+    LARGE_INTEGER size{};
+    if (!::GetFileSizeEx(h, &size))
+    {
+        ::CloseHandle(h);
+        return Result<FileHead>::err(ErrorCode::Io, "ファイルサイズの取得に失敗しました");
+    }
+
+    FileHead head;
+    head.file_size = static_cast<std::uint64_t>(size.QuadPart);
+    // 先頭 min(max_bytes, file_size) バイトだけ読む（巨大ファイルを全読込しない＝固まらない）。
+    const std::uint64_t want64 = head.file_size < static_cast<std::uint64_t>(max_bytes)
+                                     ? head.file_size
+                                     : static_cast<std::uint64_t>(max_bytes);
+    head.bytes.resize(static_cast<std::size_t>(want64), '\0');
+    std::size_t read_total = 0;
+    while (read_total < head.bytes.size())
+    {
+        const std::size_t remain = head.bytes.size() - read_total;
+        const DWORD chunk = remain > 0x4000'0000u ? 0x4000'0000u : static_cast<DWORD>(remain);
+        DWORD got = 0;
+        if (!::ReadFile(h, head.bytes.data() + read_total, chunk, &got, nullptr))
+        {
+            ::CloseHandle(h);
+            return Result<FileHead>::err(ErrorCode::Io, "ファイルの読み込みに失敗しました");
+        }
+        if (got == 0)
+        {
+            break;
+        }
+        read_total += got;
+    }
+    ::CloseHandle(h);
+    head.bytes.resize(read_total);
+    return Result<FileHead>::ok(std::move(head));
 }
 
 } // namespace pika::util

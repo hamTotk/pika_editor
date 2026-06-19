@@ -26,6 +26,9 @@ add_library(pika_ui STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/editor_panel.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/file_tree_panel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/file_tree_panel.h
+    # F-022: 画像簡易ビュー（wxImage 自前描画・WebView2 不使用）と非対応/巨大画像ビュー（要件12.2）。
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/image_view_panel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/image_view_panel.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/main_frame.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/main_frame.h
     # sprint5: 共有 1 枚 WebView2 のプレビュー/差分ファサード（wx 依存・系統B）。
@@ -33,6 +36,9 @@ add_library(pika_ui STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/preview_view.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/ui_messages.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/ui_messages.h
+    # F-022: 巨大画像/バイナリの非対応ビュー（中央ラベル＋「既定のアプリで開く」。要件12.2）。
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/unsupported_view_panel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/unsupported_view_panel.h
     # プラットフォーム層（実 FS/OS I/O。MainFrame が直接呼ぶ列挙・監視）。
     dir_enumerator.cpp
     dir_enumerator.h

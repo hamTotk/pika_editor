@@ -117,6 +117,13 @@ std::string message(MsgId id)
         return "フォルダーを開くと、ここにファイルが表示されます。";
     case MsgId::NotificationArea:
         return "通知";
+    case MsgId::UnsupportedFormat:
+        return "対応していない形式です";
+    case MsgId::UnsupportedDetail:
+        return "pika はテキスト・Markdown・HTML・画像の表示に対応しています。"
+               "このファイルは既定のアプリで開いてください。";
+    case MsgId::OpenInDefaultApp:
+        return "既定のアプリで開く";
     }
     return std::string();
 }

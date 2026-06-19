@@ -70,7 +70,10 @@ enum class MsgId
     ConfirmCancel,      // 確認ダイアログのボタン: キャンセル
     OverflowNotices,    // 通知バーの「他N件」集約行（{n} は呼び出し側で差し込む）
     EmptyNoFolder,      // 中央: フォルダ未オープンの空状態
-    NotificationArea    // 通知バー領域のアクセシブルネーム
+    NotificationArea,   // 通知バー領域のアクセシブルネーム
+    UnsupportedFormat,  // 非対応ビュー: 「対応していない形式です」（バイナリ。要件12.2・I9）
+    UnsupportedDetail,  // 非対応ビュー: 説明文（pika はテキスト/Markdown/HTML 専用の旨）
+    OpenInDefaultApp    // 非対応/巨大画像ビュー: 「既定のアプリで開く」ボタン（要件12.2・I2）
 };
 
 // ID → 日本語文言（UTF-8）。未定義 ID は空文字を返さず ID 名を返さない（網羅を保つ）。

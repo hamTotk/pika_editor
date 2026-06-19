@@ -2,9 +2,11 @@
 
 #include "app/dir_enumerator.h"
 #include "controller/baseline_merge.h"
+#include "controller/degrade_model.h"
 #include "controller/diff_mode_model.h"
 #include "controller/dir_lister.h"
 #include "controller/editor_view_model.h"
+#include "controller/open_view_model.h"
 #include "controller/preview_builder.h"
 #include "controller/settings_view.h"
 #include "controller/tree_view_messages.h"
@@ -24,11 +26,15 @@
 #include "core/workspace/workspace_model.h"
 #include "ui/editor_panel.h"
 #include "ui/file_tree_panel.h"
+#include "ui/image_view_panel.h"
 #include "ui/preview_view.h"
 #include "ui/ui_messages.h"
+#include "ui/unsupported_view_panel.h"
 #include "util/atomic_file.h"
+#include "util/binary_detect.h"
 #include "util/encoding.h"
 #include "util/hash.h"
+#include "util/image_header.h"
 
 #include <wx/accel.h>
 #include <wx/button.h>
@@ -745,8 +751,45 @@ void MainFrame::open_file(const std::string& file_abs)
     // （プレースホルダは実タブ 0 件のときだけ存在する見せ方専用ページ）。
     remove_placeholder_page();
 
-    // 新規タブ。ディスクから読み、core/util でエンコーディング/改行を判定して Scintilla
-    // へ反映する。
+    // 種別分岐（F-022。要件12.2・design 10章 B3）。全読込せず先頭チャンクだけを見て、画像/バイナリ/
+    // テキストを判定する（巨大画像はデコードしない＝固まらない・設計原則2）。判定は controller の
+    // 純ロジック（resolve_open_view・gtest 済み）に委ね、ここは結果に応じてページ部品を選ぶ。
+    constexpr std::size_t kHeadBytes = 8u * 1024u; // 先頭 8KB（ヘッダ寸法・バイナリ判定に十分）
+    const auto head = util::read_head(file_abs, kHeadBytes);
+    controller::OpenViewInput in;
+    in.name_or_path = file_abs;
+    in.max_pixels = settings_.render_max_image_px;
+    if (head.is_ok())
+    {
+        in.head = head.value().bytes;
+        in.file_size = head.value().file_size;
+    }
+    const controller::OpenViewResult cls = controller::resolve_open_view(in);
+
+    switch (cls.view)
+    {
+    case controller::OpenView::Image:
+        open_image_page(file_abs, title, idx);
+        break;
+    case controller::OpenView::ImageTooLarge:
+        open_unsupported_page(file_abs, title, idx, /*too_large_image*/ true);
+        break;
+    case controller::OpenView::Unsupported:
+        open_unsupported_page(file_abs, title, idx, /*too_large_image*/ false);
+        break;
+    case controller::OpenView::Text:
+    default:
+        open_text_editor_page(file_abs, title, idx);
+        break;
+    }
+    update_status();
+}
+
+void MainFrame::open_text_editor_page(const std::string& file_abs, const std::string& title,
+                                      std::size_t idx)
+{
+    // テキスト経路（従来の open_file 本体）。ディスクから読み、core/util でエンコーディング/改行を
+    // 判定して Scintilla へ反映する。
     auto* editor = new EditorPanel(notebook_);
     const auto bytes = util::read_all(file_abs);
     if (bytes.is_ok())
@@ -786,7 +829,32 @@ void MainFrame::open_file(const std::string& file_abs)
     // savepoint を離れると未保存フラグ・タブ記号へ反映される（設計原則1の前提）。
     editor->set_on_dirty_changed(
         [this, file_abs](bool dirty) { on_editor_dirty_changed(file_abs, dirty); });
-    update_status();
+}
+
+void MainFrame::open_image_page(const std::string& file_abs, const std::string& title,
+                                std::size_t idx)
+{
+    // 画像簡易ビュー（要件12.2 I1）。EditorPanel ではない読み取り専用ページ＝保存/dirty/差分の
+    // 対象外（dynamic_cast<EditorPanel*>==nullptr で各経路が no-op）。WebView2 は起動しない＝
+    // ImageViewPanel が wxImage→wxBitmap を自前描画する（design 10章 B3・ネイティブ優先）。
+    auto* panel = new ImageViewPanel(notebook_, file_abs);
+    notebook_->AddPage(panel, u8(title), /*select*/ true);
+    refresh_tab_title(idx);
+}
+
+void MainFrame::open_unsupported_page(const std::string& file_abs, const std::string& title,
+                                      std::size_t idx, bool too_large_image)
+{
+    // 巨大画像（I2）/バイナリ（I9）の非対応ビュー（要件12.2）。種別ラベルだけ分け、説明と
+    // 「既定のアプリで開く」導線は共通。EditorPanel ではないため保存/dirty/差分は自然に no-op。
+    const std::string head =
+        too_large_image
+            ? std::string(controller::degrade_kind_label(controller::DegradeKind::ImageTooLarge))
+            : message(MsgId::UnsupportedFormat);
+    auto* panel =
+        new UnsupportedViewPanel(notebook_, file_abs, head, message(MsgId::UnsupportedDetail));
+    notebook_->AddPage(panel, u8(title), /*select*/ true);
+    refresh_tab_title(idx);
 }
 
 void MainFrame::on_editor_dirty_changed(const std::string& abs, bool dirty)
@@ -989,7 +1057,8 @@ std::string MainFrame::rel_path_for(const std::string& abs) const
 
 core::document::FileContentClass MainFrame::active_content_class() const
 {
-    // 退避可否の種別（要件9.2）。機密（.env 等）と 10MB 以上は内容 object を持てない＝退避不能。
+    // 退避可否の種別（要件9.2）。機密（.env 等）と 10MB 以上・画像は内容 object
+    // を持てない＝退避不能。
     core::document::FileContentClass cls;
     const std::string abs = active_file_path();
     const std::string rel = rel_path_for(abs);
@@ -997,6 +1066,13 @@ core::document::FileContentClass MainFrame::active_content_class() const
     if (EditorPanel* editor = active_editor())
     {
         cls.content_object_allowed = editor->text_utf8().size() < core::snapshot::kContentSizeLimit;
+    }
+    else
+    {
+        // 非 EditorPanel タブ（画像簡易ビュー/非対応ビュー。F-022）はテキスト内容 object を持てない
+        // ＝退避不能（要件9.2「画像はハッシュのみ」）。確認/巻き戻しは hash-only ベースライン経路
+        // へ落ち、バイナリ内容を誤って退避しない（データを失わない・設計原則1）。
+        cls.content_object_allowed = false;
     }
     return cls;
 }
