@@ -499,6 +499,18 @@
   テスト32件追加(OpenViewModel 12・ImageHeader 10・BinaryDetect 10)。
 - **状態**: ✅ 修正済み・実機検証済み（sample.png が画像表示＋等倍トグル／binary.bin が非対応表示。ctest 702件 PASS）
 
+## F-025 K章（About/インストーラ/SmartScreen）＝配布・リリース準備が未実装
+
+- **重大度**: 低（配布工程＝アプリ機能ではない。dev/spec.md で「非対象」明記）。
+- **内訳**:
+  - **K1 About画面**: `on_about` がアプリ名のみの最小 wxMessageBox。バージョン・サードパーティ OSS
+    ライセンス表示なし（`assets/THIRD_PARTY_NOTICES` 不在）。
+  - **K2 配布**: `installer/`(Inno Setup スクリプト)・ポータブル zip 生成が無い。
+  - **K3 SmartScreen**: `docs/install.md`(未署名起動手順)が無い。
+- **対応方針**: リリース準備フェーズで、About に version＋THIRD_PARTY_NOTICES（assets 同梱・vendor.lock
+  と整合）、Inno Setup（ユーザー単位・管理者不要）＋ポータブル zip、docs/install.md（SmartScreen 回避）。
+- **状態**: 未対応（リリース準備工程・ユーザー判断）
+
 ## F-024 I章の残り（読取専用誘導/空状態3分岐/診断ログ/FSエッジ）の GUI 結線が未/部分（ユーザー判断＝後回し）
 
 - **重大度**: 低〜中（縮退ロジック `controller/degrade_model`・`view_state` は系統A gtest 済み。GUI 結線が
