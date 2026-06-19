@@ -90,6 +90,10 @@ std::string notify_confirm_all_skipped(std::size_t count);
 // 通知バーの「他N件」集約行（design 10章 J1・ui-design 10章）。count=0 のときは空文字を返す。
 std::string notify_overflow(std::size_t count);
 
+// Mermaid/KaTeX/コードのブロック描画失敗・タイムアウト件数の通知文言（要件6.2・F-004・design 6章
+// I1）。count=0 のときは空文字を返す（提示しない）。内容は書かない（診断ログ規約）。
+std::string notify_render_failed(std::size_t count);
+
 // 通知バー集約 ViewModel の種別（controller::NotificationKind）→ 日本語の既定文言（UTF-8）。
 // NotificationRow.detail が空のとき通知バーが種別から出す文言（design 10章 K9・J1）。
 std::string notification_kind_label(controller::NotificationKind kind);

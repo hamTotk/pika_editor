@@ -156,6 +156,17 @@ std::string notify_overflow(std::size_t count)
     return "他 " + std::to_string(count) + " 件の通知";
 }
 
+std::string notify_render_failed(std::size_t count)
+{
+    if (count == 0)
+    {
+        return std::string();
+    }
+    // 図/数式/コードの一部がレンダリングできず元の表示へ戻した旨（崩していない＝データを失わない）。
+    return "プレビューの " + std::to_string(count) +
+           " 件をレンダリングできませんでした（元の表示に戻しました）";
+}
+
 std::string notification_kind_label(controller::NotificationKind kind)
 {
     switch (kind)
@@ -170,6 +181,9 @@ std::string notification_kind_label(controller::NotificationKind kind)
         return "文書に JavaScript が含まれています（プレビューで無効化）";
     case controller::NotificationKind::BigFile:
         return "巨大ファイルのため一部機能を縮退しています";
+    case controller::NotificationKind::RenderFailed:
+        // 件数つき文言は notify_render_failed(count) を detail に入れて使う（ここは件数なし汎用）。
+        return "プレビューの一部をレンダリングできませんでした（元の表示に戻しました）";
     }
     return std::string();
 }

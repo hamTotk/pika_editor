@@ -9,6 +9,7 @@
 #pragma once
 
 #include "core/diff/diff_types.h"
+#include "core/render/preview_features.h"
 #include "core/render/render_options.h"
 
 #include <string>
@@ -42,6 +43,10 @@ struct PreviewDoc
     std::string body_html;
     // リモートリソース許可状態（既定 Blocked。CSP に外部 http(s) を含めるかの切替）。
     core::render::RemoteResourcePolicy remote_policy = core::render::RemoteResourcePolicy::Blocked;
+    // 本文が要する同梱機能（Mermaid/KaTeX/highlight.js）。該当時のみ <script>/<link> を注入する
+    // （未使用時コストゼロ＝設計原則③。design 6章「該当記法がある時だけ <script> を出力」）。
+    // 既定（全 false）では一切の vendor 注入をしない（素の Markdown プレビューと同コスト）。
+    core::render::PreviewFeatures features;
 };
 
 // プレーンテキストを HTML エスケープする（差分行の原文を安全に埋め込む。XSS 経路を作らない）。
@@ -50,7 +55,15 @@ std::string escape_html(std::string_view text);
 
 // CSP メタタグ（design 6章 CSP テンプレート）を含む <head> を組み立てて返す。
 // base href="https://doc.pika/"（相対画像/リンク解決）と app.pika のスタイルを参照する。
-std::string build_head(core::render::RemoteResourcePolicy policy);
+// features に該当機能があれば、その CSS（KaTeX/highlight.js テーマ）の <link> も <head> に足す
+// （該当時のみ＝未使用時コストゼロ。design 6章・原則③）。
+std::string build_head(core::render::RemoteResourcePolicy policy,
+                       const core::render::PreviewFeatures& features = {});
+
+// features に該当する同梱 JS（vendor）＋ブートストラップの <script> を </body> 直前用に組み立てる。
+// 該当機能が無ければ空文字を返す（一切注入しない＝未使用時コストゼロ）。スクリプトは app.pika 仮想
+// ホストから配信し、読み込み順（vendor → preview-bootstrap）を担保する（design 6章 I1）。
+std::string build_feature_scripts(const core::render::PreviewFeatures& features);
 
 // 差分結果を unified 差分 HTML（行ごとに +/-/' ' を色非依存クラスで表す）へ変換する。
 // 各行は <div class="diff-line diff-add|diff-del|diff-ctx"> で、行頭マーカ（+/-/空白）を必ず出す

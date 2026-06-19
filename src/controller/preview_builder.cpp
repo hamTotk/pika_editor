@@ -158,7 +158,32 @@ std::string build_inline_text(std::string_view text,
 
 } // namespace
 
-std::string build_head(core::render::RemoteResourcePolicy policy)
+std::string build_feature_head_links(const core::render::PreviewFeatures& features)
+{
+    // 該当機能の CSS だけを <head> に足す（未使用時は何も出さない＝コストゼロ。design
+    // 6章・原則③）。 すべて app.pika 仮想ホストから配信する（CSP style-src
+    // https://app.pika。ユーザー文書外）。
+    std::string out;
+    if (features.math)
+    {
+        // KaTeX のスタイル。katex.min.css は fonts/*.woff2 を相対参照するため、CSS 配信元
+        // （app.pika/vendor/）基準で app.pika/vendor/fonts/*.woff2 に解決される（font-src
+        // app.pika）。
+        out += "<link rel=\"stylesheet\" href=\"https://app.pika/vendor/katex.min.css\">";
+    }
+    if (features.code)
+    {
+        // highlight.js テーマ。ライト既定＋ダークは media クエリで上書き（preview.css
+        // と同じテーマ追従）。
+        out += "<link rel=\"stylesheet\" href=\"https://app.pika/vendor/hljs-github.min.css\">";
+        out += "<link rel=\"stylesheet\" media=\"(prefers-color-scheme: dark)\" "
+               "href=\"https://app.pika/vendor/hljs-github-dark.min.css\">";
+    }
+    return out;
+}
+
+std::string build_head(core::render::RemoteResourcePolicy policy,
+                       const core::render::PreviewFeatures& features)
 {
     std::string head;
     head += "<head>";
@@ -170,8 +195,39 @@ std::string build_head(core::render::RemoteResourcePolicy policy)
     // 相対画像/リンクの解決は「ページ URL = https://doc.pika/ からのナビゲート」が担う
     // （SetPage の baseUrl を preview_view が指定）。base 方針を CSP に一本化する。
     head += "<link rel=\"stylesheet\" href=\"https://app.pika/preview.css\">";
+    // 該当記法があるときだけ vendor CSS を足す（未使用時コストゼロ。design 6章・原則③）。
+    head += build_feature_head_links(features);
     head += "</head>";
     return head;
+}
+
+std::string build_feature_scripts(const core::render::PreviewFeatures& features)
+{
+    if (!features.any())
+    {
+        return {}; // 一切注入しない（素の Markdown プレビューと同コスト。原則③）。
+    }
+    // 読み込み順を担保する：vendor ライブラリ（同期 <script src>＝記述順に実行）→
+    // ブートストラップ。 すべて app.pika から配信（CSP script-src
+    // https://app.pika。ユーザー文書由来 JS は実行しない）。
+    std::string out;
+    if (features.math)
+    {
+        out += "<script src=\"https://app.pika/vendor/katex.min.js\"></script>";
+        out += "<script src=\"https://app.pika/vendor/katex-auto-render.min.js\"></script>";
+    }
+    if (features.code)
+    {
+        out += "<script src=\"https://app.pika/vendor/highlight.min.js\"></script>";
+    }
+    if (features.mermaid)
+    {
+        out += "<script src=\"https://app.pika/vendor/mermaid.min.js\"></script>";
+    }
+    // 最後に pika 自作のブートストラップ（per-block
+    // try/catch＋1秒タイムアウト＋失敗件数通知。I1）。
+    out += "<script src=\"https://app.pika/preview-bootstrap.js\"></script>";
+    return out;
 }
 
 std::string build_diff_body(const core::diff::DiffResult& diff)
@@ -207,9 +263,11 @@ std::string build_preview_document(const PreviewDoc& doc)
 {
     std::string html;
     html += "<!DOCTYPE html><html lang=\"ja\">";
-    html += build_head(doc.remote_policy);
+    html += build_head(doc.remote_policy, doc.features);
     html += "<body class=\"preview\">";
     html += doc.body_html;
+    // 該当記法があるときだけ同梱スクリプトを </body> 直前に注入する（design 6章・原則③）。
+    html += build_feature_scripts(doc.features);
     html += "</body></html>";
     return html;
 }
@@ -231,7 +289,7 @@ std::string build_preview_diff_grid_document(const PreviewDoc& doc,
 {
     std::string html;
     html += "<!DOCTYPE html><html lang=\"ja\">";
-    html += build_head(doc.remote_policy);
+    html += build_head(doc.remote_policy, doc.features);
     // 左プレビュー・右差分を grid で横並び（1枚WebView2内。design 6章）。独立スクロールは CSS。
     html += "<body class=\"preview-diff-grid\">";
     html += "<div class=\"grid-left preview\">";
@@ -240,6 +298,9 @@ std::string build_preview_diff_grid_document(const PreviewDoc& doc,
     html += "<div class=\"grid-right diff-view\">";
     html += build_diff_body(diff);
     html += "</div>";
+    // 左プレビューに対して同梱スクリプトを適用する（差分面は素のテキスト。該当時のみ。design
+    // 6章）。
+    html += build_feature_scripts(doc.features);
     html += "</body></html>";
     return html;
 }

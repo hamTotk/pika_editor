@@ -6,6 +6,8 @@
 #include "controller/preview_builder.h"
 
 #include "core/diff/diff_types.h"
+#include "core/render/markdown_renderer.h"
+#include "core/render/preview_features.h"
 #include "core/render/render_options.h"
 
 #include <gtest/gtest.h>
@@ -15,6 +17,7 @@ namespace
 
 using pika::controller::build_diff_body;
 using pika::controller::build_diff_document;
+using pika::controller::build_feature_scripts;
 using pika::controller::build_preview_diff_grid_document;
 using pika::controller::build_preview_document;
 using pika::controller::classify_preview_kind;
@@ -236,6 +239,151 @@ TEST(PreviewBuilderTest, DiffBodyIgnoresOutOfRangeSpans)
     const std::string body = build_diff_body(diff);
     EXPECT_TRUE(contains(body, "abc"));
     EXPECT_FALSE(contains(body, "diff-word"));
+}
+
+// ---- F-004 同梱スクリプト/CSS の条件付き注入（該当記法がある時だけ＝未使用時コストゼロ） ---- //
+
+using pika::core::render::PreviewFeatures;
+
+TEST(PreviewBuilderTest, NoFeaturesInjectsNoVendorScriptsOrLinks)
+{
+    PreviewDoc doc;
+    doc.body_html = "<p>plain</p>";
+    // features は既定（全 false）。
+    const std::string html = build_preview_document(doc);
+    // vendor スクリプト・ブートストラップ・vendor CSS を一切出さない（素のプレビューと同コスト）。
+    EXPECT_FALSE(contains(html, "vendor/mermaid.min.js"));
+    EXPECT_FALSE(contains(html, "vendor/katex.min.js"));
+    EXPECT_FALSE(contains(html, "vendor/highlight.min.js"));
+    EXPECT_FALSE(contains(html, "vendor/katex.min.css"));
+    EXPECT_FALSE(contains(html, "vendor/hljs-github"));
+    EXPECT_FALSE(contains(html, "preview-bootstrap.js"));
+    // preview.css は常に出る（基本スタイル）。
+    EXPECT_TRUE(contains(html, "https://app.pika/preview.css"));
+}
+
+TEST(PreviewBuilderTest, MermaidFeatureInjectsMermaidScriptOnly)
+{
+    PreviewDoc doc;
+    doc.body_html = "<pre><code class=\"language-mermaid\">graph TD; A--&gt;B;</code></pre>";
+    doc.features.mermaid = true;
+    const std::string html = build_preview_document(doc);
+    EXPECT_TRUE(contains(html, "https://app.pika/vendor/mermaid.min.js"));
+    EXPECT_TRUE(contains(html, "https://app.pika/preview-bootstrap.js"));
+    // 数式・コードは未検出なのでそれらの vendor は出さない。
+    EXPECT_FALSE(contains(html, "vendor/katex.min.js"));
+    EXPECT_FALSE(contains(html, "vendor/highlight.min.js"));
+}
+
+TEST(PreviewBuilderTest, MathFeatureInjectsKatexScriptAndCss)
+{
+    PreviewDoc doc;
+    doc.body_html = "<p>$x$</p>";
+    doc.features.math = true;
+    const std::string html = build_preview_document(doc);
+    EXPECT_TRUE(contains(html, "https://app.pika/vendor/katex.min.js"));
+    EXPECT_TRUE(contains(html, "https://app.pika/vendor/katex-auto-render.min.js"));
+    EXPECT_TRUE(contains(html, "https://app.pika/vendor/katex.min.css")); // <head> に CSS も出る。
+    EXPECT_TRUE(contains(html, "https://app.pika/preview-bootstrap.js"));
+    EXPECT_FALSE(contains(html, "vendor/mermaid.min.js"));
+}
+
+TEST(PreviewBuilderTest, CodeFeatureInjectsHighlightScriptAndThemeCss)
+{
+    PreviewDoc doc;
+    doc.body_html = "<pre><code class=\"language-cpp\">int x;</code></pre>";
+    doc.features.code = true;
+    const std::string html = build_preview_document(doc);
+    EXPECT_TRUE(contains(html, "https://app.pika/vendor/highlight.min.js"));
+    EXPECT_TRUE(contains(html, "https://app.pika/vendor/hljs-github.min.css"));
+    // ダークテーマは media クエリ付きで上書き（テーマ追従）。
+    EXPECT_TRUE(contains(html, "prefers-color-scheme: dark"));
+    EXPECT_TRUE(contains(html, "https://app.pika/vendor/hljs-github-dark.min.css"));
+    EXPECT_TRUE(contains(html, "https://app.pika/preview-bootstrap.js"));
+}
+
+TEST(PreviewBuilderTest, AllFeaturesInjectAllVendorAssets)
+{
+    PreviewDoc doc;
+    doc.body_html = "<p>x</p>";
+    doc.features.mermaid = true;
+    doc.features.math = true;
+    doc.features.code = true;
+    const std::string html = build_preview_document(doc);
+    EXPECT_TRUE(contains(html, "vendor/mermaid.min.js"));
+    EXPECT_TRUE(contains(html, "vendor/katex.min.js"));
+    EXPECT_TRUE(contains(html, "vendor/highlight.min.js"));
+    EXPECT_TRUE(contains(html, "vendor/katex.min.css"));
+    EXPECT_TRUE(contains(html, "vendor/hljs-github.min.css"));
+    EXPECT_TRUE(contains(html, "preview-bootstrap.js"));
+}
+
+TEST(PreviewBuilderTest, FeatureScriptsAreAllAppPikaHosted)
+{
+    // 注入する <script src> はすべて app.pika 仮想ホスト（CSP script-src https://app.pika
+    // に合致）。
+    PreviewFeatures feat;
+    feat.mermaid = true;
+    feat.math = true;
+    feat.code = true;
+    const std::string scripts = build_feature_scripts(feat);
+    // 各 <script src= の直後は必ず https://app.pika/ で始まる（外部 CDN 等を出さない＝CSP
+    // に通す）。
+    std::size_t pos = 0;
+    int count = 0;
+    const std::string needle = "<script src=\"";
+    while ((pos = scripts.find(needle, pos)) != std::string::npos)
+    {
+        const std::size_t v = pos + needle.size();
+        EXPECT_EQ(scripts.compare(v, std::char_traits<char>::length("https://app.pika/"),
+                                  "https://app.pika/"),
+                  0);
+        ++count;
+        pos = v;
+    }
+    EXPECT_GT(count, 0);
+}
+
+TEST(PreviewBuilderTest, EmptyFeatureScriptsForNoFeatures)
+{
+    EXPECT_EQ(build_feature_scripts(PreviewFeatures{}), std::string());
+}
+
+TEST(PreviewBuilderTest, GridDocumentInjectsFeatureScriptsForPreviewSide)
+{
+    // プレビュー＋差分ON（grid）でも左プレビュー側に同梱スクリプトを注入する（design 6章）。
+    PreviewDoc doc;
+    doc.body_html = "<p>$x$</p>";
+    doc.features.math = true;
+    DiffResult diff;
+    diff.lines.push_back(DiffLine{LineOp::Add, "a", {}, 0, 1});
+    const std::string html = build_preview_diff_grid_document(doc, diff);
+    EXPECT_TRUE(contains(html, "vendor/katex.min.js"));
+    EXPECT_TRUE(contains(html, "preview-bootstrap.js"));
+}
+
+// ---- サニタイズとの相互作用：ユーザー文書由来 script は除去・pika 注入の vendor は保持 ---- //
+
+TEST(PreviewBuilderTest, UserScriptRemovedButInjectedVendorScriptsKept)
+{
+    using pika::core::render::detect_preview_features;
+    using pika::core::render::render_markdown;
+    // ユーザー Markdown 内に raw <script> と言語付きコードブロックを含める。
+    const std::string md = "<script>alert('xss')</script>\n\n```js\nlet x = 1;\n```\n";
+    const auto rendered = render_markdown(md);
+    ASSERT_TRUE(rendered.is_ok());
+
+    PreviewDoc doc;
+    doc.body_html = rendered.value();           // サニタイズ済み本文（render_markdown が通す）。
+    doc.features = detect_preview_features(md); // code=true を検出して highlight.js を注入。
+
+    const std::string html = build_preview_document(doc);
+    // ユーザー文書由来の <script>alert は本文から除去されている（サニタイズ済み）。
+    EXPECT_FALSE(contains(html, "alert('xss')"));
+    EXPECT_FALSE(contains(html, "<script>alert"));
+    // pika 注入の信頼済み vendor スクリプトは残る（app.pika 配信）。
+    EXPECT_TRUE(contains(html, "https://app.pika/vendor/highlight.min.js"));
+    EXPECT_TRUE(contains(html, "https://app.pika/preview-bootstrap.js"));
 }
 
 } // namespace

@@ -76,4 +76,43 @@ TEST(MarkdownRendererTest, EmptyMarkdownYieldsEmptyOrTrivial)
     EXPECT_FALSE(contains(r.value(), "<script"));
 }
 
+// 二重エスケープ回帰（F-004 Mermaid 図描画バグ）。md4c は ```mermaid フェンス内の `-->` を
+// `--&gt;` に正しくエスケープして出力する。サニタイザはこの `&gt;` を `&amp;gt;` に再エスケープ
+// してはならない（再エスケープすると preview-bootstrap.js が <code>.textContent から得るソースが
+// `--&gt;` のまま mermaid へ渡り「Syntax error」になる）。
+TEST(MarkdownRendererTest, MermaidFenceArrowNotDoubleEscaped)
+{
+    auto r = render_markdown("```mermaid\ngraph TD\nA[start] --> B{cond}\n```\n");
+    ASSERT_TRUE(r.is_ok());
+    const std::string& html = r.value();
+    // mermaid コードブロックとして出る。
+    EXPECT_TRUE(contains(html, "class=\"language-mermaid\""));
+    // 矢印は 1 段エスケープの `--&gt;`（= textContent で `-->` に復号される）であること。
+    EXPECT_TRUE(contains(html, "--&gt;"));
+    // 二重エスケープ `&amp;gt;` が現れないこと（これが症状の根因）。
+    EXPECT_FALSE(contains(html, "&amp;gt;"));
+}
+
+// インラインコード内の `<` `>` `&` は 1 段だけエスケープされること（二重エスケープ防止の一般化）。
+TEST(MarkdownRendererTest, InlineCodeSpecialCharsNotDoubleEscaped)
+{
+    auto r = render_markdown("`a & b < c > d`\n");
+    ASSERT_TRUE(r.is_ok());
+    const std::string& html = r.value();
+    EXPECT_TRUE(contains(html, "a &amp; b &lt; c &gt; d"));
+    EXPECT_FALSE(contains(html, "&amp;amp;"));
+    EXPECT_FALSE(contains(html, "&amp;lt;"));
+    EXPECT_FALSE(contains(html, "&amp;gt;"));
+}
+
+// 本文中のアンパサンド（AT&T・裸の &）は 1 段だけ `&amp;` になり、二重化しないこと。
+TEST(MarkdownRendererTest, AmpersandInTextEscapedOnce)
+{
+    auto r = render_markdown("AT&T and bare & here.\n");
+    ASSERT_TRUE(r.is_ok());
+    const std::string& html = r.value();
+    EXPECT_TRUE(contains(html, "AT&amp;T"));
+    EXPECT_FALSE(contains(html, "&amp;amp;"));
+}
+
 } // namespace

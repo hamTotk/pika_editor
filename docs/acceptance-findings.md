@@ -73,7 +73,7 @@
   （`Freeze/Thaw` でちらつき抑止）。これで全モード遷移が確実に出し分く。
 - **状態**: 検証済 ✅（ソース/分割/プレビューの相互切替が破綻しない）
 
-## F-004 Mermaid／KaTeX／コードハイライトが未実装（プレビューで生テキスト）
+## F-004 Mermaid／KaTeX／コードハイライト（実装・実機検証済み）
 
 - **重大度**: 中（要件6.2/6.4・9.5 の必須機能が欠落。ただし素の Markdown プレビューは動作）
 - **対応章**: B1（Mermaid/KaTeX 表示）
@@ -83,9 +83,44 @@
   try/catch＋1秒タイムアウト＋失敗フォールバック＋件数通知」）に対し、**ベンダー JS/CSS（mermaid ~3MB /
   KaTeX ~2MB / highlight ~1MB）が `assets/` に未同梱**（`preview.css` のみ・`vendor.lock` も無し）で、
   `preview_builder`/`render` に**スクリプト注入が一切無い**。実装そのものが欠落している。
-- **対応**: 未着手（小修正ではなく機能実装。ベンダー同梱・SHA-256 ピン・CSP 連携・per-block 描画・
-  THIRD_PARTY_NOTICES が必要）。対応方針はユーザー判断待ち。
-- **状態**: 未対応（要対応判断）
+- **対応**: 実装済み（generator）。
+  - **ベンダー同梱** `assets/vendor/`：KaTeX 0.16.11（`katex.min.js`/`katex.min.css`/
+    `katex-auto-render.min.js`＋`fonts/KaTeX_*.woff2` 20 種）・Mermaid 10.9.1（`mermaid.min.js`）・
+    highlight.js 11.9.0（`highlight.min.js`＝common ビルド＋`hljs-github.min.css`/
+    `hljs-github-dark.min.css`）。合計増分 **約 3.84 MiB（4,029,735 bytes）**（うち mermaid 3.18MiB が主因）。
+    `assets/vendor.lock`（SHA-256＋取得元＋バージョン）・`assets/THIRD_PARTY_NOTICES`
+    （MIT/MIT/BSD-3＋フォント OFL 1.1 全文）を新設。CMake は既存 `copy_directory assets/` で
+    サブディレクトリごと build 出力へ複写（追加変更なし）。
+  - **条件付き注入**：`core/render/preview_features.{h,cpp}` の `detect_preview_features()` が
+    Markdown ソースを走査して mermaid/math/code の有無を判定（コードフェンス内の `$` は数式と誤検出
+    しない）。`controller/preview_builder` の `build_head`/`build_feature_scripts` が該当時のみ
+    vendor の `<link>`/`<script>` を出す（未使用時は一切出さない＝原則③）。すべて app.pika 配信。
+  - **per-block 堅牢化**：`assets/preview-bootstrap.js`（pika 自作）が各ブロックを try/catch＋
+    1 秒タイムアウト（Promise.race）で囲み、失敗時は元のコードブロック表示へ戻してエラーバッジ。
+    失敗件数を `window.pika.postMessage` でネイティブへ通知 →`PreviewView::on_script_message`
+    →`MainFrame::update_render_failed_notification` →通知バー（新 `NotificationKind::RenderFailed`）。
+  - **CSP**：既存テンプレートのまま動作（緩和なし）。Mermaid 10.9.1 は `securityLevel:'strict'`＋
+    `globalThis` 環境で `Function` コンストラクタ分岐に入らず `unsafe-eval` 不要（バンドルに `eval(`/
+    `new Function`/動的 `import()` 無し）。KaTeX の inline style は `style-src 'unsafe-inline'`、
+    フォントは `font-src https://app.pika`、ハイライト/数式 CSS は `style-src https://app.pika` で通る。
+  - **テスト**：gtest 40 件（`PreviewFeaturesTest` 16・`PreviewBuilderTest` 24〔うち新規 11〕）。
+    注入の出し分け・サニタイズ相互作用（ユーザー由来 script 除去・注入 vendor 保持）・全 script が
+    app.pika ホスト・差分 grid の左プレビューにも注入・未使用時無注入を検証。x64-release ビルド成立・
+    x64-core-test 723 件 PASS / 0 FAIL。
+- **実機検証中の追加修正（2件）**:
+  1. **通貨ロバスト化**：`line_has_math`（preview_features.cpp）が「価格は $5 と $9」のような同一行2つの
+     通貨 `$` を数式と誤検出していた。定番ルール「`$` の直後が数字なら数式開始としない」を**検出側**
+     （line_has_math）と**描画側**（preview-bootstrap.js の KaTeX auto-render 前処理：`$`直後数字を
+     一時マスク→復元）の両方に適用。回帰 gtest 6 件追加。
+  2. **サニタイザ二重エスケープ修正（真の Mermaid 描画バグ）**：`html_sanitizer.cpp::append_escaped_text`
+     が md4c の1段エスケープ済み Text（`--&gt;`）を再エスケープし `--&amp;gt;`（2段）にしていた。
+     ブラウザ textContent は1段しか復号せず `--&gt;` が mermaid に渡り "Syntax error"。escaper を
+     **実体認識化**（`valid_entity_at`：妥当な `&name;`/`&#DDD;`/`&#xHHH;` は素通し・素の `&` のみ
+     `&amp;`）。`<`/`>` は無条件エスケープ・**属性値エスケープ（append_escaped_attr_value）は別関数で
+     不変**＝XSS 境界維持。16種の攻撃ペイロードで敵対監査合格。
+- **状態**: ✅ 実装・実機検証済み。図(SVG)/数式(ブロック・インライン)/ハイライト(cpp/python)の実描画・
+  通貨非崩れ・壊れた Mermaid のみ失敗フォールバック＋通知1件 を系統C実機で確認。gtest 735 件 PASS。
+  残：mermaid 3.3MB の初回ロードコスト（図を含む文書のみ・条件付き注入で未使用時はゼロ）＝既知の許容コスト。
 
 ## F-005 HTML プレビューが Markdown 経由で描画され、インライン `<style>` が消える／JS 検知通知が出ない
 

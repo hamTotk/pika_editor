@@ -134,16 +134,105 @@ bool is_svg_allowed_attr(const std::string& name)
     return s.count(name) != 0;
 }
 
-// 出力テキストの HTML エスケープ（< > & " を実体参照へ）。
+// `text` の pos（'&'）から始まる文字参照が「妥当な実体」かを返し、妥当なら ';' までの長さを
+// len に入れる。妥当な形は HTML 文字参照に限る:
+//   - 名前付き: &name;   （name は ASCII 英数字。長さ 1..31 で安全側に制限）
+//   - 10 進数値: &#DDDD;  （DDDD は 1 桁以上の 10 進数）
+//   - 16 進数値: &#xHHHH; / &#XHHHH;
+// 不正（';' で閉じない／空／不正文字）は実体でなく素の '&' とみなす。
+//
+// なぜ必要か（二重エスケープ防止）: 本サニタイザの入力には「既に HTML エスケープ済み」の文字列が
+// 来る経路がある（md4c 出力＝コード/本文の `<` `>` `&` が `&lt;` `&gt;` `&amp;` 済み、ユーザー
+// 文書 HTML 内の `&copy;` 等）。これらの '&' を無条件に `&amp;` へ再エスケープすると `&amp;gt;`
+// のように二重エスケープされ、ブラウザ表示で `&gt;`（Mermaid なら `-->` が `--&gt;` に化けて構文
+// エラー）になる。妥当な実体は素通しし、素の '&' のみエスケープする。
+// 安全性: Text トークン中の '<' はトークナイザが必ずタグ境界として切るため、ここに来る '<' は素の
+// '<'（実体化対象）であり、タグ注入には使えない。妥当な実体はテキストとして安全な文字に復号される。
+bool valid_entity_at(std::string_view text, std::size_t pos, std::size_t& len)
+{
+    // text[pos] == '&' 前提。
+    const std::size_t n = text.size();
+    std::size_t i = pos + 1;
+    if (i >= n)
+    {
+        return false;
+    }
+    if (text[i] == '#')
+    {
+        ++i;
+        bool hex = false;
+        if (i < n && (text[i] == 'x' || text[i] == 'X'))
+        {
+            hex = true;
+            ++i;
+        }
+        const std::size_t digits_begin = i;
+        while (i < n)
+        {
+            const char c = text[i];
+            const bool is_digit = (c >= '0' && c <= '9');
+            const bool is_hex_letter = (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (is_digit || (hex && is_hex_letter))
+            {
+                ++i;
+            }
+            else
+            {
+                break;
+            }
+        }
+        if (i == digits_begin || i >= n || text[i] != ';')
+        {
+            return false; // 数字なし／';' で閉じない。
+        }
+        len = i - pos + 1; // ';' を含む。
+        return true;
+    }
+    // 名前付き実体: ASCII 英数字のみ。長さは安全側に 31 文字までに制限。
+    const std::size_t name_begin = i;
+    while (i < n && (i - name_begin) < 31)
+    {
+        const char c = text[i];
+        const bool is_alnum =
+            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        if (!is_alnum)
+        {
+            break;
+        }
+        ++i;
+    }
+    if (i == name_begin || i >= n || text[i] != ';')
+    {
+        return false; // 名前なし／';' で閉じない。
+    }
+    len = i - pos + 1; // ';' を含む。
+    return true;
+}
+
+// 出力テキストの HTML エスケープ（< > を実体参照へ）。'&' は二重エスケープを避けるため、
+// 既に妥当な文字参照（&amp; / &lt; / &#169; / &#x41; 等）を始めている場合のみ素通しし、
+// それ以外の素の '&' を `&amp;` にする（valid_entity_at の説明を参照）。
 void append_escaped_text(std::string& out, std::string_view text)
 {
-    for (char c : text)
+    const std::size_t n = text.size();
+    for (std::size_t i = 0; i < n; ++i)
     {
+        const char c = text[i];
         switch (c)
         {
-        case '&':
-            out += "&amp;";
+        case '&': {
+            std::size_t ent_len = 0;
+            if (valid_entity_at(text, i, ent_len))
+            {
+                out.append(text.substr(i, ent_len)); // 妥当な実体は素通し（二重エスケープ回避）。
+                i += ent_len - 1;                    // ';' まで進める（ループの ++i で次へ）。
+            }
+            else
+            {
+                out += "&amp;"; // 素の '&'。
+            }
             break;
+        }
         case '<':
             out += "&lt;";
             break;
