@@ -41,7 +41,8 @@ struct PaneLayout
 //   ソース  +差分OFF → エディタのみ
 //   ソース  +差分ON  → 差分面のみ（実質差分ビュー。読み取り専用、編集は Ctrl+E でソースへ）
 //   分割    +差分OFF → エディタ＋プレビュー
-//   分割    +差分ON  → エディタ＋差分面
+//   分割    +差分ON  → 1枚WebView2内に左プレビュー・右差分を grid（B11 仕様変更。プレビュー＋
+//                      差分ON と同一表示。レビュー用途で生ソースより整形＋差分の対比を採る）
 //   プレビュー+差分OFF → プレビューのみ
 //   プレビュー+差分ON → 1枚WebView2内に左プレビュー・右差分を grid（preview_diff_grid）
 PaneLayout resolve_pane_layout(ViewMode mode, bool diff_on);

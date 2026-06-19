@@ -577,10 +577,37 @@
   - **A5 計測対象不在**: ライブ編集→デバウンス→プレビュー更新の**機能自体が未実装**（EditorPanel は
     savepoint のみ束ね・on_editor_dirty_changed は update_preview を呼ばない）。原則④に従い計測の
     ために機能を足さず所見化。実装可否は要ユーザー判断。
-  - **A8 未取得**: `--perf-log` 限定の計測補助（Source 畳み後 1.5秒アイドルで強制 TrySuspend）を実装したが
-    今回の操作で未発火（1.5秒前に復帰した可能性）→ 再計測予定。なお **production は遊休サスペンドを
-    駆動しない**（`suspend_if_idle` 呼び出し元ゼロ＝DEC-02 自動サスペンド未配線）ため、実運用では WS 縮小が
-    起きずアイドルメモリ目標は達成されない。production 駆動の可否は要ユーザー判断。
+  - **A8 未取得**: `--perf-log` 限定の計測補助（Source 畳み後アイドルで強制 TrySuspend）を実装したが、
+    **2回の実機試行（1.5秒/3秒以上待機）とも未発火**で A8 取得できず。A2 resume は毎回記録されるのに
+    TrySuspend 完了→`record_memory(MemoryIdleAfterSuspend)` 経路が走らない＝補助に潜在不具合。ただし
+    **production は遊休サスペンドを駆動しない**（`suspend_if_idle` 呼び出し元ゼロ＝DEC-02 自動サスペンド
+    未配線）ため、補助を直しても実運用の数値にはならない。A8 ゲートは **DEC-02 を production で駆動するか
+    否かの判断とセット**（要ユーザー判断）。低価値な補助デバッグは保留。
   - **A9** ✅ 済（プレビュー未使用で pika 由来 WebView2 未起動）。**A10** 8時間ソークは dev/spec.md 非対象。
 - **状態**: ✅ instrumentation 実装・ベースライン計測済み（A1-A4/A6/A7 PASS）。残：A5（ライブ編集
-  プレビュー機能未実装＝要判断）・A8（再計測＋production 遊休サスペンド駆動の可否＝要判断）。
+  プレビュー機能未実装＝要判断）・A8（計測補助が2回とも不発＋production 遊休サスペンド未駆動＝DEC-02 を
+  production で駆動するかの判断とセット＝要判断）。
+
+---
+
+## B11 仕様変更 分割＋差分ON＝「プレビュー＋差分」へ（実機検証中のユーザー決定）
+
+- **重大度**: 低（不具合でなく仕様の見直し。レビュー体験の改善）。
+- **対応章**: B11（差分トグルON×各モードの実描画）。
+- **経緯**: 実機検証中、「分割＋差分ON」が従来「エディタ（Scintilla）＋差分面」だったが、本ツールは
+  AI 出力の差分レビュー伴走が用途で、分割＋差分で対比したいのは**生ソースより整形プレビューと差分**。
+  ユーザー決定で「分割＋差分ON」を **「左＝整形プレビュー／右＝差分面」**（＝プレビュー＋差分ON と
+  同一表示）へ変更（案A採用）。生ソースの編集は「ソースモード」または「分割＋差分OFF」で行う。
+- **実装方針（原則③ 軽い／④ 足さない）**: 2つ目の WebView2 を作らず、既存の**プレビュー＋差分グリッド**
+  （`build_preview_diff_grid_document`・`body.preview-diff-grid` の CSS 2列・単一 WebView）を流用。
+  `controller::resolve_pane_layout`（`src/controller/diff_mode_model.cpp`）の「分割＋差分ON」ケースを
+  `show_editor=false`＋`show_preview=true`＋`show_diff=true`＋`preview_diff_grid=true`（＝プレビュー＋
+  差分ON と同一 layout）へ変更。`update_preview`（`src/ui/main_frame.cpp`）は無改修で合流する
+  （`need_both=show_editor&&webview_active`→false で notebook_ を Unsplit、`grid=true` で grid 文書）。
+  分割＋差分OFF は従来どおり「左＝エディタ／右＝整形プレビュー」を維持（差分 OFF で編集分割へ復帰）。
+- **正典 docs 改訂**: ui-design 8章（対応表）／acceptance.md B11 行／本書。design 6章は WebView2 1枚共有
+  ＝grid 流用と整合するため改訂不要。
+- **gtest**: `tests/controller/diff_mode_model_test.cpp` の Split＋diff 期待値を新仕様へ更新
+  （`SplitWithDiffUsesPreviewDiffGrid`）。グリッド文書生成（`preview_builder_test.cpp`）は流用で不変。
+- **状態**: 実装済（コミット前・作業ツリー）。**実機再確認前（未確定）**＝分割＋差分ONで左=整形/右=差分、
+  差分OFFで編集分割へ復帰、ソース+差分（差分面のみ）・プレビュー+差分（grid）が不変、を実機確認待ち。

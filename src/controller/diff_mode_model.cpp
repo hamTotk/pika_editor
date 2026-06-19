@@ -22,14 +22,19 @@ PaneLayout resolve_pane_layout(ViewMode mode, bool diff_on)
         break;
 
     case ViewMode::Split:
-        // 分割は常にエディタを出す。差分ON で右をプレビュー→差分面へ差し替える。
-        out.show_editor = true;
         if (diff_on)
         {
+            // 分割＋差分ON＝プレビュー＋差分と同じ「1枚WebView2内に左プレビュー・右差分の grid」
+            // へ倒す（B11 仕様変更）。レビュー用途では生ソースより整形プレビューと差分の対比が要る
+            // ため、エディタは出さずプレビュー＋差分経路へ合流する（2つ目の WebView2 を作らない）。
+            out.show_preview = true;
             out.show_diff = true;
+            out.preview_diff_grid = true;
         }
         else
         {
+            // 分割＋差分OFF は従来どおり「左＝エディタ／右＝整形プレビュー」を維持する。
+            out.show_editor = true;
             out.show_preview = true;
         }
         out.webview_active = true;
