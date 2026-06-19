@@ -122,6 +122,29 @@ void EditorPanel::set_first_visible_line(std::int64_t line)
     SetFirstVisibleLine(static_cast<int>(line));
 }
 
+void EditorPanel::goto_line(int line_1based, int column_1based)
+{
+    if (line_1based <= 0)
+    {
+        return; // 指定なし（0 始まりへの変換で負になる）は何もしない。
+    }
+    const int line0 = line_1based - 1; // Scintilla は 0 始まり。範囲外は SCI が安全に丸める。
+    if (column_1based > 0)
+    {
+        // 桁指定あり: 行頭からの桁位置へキャレットを置く（行頭 + (col-1)）。FindColumn は
+        // タブ幅を考慮しつつ行末を超えない位置へ丸めるため、範囲外でも落ちない。
+        const int pos = FindColumn(line0, column_1based - 1);
+        GotoPos(pos);
+    }
+    else
+    {
+        GotoLine(line0); // 行頭へ移動。
+    }
+    // 折りたたみ下でも当該行を可視化し、画面内へスクロールして入れる（行確認用途・要件3.1）。
+    EnsureVisibleEnforcePolicy(line0);
+    ScrollToLine(line0);
+}
+
 void EditorPanel::set_on_dirty_changed(std::function<void(bool)> cb)
 {
     on_dirty_changed_ = std::move(cb);
