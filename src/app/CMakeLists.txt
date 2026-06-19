@@ -45,6 +45,10 @@ add_library(pika_ui STATIC
     # sprint4: ReadDirectoryChangesW 監視スレッド実体（FILE_NOTIFY_INFORMATION→RawEvent→WatcherCore）。
     watch_thread.cpp
     watch_thread.h
+    # F-026: 系統C A章（性能ゲート）の in-app 計測（QPC タイミング・プロセスツリーメモリ合算）。
+    # Win32（QPC/psapi/Toolhelp32）はこのプラットフォーム層に閉じる（core/ には持ち込まない）。
+    perf_log.cpp
+    perf_log.h
 )
 target_link_libraries(pika_ui
     PUBLIC
@@ -57,6 +61,8 @@ target_link_libraries(pika_ui
         wx::webview
         # WebView2 ローダ（静的）をフルパスで供給する（wx の bare 名参照のリンク不全を塞ぐ）。
         unofficial::webview2::webview2
+        # F-026: 性能計測のメモリ取得（GetProcessMemoryInfo）。psapi は Windows SDK 同梱（依存追加なし）。
+        psapi
     PRIVATE
         pika_warnings
 )

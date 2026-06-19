@@ -1,5 +1,6 @@
 #include "ui/preview_view.h"
 
+#include "app/perf_log.h"
 #include "controller/preview_builder.h"
 #include "core/ipc/path_normalizer.h"
 
@@ -12,6 +13,7 @@
 #include <windows.h>
 
 #include <WebView2.h>
+#include <wrl.h> // ICoreWebView2TrySuspendCompletedHandler の最小実装（A8 計測。F-026）
 
 #include <wx/event.h>
 #include <wx/ffile.h>
@@ -368,6 +370,10 @@ void PreviewView::ensure_webview()
     {
         return;
     }
+    // A3（プレビュー初回表示）の起点（F-026）。ここで初めて WebView2 を生成する＝環境生成（~1秒）を
+    // 含む初回ナビゲートが始まる。生成→on_loaded 完了までを A3 として測る（design 11章）。
+    app::PerfLog::instance().mark(app::PerfMark::PreviewFirstNavBegin);
+    perf_first_preview_pending_ = true;
     // 遅延生成（初回プレビュー要求まで作らない。design 5.1 手順5・軽量原則）。Edge 固定。
     web_ =
         wxWebView::New(this, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxWebViewBackendEdge);
@@ -426,8 +432,22 @@ void PreviewView::navigate(const std::string& full_html, controller::PreviewKind
     }
     if (suspended_)
     {
-        // 次回表示で Resume 相当（再ナビゲートが復帰を兼ねる。design 6章 B1）。
+        // 次回表示で Resume（再ナビゲートが復帰を兼ねる。design 6章 B1）。WebView2 を実際に Resume
+        // して WS を復帰させ、A2（Resume→再表示）の起点を打つ（F-026）。
         suspended_ = false;
+        auto* core_webview = static_cast<ICoreWebView2*>(web_->GetNativeBackend());
+        if (core_webview)
+        {
+            ICoreWebView2_3* webview3 = nullptr;
+            if (SUCCEEDED(core_webview->QueryInterface(IID_PPV_ARGS(&webview3))) && webview3)
+            {
+                webview3->Resume();
+                webview3->Release();
+            }
+        }
+        app::PerfLog::instance().mark(
+            app::PerfMark::SuspendDone); // A2 区間の起点（suspend→resume）
+        perf_resume_pending_ = true;
     }
     // 直列化（design 6章 C5）: 前ナビが完了していなければ最新要求だけを保留し、on_loaded で流す。
     // ナビゲート中に JS 設定を変えると前モード設定が次ロードへ残留し得るため、必ず完了を待つ。
@@ -437,6 +457,17 @@ void PreviewView::navigate(const std::string& full_html, controller::PreviewKind
         pending_kind_ = kind;
         has_pending_ = true;
         return;
+    }
+    // A4/A5（切替/編集→再描画）の起点を打つ（F-026）。MainFrame が set_next_perf_trigger で指定した
+    // 種別を、いま実際に発射するナビへ紐づける（in-flight が解けて pending を流す経路でも 1
+    // 件に対応）。
+    if (next_perf_trigger_ != PerfTrigger::None)
+    {
+        inflight_perf_trigger_ = next_perf_trigger_;
+        next_perf_trigger_ = PerfTrigger::None;
+        app::PerfLog::instance().mark(inflight_perf_trigger_ == PerfTrigger::Edit
+                                          ? app::PerfMark::EditBegin
+                                          : app::PerfMark::SwitchBegin);
     }
     // JS 有効/無効を内容種別で切替える（Markdown/差分=有効・HTML=無効。design 6章 C5）。
     // 必ずナビゲート前に設定し、ナビゲート完了（on_loaded）まで次のロードを始めない。
@@ -507,14 +538,49 @@ void PreviewView::apply_document(std::uint64_t stamp, const controller::Occupanc
     navigate(full_html, js_kind);
 }
 
+namespace
+{
+// TrySuspend 完了ハンドラ（A8 計測・WS 縮小確認用。F-026）。WebView2 が実際にサスペンドして
+// WorkingSet を縮小し終えた瞬間に、プロセスツリーのアイドルメモリ（A8）を 1 点記録する。
+// 計測が無効なら record_memory はファイルへ書かない（観測のみ・本体挙動に影響しない）。
+class TrySuspendDoneHandler : public Microsoft::WRL::RuntimeClass<
+                                  Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+                                  ICoreWebView2TrySuspendCompletedHandler>
+{
+  public:
+    HRESULT STDMETHODCALLTYPE Invoke(HRESULT /*errorCode*/, BOOL /*isSuccessful*/) override
+    {
+        // A8: プレビュー後アイドルメモリ 250MB 級（TrySuspend で WS 縮小。要件2.1・design 11章）。
+        app::PerfLog::instance().record_memory(app::PerfMark::MemoryIdleAfterSuspend,
+                                               /*budget_mb*/ 250.0);
+        return S_OK;
+    }
+};
+} // namespace
+
 void PreviewView::suspend_if_idle()
 {
-    // 全タブ非プレビュー一定時間で共有 WebView2 をサスペンドする（メモリ回収。design 6章 B1）。
-    // wxWebview は TrySuspend を直接公開しないため、配線層は状態のみ持ち、Resume は次回ナビゲートで
-    // 兼ねる（TrySuspend/破棄再生成の実体は系統C で検証する）。
-    if (web_ && !suspended_)
+    // 全タブ非プレビュー一定時間で共有 WebView2 をサスペンドする（メモリ回収。design 6章 B1・
+    // DEC-02）。ICoreWebView2_3::TrySuspend で実際に WS を縮小する（WebView2 が非表示のときのみ
+    // 成功する＝プレビューを畳んでいる状態が前提）。Resume は次回ナビゲート（navigate）が兼ねる。
+    if (!web_ || suspended_)
     {
-        suspended_ = true;
+        return;
+    }
+    suspended_ = true;
+    auto* core_webview = static_cast<ICoreWebView2*>(web_->GetNativeBackend());
+    if (!core_webview)
+    {
+        return;
+    }
+    ICoreWebView2_3* webview3 = nullptr;
+    if (SUCCEEDED(core_webview->QueryInterface(IID_PPV_ARGS(&webview3))) && webview3)
+    {
+        // 完了ハンドラで A8 メモリ（WS 縮小後）を記録する。TrySuspend 自体は非ブロッキング。
+        Microsoft::WRL::ComPtr<ICoreWebView2TrySuspendCompletedHandler> handler =
+            Microsoft::WRL::Make<TrySuspendDoneHandler>();
+        webview3->TrySuspend(handler.Get());
+        webview3->Release();
     }
 }
 
@@ -546,6 +612,43 @@ void PreviewView::on_loaded(wxWebViewEvent& evt)
     // NavigationCompleted 相当（直列化の解除点・スクロール復元の照合点。design 5.5 手順3）。
     // 完了したので in-flight を解く。保留があれば「最新」を 1 件だけ流す（中間状態を描かない）。
     nav_in_flight_ = false;
+
+    // 性能計測の終点（F-026）。このナビ完了に紐づく区間を確定する。複数が同一ナビに重なり得る
+    // （初回プレビュー＝Resume なし、切替＝既存ナビなし等）ため、立っているフラグを個別に閉じる。
+    auto& perf = app::PerfLog::instance();
+    if (perf_first_preview_pending_)
+    {
+        perf_first_preview_pending_ = false;
+        // A3: プレビュー初回表示 ≤ 2秒（WebView2 環境生成 ~1秒＋初回変換 ~200ms。design 11章）。
+        perf.measure(app::PerfMark::PreviewFirstNavBegin, app::PerfMark::PreviewFirstLoaded,
+                     /*budget_ms*/ 2000.0);
+        // A7: 既定プレビュー直後メモリ（要件2.1・design 11章）。初回 on_loaded 完了の直後に
+        // プロセスツリー（自分＋msedgewebview2 子孫）合算 WS を 1 点記録する（F-026）。WebView2
+        // 環境が立ち上がりきった直後＝既定状態のメモリを測る正しいタイミング。
+        perf.record_memory(app::PerfMark::MemoryAfterPreview, /*budget_mb*/ 350.0);
+    }
+    if (perf_resume_pending_)
+    {
+        perf_resume_pending_ = false;
+        // A2: TrySuspend からの Resume 再表示 ≤ 300ms（目標 150ms。design 6章 DEC-02・11章）。
+        perf.measure(app::PerfMark::SuspendDone, app::PerfMark::ResumeShown,
+                     /*budget_ms*/ 300.0, /*target_ms*/ 150.0);
+    }
+    if (inflight_perf_trigger_ == PerfTrigger::Switch)
+    {
+        inflight_perf_trigger_ = PerfTrigger::None;
+        // A4: タブ/モード切替後の再表示 ≤ 300ms（目標 150ms。2 回目以降のキャッシュ復元。design
+        // 11章）。
+        perf.measure(app::PerfMark::SwitchBegin, app::PerfMark::SwitchLoaded,
+                     /*budget_ms*/ 300.0, /*target_ms*/ 150.0);
+    }
+    else if (inflight_perf_trigger_ == PerfTrigger::Edit)
+    {
+        inflight_perf_trigger_ = PerfTrigger::None;
+        // A5: 編集中のプレビュー更新（デバウンス込み）≤ 300ms（要件2.1）。
+        perf.measure(app::PerfMark::EditBegin, app::PerfMark::EditLoaded, /*budget_ms*/ 300.0);
+    }
+
     if (has_pending_)
     {
         has_pending_ = false;

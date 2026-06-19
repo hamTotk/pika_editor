@@ -557,17 +557,30 @@
 
 ## F-026 A章（性能ゲート）は専用の性能計測パスが必要
 
-- **重大度**: 中（リリース前ゲート。要件2.1）。機能は B〜J で検証済みだが数値ゲートは未計測。
-- **内訳/理由**:
-  - **A1-A6（タイミング）**: 「ウィンドウ表示完了」「再表示完了」等の瞬間は外部から正確に取れず、
-    in-app の高分解能タイムスタンプ instrumentation（QueryPerformanceCounter で各マイルストーンを記録し
-    ログ出力）が必要。A6 の機能面は D 章で確認済み（rapid 10回書換でも最終内容が反映）。
-  - **A7/A8（メモリ）**: WebView2 が別プロセス（msedgewebview2.exe）で動き、本環境では他アプリの
-    WebView2 と混在（計測時 12 プロセス 737MB）。pika 配下のみの分離計測には親子関係取得
-    （PowerShell/wmic）が要るが本環境で利用不可（wmic 実質無効・PowerShell は Bash 経由 deny・
-    ユーザーの `!` 実行も不可）。
+- **重大度**: 中（リリース前ゲート。要件2.1）。機能は B〜J で検証済み。本件で in-app 計測を実装し
+  ベースラインを取得した。
+- **実装（in-app 計測 instrumentation）**: `src/app/perf_log.{h,cpp}`（PerfLog ファサード）を新設。
+  - **タイミング（A1-A6）**: `QueryPerformanceCounter` で各マイルストーンを begin→end でスタンプし
+    区間 ms を算出。計測点は main_gui（A1 起動→表示）・main_frame（A4 切替/A6 外部変更反映）・
+    preview_view（A2 Resume/A3 初回プレビュー）。
+  - **メモリ（A7/A8）の分離計測（前回ブロッカー解消）**: `GetProcessMemoryInfo`(psapi) で自プロセス、
+    `CreateToolhelp32Snapshot` で自分の子孫プロセス（msedgewebview2.exe 等）を再帰列挙し WorkingSetSize
+    を合算＝pika プロセスツリー全体のメモリ。他アプリの WebView2 と混ざらない。→ PowerShell/wmic 不要。
+  - **原則③（軽い）**: 既定オフ。`--perf-log`（任意 `--perf-log=<path>`・既定 `%TEMP%\pika-perf.log`）
+    指定時のみファイル I/O。CLI パーサ（core/ipc・gtest済）・転送 JSON・役割決定は不変（main_gui で
+    フラグを拾い collect_args から除外）。Win32 は app/UI 層に閉じ core/ 非汚染。プライバシー：ログに
+    パス/内容を書かず、マイルストーン名・ms・基準・PASS/FAIL・メモリ(MB/プロセス数)のみ。
+- **ベースライン計測結果（基準機 Release・`--perf-log`・F-004 を足す前）**:
+  - A1 起動→表示 **59.4ms**/≤500 ✅・A2 Resume **8.9ms**/≤300 ✅・A3 初回プレビュー **383.6ms**/≤2000 ✅・
+    A4 切替 warm **7〜10ms**/≤300（目標150）✅（初回 cold のみ 353.3ms＝キャッシュ構築・実質A3相当）・
+    A6 外部変更反映 **175.0ms**/≤500 ✅・A7 メモリ **278MB**/≤350 ✅（自32MB＋子孫7プロセス合算）。
+  - **A5 計測対象不在**: ライブ編集→デバウンス→プレビュー更新の**機能自体が未実装**（EditorPanel は
+    savepoint のみ束ね・on_editor_dirty_changed は update_preview を呼ばない）。原則④に従い計測の
+    ために機能を足さず所見化。実装可否は要ユーザー判断。
+  - **A8 未取得**: `--perf-log` 限定の計測補助（Source 畳み後 1.5秒アイドルで強制 TrySuspend）を実装したが
+    今回の操作で未発火（1.5秒前に復帰した可能性）→ 再計測予定。なお **production は遊休サスペンドを
+    駆動しない**（`suspend_if_idle` 呼び出し元ゼロ＝DEC-02 自動サスペンド未配線）ため、実運用では WS 縮小が
+    起きずアイドルメモリ目標は達成されない。production 駆動の可否は要ユーザー判断。
   - **A9** ✅ 済（プレビュー未使用で pika 由来 WebView2 未起動）。**A10** 8時間ソークは dev/spec.md 非対象。
-- **対応方針**: 専用性能パスで (1) 起動/再表示/プレビュー/編集更新に QueryPerformanceCounter 計測を仕込み
-  ログ出力（リリースビルド・基準機）、(2) メモリは pika プロセスツリーを辿る計測スクリプト（PowerShell
-  が使える環境で）。release 前ゲートとして実施。
-- **状態**: 未対応（ユーザー判断「メモリだけ今実測」だが環境制約で計測不可→専用パスへ）
+- **状態**: ✅ instrumentation 実装・ベースライン計測済み（A1-A4/A6/A7 PASS）。残：A5（ライブ編集
+  プレビュー機能未実装＝要判断）・A8（再計測＋production 遊休サスペンド駆動の可否＝要判断）。
