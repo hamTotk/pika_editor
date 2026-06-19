@@ -172,11 +172,11 @@ CLI パース・役割決定の判断は系統A（core/ipc・controller/app_cont
 | # | 項目 | 受け入れ基準 | 根拠 | 結果 |
 |---|------|-------------|------|------|
 | J1 | ワークスペースを汚さない | フォルダ内に pika が管理ファイルを作らない | 要件9.5・CLAUDE.md | [x] |
-| J2 | 1000ファイル規模の初回オープン | ベースライン取得中も UI が操作できる | 要件9.5 | [ ] |
-| J3 | 終了中に変更されたファイル | 次回起動時に未読となり差分が正しく表示される | 要件9.5/10.1 | [ ] |
-| J4 | snapshots/index/object の ACL | ユーザー本人のみアクセスできる権限で作成 | 要件9.1 | [ ] |
-| J5 | クラッシュ耐性 | 状態/スナップショット/設定はアトミック書き込み。退避は残る | 要件12.1・設計原則1 | [ ] |
-| J6 | データルート分岐 | 既定 `%LOCALAPPDATA%\pika\` / `portable.txt` 検出時は exe 隣 `./pika-data/` | 要件13章・design 7章 K1 | [ ] |
+| J2 | 1000ファイル規模の初回オープン | ベースライン取得中も UI が操作できる | 要件9.5 | [x] 実機: pika-accept/many/ に1000ファイル生成→フォルダ起動で素早く表示・UI 固まらず操作可(ツリースクロール/メニュー/オープン)・many 展開で1000件表示。F-021 の再帰列挙(同期)が1000規模では UI をブロックしない |
+| J3 | 終了中に変更されたファイル | 次回起動時に未読となり差分が正しく表示される | 要件9.5/10.1 | [x] 実機: target.md を確認済み(ベースライン化)→pika を閉じる→閉じている間に target.md を外部追記→再起動で `± target.md` 未読バッジ・未読1件・差分面に確認時点→追記行(+ J3オフライン変更)が表示。起動時 resync が watcher 不在中の変更を検出 |
+| J4 | snapshots/index/object の ACL | ユーザー本人のみアクセスできる権限で作成 | 要件9.1 | [x] icacls 実機: snapshots フォルダが明示的(非継承)に `DEVPC\devuser:(OI)(CI)(F)` ＝本人のみフルアクセス(SYSTEM/Administrators/他グループ無し)・index.json/objects へ OI/CI 伝播(index.json も devuser:(F) のみ)。親 pika フォルダは %LOCALAPPDATA% 既定 ACL 継承だが snapshots で owner-only に絞っている |
+| J5 | クラッシュ耐性 | 状態/スナップショット/設定はアトミック書き込み。退避は残る | 要件12.1・設計原則1 | [x] 実機: 今セッションで多数のクラッシュ/強制終了(taskkill //F)後もデータルートに部分書き込み(.tmp/.pika-)残らず・index.json パースOK(6 entry)・object 退避27件無事＝アトミック書き込み(temp→rename)で退避が残り index 整合。state.json/settings/snapshots とも write_atomic 経由(系統A gtest 済) |
+| J6 | データルート分岐 | 既定 `%LOCALAPPDATA%\pika\` / `portable.txt` 検出時は exe 隣 `./pika-data/` | 要件13章・design 7章 K1 | [x] 実機: exe 隣に portable.txt 配置→起動→終了で `./pika-data/state.json`(lastWorkspace=pika-accept)が exe 隣に生成・%LOCALAPPDATA% 側へは新規書き込みなし。既定(portable.txt 無し)は %LOCALAPPDATA%\pika\(J1/J4 で確認) |
 
 ## K. About・ライセンス・配布（design 10章 K6／要件13章。dev sprint8 should・非対象）
 
