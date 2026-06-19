@@ -182,9 +182,9 @@ CLI パース・役割決定の判断は系統A（core/ipc・controller/app_cont
 
 | # | 項目 | 受け入れ基準 | 根拠 | 結果 |
 |---|------|-------------|------|------|
-| K1 | About 画面 | 同梱サードパーティ OSS のライセンス表示（assets/THIRD_PARTY_NOTICES） | design 10章 K6・dev sprint8 should | [ ] |
-| K2 | 配布インストーラー（Inno Setup）・ポータブル zip | ユーザー単位インストール（管理者権限不要）・ポータブル展開で起動 | 要件13章・dev spec.md 非対象 | [ ] |
-| K3 | SmartScreen 回避手順 | 未署名のため `docs/install.md` の手順で起動できる | 要件13章・CLAUDE.md | [ ] |
+| K1 | About 画面 | 同梱サードパーティ OSS のライセンス表示（assets/THIRD_PARTY_NOTICES） | design 10章 K6・dev sprint8 should | [-] 未実装(リリース準備)。on_about はアプリ名のみの最小 wxMessageBox・バージョン/ライセンス表示なし・THIRD_PARTY_NOTICES 不在。F-025 |
+| K2 | 配布インストーラー（Inno Setup）・ポータブル zip | ユーザー単位インストール（管理者権限不要）・ポータブル展開で起動 | 要件13章・dev spec.md 非対象 | [-] 未実装(リリース準備)。installer/ 無し・Inno Setup スクリプト/ポータブルzip生成なし。F-025 |
+| K3 | SmartScreen 回避手順 | 未署名のため `docs/install.md` の手順で起動できる | 要件13章・CLAUDE.md | [-] 未実装(リリース準備)。docs/install.md 無し。F-025 |
 
 ---
 
