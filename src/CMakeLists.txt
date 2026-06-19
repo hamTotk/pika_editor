@@ -134,6 +134,8 @@ add_library(pika_core STATIC
     core/render/html_tokenizer.h
     core/render/markdown_renderer.cpp
     core/render/markdown_renderer.h
+    core/render/preview_features.cpp
+    core/render/preview_features.h
     core/render/render_guard.cpp
     core/render/render_guard.h
     core/render/render_options.h

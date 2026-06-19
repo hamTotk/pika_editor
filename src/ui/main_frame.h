@@ -218,6 +218,10 @@ class MainFrame : public wxFrame
                            const std::string& detail);
     // HTML プレビューの JS 検知通知を更新する（検知時のみ JsDetected を 1 件・idempotent。B3）。
     void update_js_notification(const std::string& path, bool js_detected);
+    // 同梱スクリプト（Mermaid/KaTeX/highlight.js）のブロック描画失敗件数を更新する（F-004・design
+    // 6章 I1）。同一パスの古い RenderFailed を畳んでから count>0 のとき 1
+    // 件積む（再描画で重複しない）。
+    void update_render_failed_notification(const std::string& path, int count);
     // 通知集合をアクティブタブ文脈で集約し、通知バー領域へ反映する（最大3本＋他N件）。
     void refresh_notifications();
 

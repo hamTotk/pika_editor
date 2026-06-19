@@ -146,6 +146,47 @@ TEST(HtmlSanitizerTest, EscapesTextContent)
     EXPECT_TRUE(icontains(out, "&lt;"));
 }
 
+// 大文字小文字を保つ厳密包含（実体エスケープの段数を見るため icontains では不十分）。
+bool contains_cs(const std::string& hay, const std::string& needle)
+{
+    return hay.find(needle) != std::string::npos;
+}
+
+// 既に妥当な実体（&amp; / &lt; / &gt; / &quot;）を含むテキストは二重エスケープしない。
+// md4c はコード/本文の特殊文字を `&lt;` 等にエスケープして出力するため、サニタイザが '&' を
+// さらに `&amp;` 化すると `&amp;lt;` のように二重化し、ブラウザで `&lt;` がリテラル表示される
+// （F-004 Mermaid: `-->` → `--&gt;` → 二重化で `--&amp;gt;` → mermaid 構文エラー）。
+TEST(HtmlSanitizerTest, DoesNotDoubleEscapeExistingEntities)
+{
+    // 名前付き標準実体は素通し（1 段のまま）。
+    std::string out = sanitize_html("<p>x &amp; y &lt; z &gt; w &quot;q&quot;</p>");
+    EXPECT_TRUE(contains_cs(out, "x &amp; y &lt; z &gt; w &quot;q&quot;"));
+    EXPECT_FALSE(contains_cs(out, "&amp;amp;"));
+    EXPECT_FALSE(contains_cs(out, "&amp;lt;"));
+    EXPECT_FALSE(contains_cs(out, "&amp;gt;"));
+}
+
+// 数値文字参照（10 進・16 進）も妥当な実体として素通しする。
+TEST(HtmlSanitizerTest, PreservesNumericCharacterReferences)
+{
+    std::string out = sanitize_html("<p>&#169; &#x41; &copy;</p>");
+    EXPECT_TRUE(contains_cs(out, "&#169;"));
+    EXPECT_TRUE(contains_cs(out, "&#x41;"));
+    EXPECT_TRUE(contains_cs(out, "&copy;"));
+    EXPECT_FALSE(contains_cs(out, "&amp;#")); // 数値参照の '&' を二重化していない。
+}
+
+// 実体になりかけて閉じない／空の '&' は依然エスケープする（素の '&' は安全側で `&amp;`）。
+TEST(HtmlSanitizerTest, EscapesBareAmpersand)
+{
+    // 末尾の裸 '&'、';' で閉じない名前、空の `&;` はいずれも素の '&' 扱い。
+    std::string out = sanitize_html("<p>a & b &notclosed &amp c &; d</p>");
+    EXPECT_TRUE(contains_cs(out, "a &amp; b"));      // 裸の '&'。
+    EXPECT_TRUE(contains_cs(out, "&amp;notclosed")); // ';' 無しは素の '&'。
+    EXPECT_TRUE(contains_cs(out, "&amp;amp c"));     // 'amp' の後に ';' が無い（空白）→ 素の '&'。
+    EXPECT_TRUE(contains_cs(out, "&amp;; d"));       // 空の名前 `&;` → 素の '&'。
+}
+
 TEST(HtmlSanitizerTest, RemovesHtmlComments)
 {
     std::string out = sanitize_html("<p>a</p><!-- [if IE]><script>x()</script><![endif] -->");

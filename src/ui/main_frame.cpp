@@ -17,6 +17,7 @@
 #include "core/render/html_inspector.h"
 #include "core/render/html_sanitizer.h"
 #include "core/render/markdown_renderer.h"
+#include "core/render/preview_features.h"
 #include "core/snapshot/sensitive.h"
 #include "core/snapshot/snapshot_store.h"
 #include "core/snapshot/snapshot_types.h"
@@ -294,6 +295,11 @@ void MainFrame::build_layout()
 
     preview_ = new PreviewView(main_split);
     preview_->set_on_navigate([this](const std::string& url) { on_preview_navigate(url); });
+    // 同梱スクリプト（Mermaid/KaTeX/highlight.js）のブロック描画失敗件数を通知バーへ連携する
+    // （F-004・design 6章 I1）。件数はアクティブタブ文脈で update_render_failed_notification
+    // が紐づける。
+    preview_->set_on_render_failures(
+        [this](int count) { update_render_failed_notification(active_file_path(), count); });
     // app.pika の同梱アセット（preview.css 等）の配信元＝exe 隣の assets/（design 6章 C6）。
     preview_->set_asset_dir(asset_dir());
 
@@ -1761,6 +1767,10 @@ void MainFrame::update_preview()
                 rendered.is_ok()
                     ? rendered.value()
                     : "<p class=\"pika-placeholder\">プレビューを生成できませんでした</p>";
+            // 該当記法（Mermaid/数式/コード）がある時だけ同梱スクリプトを注入させる（F-004。
+            // 未使用時コストゼロ＝原則③）。検出は Markdown ソースを走査する純ロジック（wx
+            // 非依存）。
+            doc.features = core::render::detect_preview_features(source);
         }
 
         // HTML プレビューは JS 依存を検知して通知バー導線（既定ブラウザで開く）を出す。
@@ -1806,6 +1816,10 @@ void MainFrame::update_preview()
         const controller::PreviewKind js_kind =
             show_diff && !grid ? controller::PreviewKind::Markdown : kind;
         CallAfter([this, stamp, key, full_html, js_kind, path, js_detected]() {
+            // 新しいプレビューを反映する前に、前回の描画失敗通知を畳む（再描画で件数を更新する。
+            // 成功時はブートストラップが postMessage
+            // しないため、ここで畳まないと古い件数が残る。F-004）。
+            update_render_failed_notification(path, 0);
             preview_->apply_document(stamp, key, full_html, js_kind);
             update_js_notification(path, js_detected);
         });
@@ -2325,6 +2339,29 @@ void MainFrame::update_js_notification(const std::string& path, bool js_detected
     if (js_detected && !path.empty())
     {
         push_notification(controller::NotificationKind::JsDetected, path, std::string{});
+    }
+    else
+    {
+        refresh_notifications();
+    }
+}
+
+void MainFrame::update_render_failed_notification(const std::string& path, int count)
+{
+    // 同一ファイルの古い描画失敗通知を畳んでから件数 > 0 のとき 1
+    // 件積む（再描画での重複防止。F-004）。
+    notifications_.erase(std::remove_if(notifications_.begin(), notifications_.end(),
+                                        [&](const controller::Notification& n) {
+                                            return n.kind ==
+                                                       controller::NotificationKind::RenderFailed &&
+                                                   n.tab_path == path;
+                                        }),
+                         notifications_.end());
+    if (count > 0 && !path.empty())
+    {
+        // detail に件数つき文言を入れる（無ければ種別の汎用文言。内容は載せない＝診断ログ規約）。
+        push_notification(controller::NotificationKind::RenderFailed, path,
+                          notify_render_failed(static_cast<std::size_t>(count)));
     }
     else
     {

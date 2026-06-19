@@ -29,6 +29,11 @@ namespace pika::ui
 // 相対 .md/.html はタブで開き、他は既定ブラウザへ（実施は MainFrame）。
 using NavigateRequest = std::function<void(const std::string& url)>;
 
+// 同梱スクリプト（Mermaid/KaTeX/highlight.js）のブロック描画失敗件数の報告（F-004・design 6章
+// I1）。 preview-bootstrap.js が postMessage した件数を MainFrame へ橋渡しし、通知バーに連携する
+// （件数の文書への紐付けは MainFrame がアクティブタブ文脈で行う）。
+using RenderFailuresReport = std::function<void(int count)>;
+
 // 共有 1 枚 WebView2 を所有し、プレビュー/差分を出し分けるパネル。
 // 初回プレビュー要求まで wxWebView を生成しない（遅延初期化＝軽量原則。design 5.1 手順5）。
 class PreviewView : public wxPanel
@@ -50,6 +55,9 @@ class PreviewView : public wxPanel
 
     // リンク振り分けコールバックを登録する（ナビゲーションインターセプト時に呼ぶ）。
     void set_on_navigate(NavigateRequest cb) { on_navigate_ = std::move(cb); }
+
+    // 同梱スクリプトのブロック描画失敗件数の報告コールバックを登録する（F-004。通知バー連携）。
+    void set_on_render_failures(RenderFailuresReport cb) { on_render_failures_ = std::move(cb); }
 
     // プレビュー（差分OFF）を表示する。占有鍵 key で世代を進め、HTML をナビゲートする。
     void show_preview(const controller::OccupancyKey& key, const controller::PreviewDoc& doc);
@@ -110,6 +118,8 @@ class PreviewView : public wxPanel
     void apply_script_enabled(bool enabled);
     void on_navigating(wxWebViewEvent& evt); // 全キャンセルし on_navigate_ へ振り分ける
     void on_loaded(wxWebViewEvent& evt);     // NavigationCompleted 相当（直列化の解除点）
+    // 同梱スクリプトの postMessage 受信（ブロック描画失敗件数を通知バーへ橋渡しする）。
+    void on_script_message(wxWebViewEvent& evt);
 
     wxWebView* web_ = nullptr; // 共有 1 枚（遅延生成。nullptr＝未生成）
     controller::OccupancyTracker occupancy_;
@@ -121,8 +131,9 @@ class PreviewView : public wxPanel
     std::string preview_html_;
     std::uint64_t nav_gen_ = 0; // 同一 URL でも内容差し替えで再ロードさせるキャッシュ無効化カウンタ
     NavigateRequest on_navigate_;
-    bool js_enabled_ = true; // 現在の JS 有効状態（Markdown/差分=有効・HTML=無効）
-    bool suspended_ = false; // TrySuspend 済みか（次回表示で Resume）
+    RenderFailuresReport on_render_failures_; // 同梱スクリプトの描画失敗件数の報告先（F-004）
+    bool js_enabled_ = true;                  // 現在の JS 有効状態（Markdown/差分=有効・HTML=無効）
+    bool suspended_ = false;                  // TrySuspend 済みか（次回表示で Resume）
 
     // 直列ナビゲート（design 6章 C5）。SetPage→on_loaded の間は in-flight とし、その間に来た
     // 次の要求は pending_ に 1 件だけ最新で保持し、on_loaded 後に流す（前モード JS 設定の残留・

@@ -38,6 +38,7 @@ add_executable(pika_tests
     core/render/html_sanitizer_test.cpp
     core/render/html_tokenizer_test.cpp
     core/render/markdown_renderer_test.cpp
+    core/render/preview_features_test.cpp
     core/render/render_guard_test.cpp
     core/render/url_classifier_test.cpp
     core/search/search_engine_test.cpp

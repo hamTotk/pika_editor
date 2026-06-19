@@ -398,6 +398,14 @@ void PreviewView::ensure_webview()
     // ナビゲーションは全インターセプト（プレビュー内ページ遷移をさせない。design 6章）。
     web_->Bind(wxEVT_WEBVIEW_NAVIGATING, &PreviewView::on_navigating, this);
     web_->Bind(wxEVT_WEBVIEW_LOADED, &PreviewView::on_loaded, this);
+
+    // 同梱スクリプト（preview-bootstrap.js）→ネイティブの一方向メッセージ経路（F-004・design 6章
+    // I1）。 AddScriptMessageHandler("pika") で window.pika.postMessage が生え、文字列が
+    // wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED で届く。これはネイティブ→JS ではなく JS→ネイティブの
+    // 通知用で、ユーザー文書由来 JS の実行（CSP で禁止）とは無関係（pika 同梱 JS だけが postMessage
+    // する）。
+    web_->AddScriptMessageHandler("pika");
+    web_->Bind(wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED, &PreviewView::on_script_message, this);
 }
 
 void PreviewView::apply_script_enabled(bool enabled)
@@ -659,6 +667,47 @@ void PreviewView::on_loaded(wxWebViewEvent& evt)
     }
     // スクロール復元/占有世代の再照合の実描画は系統C で検証する。
     evt.Skip();
+}
+
+void PreviewView::on_script_message(wxWebViewEvent& evt)
+{
+    // 同梱スクリプト（preview-bootstrap.js）からの一方向通知（F-004・design 6章 I1）。
+    // ペイロードは {"kind":"render-failures","count":N}。最小パースで count を取り出して報告する
+    // （toml/json ライブラリを UI
+    // に持ち込まない＝固定フォーマットの軽量パース）。文書内容は載らない。
+    const std::string msg(evt.GetString().ToUTF8().data());
+    if (msg.find("render-failures") == std::string::npos)
+    {
+        return; // 既知種別以外は無視（将来の拡張に対し前方互換）。
+    }
+    const std::size_t key = msg.find("\"count\"");
+    if (key == std::string::npos)
+    {
+        return;
+    }
+    // "count" の後ろ最初の数字列を 10 進整数として読む。
+    std::size_t i = key + 7;
+    while (i < msg.size() && (msg[i] < '0' || msg[i] > '9'))
+    {
+        ++i;
+    }
+    int count = 0;
+    bool seen = false;
+    while (i < msg.size() && msg[i] >= '0' && msg[i] <= '9')
+    {
+        seen = true;
+        count = count * 10 + (msg[i] - '0');
+        if (count > 100000)
+        {
+            count = 100000; // 異常値の上限クランプ（防御）。
+            break;
+        }
+        ++i;
+    }
+    if (seen && count > 0 && on_render_failures_)
+    {
+        on_render_failures_(count); // MainFrame がアクティブタブ文脈で通知バーへ連携する。
+    }
 }
 
 } // namespace pika::ui

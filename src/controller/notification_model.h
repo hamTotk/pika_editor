@@ -35,6 +35,7 @@ enum class NotificationKind
     RemoteResource, // 外部リソース参照（既定オフのプレビューが外部 http(s) を参照。要件6章）
     JsDetected,     // ユーザー文書由来 JS の検知（HtmlInspector。要件6章）
     BigFile,        // 巨大ファイル段階制で機能縮退（10MB/200MB。要件2.2・9.2）
+    RenderFailed,   // Mermaid/KaTeX/コードのブロック描画失敗・タイムアウト件数（要件6.2・F-004）
 };
 
 // 通知 1 件（GUI が集める素材）。tab_path が空ならグローバル通知（タブ非依存）。

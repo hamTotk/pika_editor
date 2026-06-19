@@ -135,3 +135,41 @@ body.preview-diff-grid {
     padding: 24px;
     color: var(--fg-2);
 }
+
+/* ---- F-004 同梱スクリプト（Mermaid/KaTeX/highlight.js）の補助スタイル ---- */
+
+/* Mermaid 図の置き換え先（preview-bootstrap.js が code.language-mermaid を差し替える）。 */
+.pika-mermaid {
+    margin: 12px 0;
+    text-align: center;
+}
+
+.pika-mermaid svg {
+    max-width: 100%;
+    height: auto;
+}
+
+/* ブロック描画失敗・タイムアウト時のバッジ（元のコードブロックを残したまま付与＝崩さない）。 */
+.pika-render-error {
+    display: inline-block;
+    margin: 4px 0 0 8px;
+    padding: 0 6px;
+    font-size: 11px;
+    color: var(--diff-del-tx);
+    border: 1px solid var(--diff-del-tx);
+    border-radius: 3px;
+    user-select: none;
+}
+
+/* コードブロック（highlight.js が hljs クラスを付ける。テーマ CSS は vendor が背景/文字色を担う）。 */
+.preview pre,
+.grid-left pre {
+    overflow: auto;
+    border-radius: 4px;
+}
+
+.preview pre code,
+.grid-left pre code {
+    font-family: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+    font-size: 13px;
+}
