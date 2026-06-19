@@ -457,6 +457,59 @@
   （`req.goto_mode`/`plan.goto_mode` を goto_source として伝播＝-g はソース表示固定）。`file_paths` ヘルパ削除。
 - **状態**: ✅ 修正済み・実機検証済み（`pika -g long.md:120` 転送→120行目表示・カーソル該当行・ソース表示）
 
+## F-021 ファイルツリーが1階層のみ（サブフォルダを展開しても空・ナビゲート不可）
+
+- **重大度**: 中〜大（ワークスペースのサブフォルダ内ファイルを開けない＝AIエージェント出力がサブフォルダ
+  にあると確認できない。要件4.1 のツリー機能の中核）。
+- **対応章**: I1 検証中に判明（img/ を展開しても sample.png が出ない）。I 章の画像/サブフォルダ系全般に波及。
+- **根本原因**: `MainFrame::enumerate_shallow_tree` が `app::list_directory(root, "", ...)`（**単一階層のみ・
+  非再帰**）で root 直下だけを列挙し `build_tree` に渡す。サブフォルダはフォルダノードとして出るが children
+  が空。`FileTreeModel` は `set_root` の静的 TreeRowVm を使い**展開時の遅延列挙(lazy load)が無い**ため、
+  サブフォルダを開いても中身が出ない。「shallow」の名のとおり意図的に1階層。
+- **対応方針（候補）**: (A) 遅延列挙＝wxDataViewModel の展開イベントでサブフォルダを `list_directory(root,
+  rel)` し children を追加（軽い・大規模ツリーに強い）。(B) 起動時に再帰列挙して全 TreeRowVm を作る
+  （単純だが巨大ツリーで重い＝設計原則「軽い」に反しうる）。exclude（.git/node_modules）と監視（深い階層の
+  watcher 範囲）との整合に注意。推奨は (A) 遅延列挙。
+- **修正**: (B) 再帰列挙を採用。`app::enumerate_tree(root, exclude, max_nodes, capped)` 新設
+  （`recursive_directory_iterator`・exclude ディレクトリは `disable_recursion_pending` で降りない・cap=50000 で
+  打ち切り `wxLogWarning`・リンク非追従）。`enumerate_shallow_tree`→`enumerate_tree` 差し替え→`normalize_entries`
+  →`build_tree`（入れ子 rel_path 対応）でフルツリー化。watcher は既に bWatchSubtree=TRUE で再帰監視済み。
+- **状態**: ✅ 修正済み・実機検証済み（img/sample.png・sub/child.md がツリーに見え、sub/child.md を開ける）
+
+## F-022 画像簡易ビュー(I1)・巨大画像ガード(I2)・バイナリ非対応表示(I9)が GUI 未配線
+
+- **重大度**: 中（要件12.2・design 10章 B3。画像/バイナリを開くと**テキストとして開く**＝画像は表示できず
+  バイナリは空/文字化け。データ損失ではない）。
+- **対応章**: I1（ラスター画像の簡易ビュー）/I2（巨大画像ガード）/I9（その他バイナリの非対応表示）。実機:
+  binary.bin が空テキストエディタで開く・sample.png も（ツリーに出れば）テキスト扱いになる。
+- **根本原因**: `MainFrame::open_file` が**常に EditorPanel（テキスト）で開く**（decode_auto→set_text_utf8）。
+  種別分岐が無い。縮退/分類ロジック `controller/degrade_model`（`DegradeKind::ImageTooLarge` 等・is_image・
+  ピクセルガード）は実装＆gtest 済み（系統A）だが open_file が未使用。画像簡易ビュー（wxImage 自前描画・
+  WebView2 非起動・フィット/等倍）やバイナリ「対応していない形式＋既定アプリで開く」ビューの UI が無い。
+- **対応方針（候補）**: open_file で拡張子/ヘッダから種別判定→(1) ラスター画像=wxImage 簡易ビューア panel
+  （フィット/等倍トグル・degrade_model でヘッダ寸法>上限なら ImageTooLarge 誘導＝デコードせず「既定アプリで
+  開く」）、(2) その他バイナリ=「対応していない形式」＋「既定のアプリで開く」ボタンの簡易 panel、(3) テキストは
+  従来どおり EditorPanel。is_image/ピクセル判定・ガードは degrade_model を結線。
+- **状態**: 未対応（次段で dev-generator 実装予定。ユーザー判断「F-021+F-022 両方実装」）
+
+## F-023 最後のタブを閉じるとクラッシュ（wxAuiNotebook 空ノートブック／イベント中の構造変更）
+
+- **重大度**: 大（クラッシュ＝アプリ異常終了。タブを全部閉じる操作で必ず発生）。F-021 実機検証中に判明。
+- **再現**: テキスト2ファイルを開く→1つ閉じる（正常）→最後のタブを×で閉じる→一瞬フリーズ後に異常終了。
+- **診断（一時トレースで確定）**: 最後の `on_notebook_page_close` は正常完了、その後 `page_changed` が一切
+  発火せずクラッシュ＝**wxAuiNotebook が最終ページ削除→空ノートブックになる内部処理でクラッシュ**。
+  第1次対処で「空にしないプレースホルダ方式」を入れたが**空状態が一瞬見えた後にまたクラッシュ**＝
+  **PAGE_CLOSE イベント処理中に AddPage（プレースホルダ追加）して wxAUI 内部状態を壊した**第2の原因が判明。
+- **修正**: (1) `on_notebook_page_close` で**最後の実タブ**は `evt.Veto()`＋`CallAfter` でイベント外
+  クローズ（`close_last_real_tab_deferred`：ensure_placeholder→tabs_.close→DeletePage の順で 0 ページを
+  経由しない）。実タブ2枚以上は従来の Skip。＝**PAGE_CLOSE イベント中にノートブック構造を一切変更しない**。
+  (2) 空状態プレースホルダ（閉じ不可・TabManager 非登録・末尾固定・型分離）でノートブックを 0 にしない。
+  (3) update_preview の再入ガード・空早期 return は防御として残置。(4) 恒久のクラッシュハンドラ
+  （`SetUnhandledExceptionFilter`＋DbgHelp で `%TEMP%\pika-crash.log` にスタック記録・ヒープ非使用・内容/
+  パス非出力＝要件12.3）と Release PDB 生成（CMake `/Zi`＋`/DEBUG /OPT:REF /OPT:ICF`・最適化維持）を追加。
+- **状態**: ✅ 修正済み・実機検証済み（最後のタブ×閉じで空状態が安定表示・クラッシュなし・再オープン可。
+  ctest 670 件 PASS）
+
 | 項目 | 結果 | 根拠 |
 |------|------|------|
 | H5 CLI `--version`/`--help` | ✅ | exit 0・パイプ出力欠落/化けなし・制御がシェルへ戻る |

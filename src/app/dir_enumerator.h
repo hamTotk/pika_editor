@@ -28,4 +28,20 @@ using OnDirListed =
 void list_directory(const std::string& root_abs, const std::string& dir_rel,
                     const OnDirListed& on_listed);
 
+// root 配下を再帰的に歩いて全エントリ（フォルダ＋ファイル）を RawListEntry で返す（F-021）。
+// ツリーが 1
+// 階層しか出ない不具合の解消＝サブフォルダ内ファイルも木に含めるため、入れ子全体を一括列挙し
+// 呼び出し側で normalize_entries→build_tree に渡す（build_tree が rel_path から入れ子を構築する）。
+// 性能（軽い）:
+//   - exclude（.git/node_modules
+//   等）に一致したディレクトリには降りない（disable_recursion_pending）。
+//     巨大ディレクトリの暴走を入口で断つ。判定は core/workspace::is_excluded と同じ規則に合わせる。
+//   - シンボリックリンク/ジャンクションは辿らない（既定。循環回避）。
+//   - max_nodes に達したら打ち切り
+//   capped=true（深さ無制限・件数暴走の最終ガード。無言打ち切りにしない
+//     ため呼び出し側がログを出す）。
+std::vector<controller::RawListEntry> enumerate_tree(const std::string& root_abs,
+                                                     const std::vector<std::string>& exclude,
+                                                     std::size_t max_nodes, bool& capped);
+
 } // namespace pika::app

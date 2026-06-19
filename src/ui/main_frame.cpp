@@ -80,17 +80,28 @@ wxString u8(MsgId id)
     return u8(message(id));
 }
 
-// ワークスペース直下の浅い木を列挙して TreeNode を組み立てる（逐次列挙の最初のバッチ。深い階層は
-// フォルダ展開時に追加列挙＝本 sprint は 1 階層で骨格を満たす）。状態マークは WorkspaceController
-// が保持する未読集合から付くため、TreeNode のみを返し ViewModel 化は呼び出し側で行う。
-core::workspace::TreeNode enumerate_shallow_tree(const std::string& root_abs,
-                                                 const core::settings::Settings& settings)
+// ツリー列挙の件数キャップ（F-021）。シンボリックリンクのループや巨大ツリーの暴走を止める最終ガード。
+// exclude プルーニング（.git/node_modules
+// 等に降りない）で通常はここに達しない。到達時は無言で切らず 呼び出し側がログを出す（設計の
+// no-silent-cap）。
+constexpr std::size_t kTreeNodeCap = 50000;
+
+// ワークスペース配下を再帰列挙してフルツリーの TreeNode を組み立てる（F-021）。
+// enumerate_tree が入れ子の全 abs_path を集め、normalize_entries が '/' 区切りの相対パスへ正規化、
+// build_tree が rel_path から入れ子ツリーを構築する（サブフォルダ内ファイルも木に含まれる）。
+// exclude プルーニング・件数キャップは enumerate_tree が担う。状態マークは WorkspaceController が
+// 保持する未読集合から付くため、TreeNode のみを返し ViewModel 化は呼び出し側で行う。
+core::workspace::TreeNode enumerate_tree(const std::string& root_abs,
+                                         const core::settings::Settings& settings)
 {
-    std::vector<controller::RawListEntry> raw;
-    app::list_directory(root_abs, "",
-                        [&raw](const std::string&, std::vector<controller::RawListEntry> batch) {
-                            raw = std::move(batch);
-                        });
+    bool capped = false;
+    std::vector<controller::RawListEntry> raw =
+        app::enumerate_tree(root_abs, settings.exclude, kTreeNodeCap, capped);
+    if (capped)
+    {
+        // 無言打ち切りにしない（要件4.1・設計 no-silent-cap）。打ち切り件数を診断ログに残す。
+        wxLogWarning("ファイルツリーを %zu 件で打ち切りました（上限超過）。", kTreeNodeCap);
+    }
     const auto entries = controller::normalize_entries(root_abs, raw, settings.exclude);
     return core::workspace::build_tree(entries, settings.exclude);
 }
@@ -285,6 +296,74 @@ void MainFrame::build_layout()
     SetSizer(root_sizer);
 }
 
+// ---- 空状態プレースホルダページ（最後の実タブを閉じても notebook を 0 ページにしない） ----
+//
+// wxAuiNotebook は最後のページを削除し 0 ページになる内部処理でクラッシュする（実機トレースで確定。
+// WINDOWLIST_BUTTON のドロップダウン描画/空時 m_curpage アクセスが疑わしい）。対策として実タブが
+// 0 件になる直前に閉じられない簡易パネルを末尾へ差し込み、ノートブックを常に 1 ページ以上に保つ。
+// プレースホルダは TabManager に登録しない見せ方専用ページで、必ず末尾固定・実タブが 1 枚でも開けば
+// 除去する。よって実タブの index と TabManager の index
+// の同順は崩れない（dynamic_cast<EditorPanel*> が nullptr
+// になる前提も、プレースホルダ存在時は実タブ 0 件のため index 整合ループが空回りで守られる）。
+
+void MainFrame::ensure_placeholder_page()
+{
+    if (placeholder_page_ != nullptr || notebook_ == nullptr)
+    {
+        return; // 既にある／ノートブック未構築なら何もしない（多重追加を防ぐ）。
+    }
+    auto* panel = new wxPanel(notebook_, wxID_ANY);
+    auto* sizer = new wxBoxSizer(wxVERTICAL);
+    auto* text = new wxStaticText(panel, wxID_ANY, u8(MsgId::EmptyNoFolder), wxDefaultPosition,
+                                  wxDefaultSize, wxALIGN_CENTRE_HORIZONTAL);
+    sizer->AddStretchSpacer();
+    sizer->Add(text, 0, wxALIGN_CENTER | wxALL, 12);
+    sizer->AddStretchSpacer();
+    panel->SetSizer(sizer);
+    placeholder_page_ = panel;
+    // 末尾へ select=false
+    // で追加する。閉じ処理中（page_close）に呼ばれるため選択を奪わず、実タブ削除後に wxAuiNotebook
+    // が残る唯一のページ（プレースホルダ）を自動選択する＝削除時の churn を最小化する。
+    // 自動選択で発火する on_notebook_page_changed は active_page_is_placeholder() で早期 return
+    // する ため TabManager/プレビューには波及しない。
+    notebook_->AddPage(panel, u8(MsgId::EmptyNoFolder), /*select*/ false);
+}
+
+void MainFrame::remove_placeholder_page()
+{
+    if (placeholder_page_ == nullptr || notebook_ == nullptr)
+    {
+        return;
+    }
+    const int idx = notebook_->GetPageIndex(placeholder_page_);
+    wxWindow* page = placeholder_page_;
+    // 先にメンバを切ってから DeletePage する（DeletePage が誘発する PAGE_CHANGED 中に
+    // active_page_is_placeholder() が古いポインタを参照しないようにする）。
+    placeholder_page_ = nullptr;
+    if (idx != wxNOT_FOUND)
+    {
+        notebook_->DeletePage(static_cast<std::size_t>(idx)); // page を破棄する。
+    }
+    else
+    {
+        page->Destroy(); // ページとして見つからない異常時もリークさせない。
+    }
+}
+
+bool MainFrame::active_page_is_placeholder() const
+{
+    if (placeholder_page_ == nullptr || notebook_ == nullptr)
+    {
+        return false;
+    }
+    const int sel = notebook_->GetSelection();
+    if (sel == wxNOT_FOUND)
+    {
+        return false;
+    }
+    return notebook_->GetPage(static_cast<std::size_t>(sel)) == placeholder_page_;
+}
+
 void MainFrame::open_workspace(const std::string& folder_abs)
 {
     // フォルダ切替: 既存の監視を畳んでから新ワークスペースを開く（design 5.6 の後始末に相当）。
@@ -348,7 +427,7 @@ void MainFrame::refresh_tree()
         tree_->set_root(controller::TreeRowVm{});
         return;
     }
-    const core::workspace::TreeNode root = enumerate_shallow_tree(workspace_, settings_);
+    const core::workspace::TreeNode root = enumerate_tree(workspace_, settings_);
     // 状態マーク（±/◆/取消線・伝播±淡）は WorkspaceController の未読集合から付与する（sprint4）。
     controller::TreeRowVm vm = workspace_ctl_.build_view_model(root);
     // 外部削除されたファイルはディスク再列挙に含まれない。取り消し線リーフを後段マージで補い、
@@ -462,8 +541,7 @@ void MainFrame::reapply_settings_to_ui()
             editor->apply_config(controller::make_editor_config(settings_, util::Newline::None));
         }
     }
-    // ツリー除外（settings_.exclude）の即時反映: refresh_tree は enumerate_shallow_tree で exclude
-    // を
+    // ツリー除外（settings_.exclude）の即時反映: refresh_tree は enumerate_tree で exclude を
     // 再適用するため、ワークスペースが開いていれば再列挙で反映する（タブ/状態に副作用なし＝ツリー再描画
     // のみ）。未オープンなら no-op。
     if (!workspace_.empty())
@@ -661,6 +739,11 @@ void MainFrame::open_file(const std::string& file_abs)
         }
         return;
     }
+
+    // 実タブを 1 枚でも開くなら空状態プレースホルダは不要＝先に除去する。これにより実タブが
+    // notebook の index 0 から始まり、TabManager の index と notebook ページ index の同順が保たれる
+    // （プレースホルダは実タブ 0 件のときだけ存在する見せ方専用ページ）。
+    remove_placeholder_page();
 
     // 新規タブ。ディスクから読み、core/util でエンコーディング/改行を判定して Scintilla
     // へ反映する。
@@ -1395,6 +1478,20 @@ void MainFrame::update_diff_toggle_state()
 
 void MainFrame::update_preview()
 {
+    // 再入防止（必須の安全網）。スプリッタの Split/Unsplit/Show が wxAuiNotebook の PAGE_CHANGED を
+    // 再発火し on_notebook_page_changed→update_preview を無限再帰させる経路を物理的に遮断する。
+    // RAII で early-return / 例外時も必ず false に戻す。
+    if (updating_preview_)
+    {
+        return;
+    }
+    updating_preview_ = true;
+    struct Guard
+    {
+        bool& f;
+        ~Guard() { f = false; }
+    } guard{updating_preview_};
+
     if (!preview_)
     {
         return;
@@ -1405,6 +1502,26 @@ void MainFrame::update_preview()
     // 描画面構成は controller::diff_mode_model が決める（wx 非依存・gtest 済み）。ここは結線のみ。
     const controller::PaneLayout layout = controller::resolve_pane_layout(view_mode_, diff_on_);
     auto* main_split = dynamic_cast<wxSplitterWindow*>(notebook_->GetParent());
+
+    // 実タブが無い（0 ページ、または空状態プレースホルダだけ）ときはプレビューする対象が無い。
+    // ここでスプリッタを正規化（Split→Unsplit churn）すると wxAuiNotebook が PAGE_CHANGED を
+    // 再発火し再入の温床になる。目的状態＝「プレビューを畳みノートブックだけの安定状態」へ最小操作で
+    // 落とし早期 return する。プレースホルダのみ＝page 数 1 でも実タブ 0
+    // 件なので対象なし扱いにする。
+    const bool no_real_tab =
+        (notebook_->GetPageCount() == 0) || (placeholder_page_ != nullptr && tabs_.count() == 0);
+    if (no_real_tab)
+    {
+        if (main_split)
+        {
+            // 既に畳んだ状態（分割していない）なら触らない＝余計な再レイアウトを起こさない。
+            if (main_split->IsSplit())
+            {
+                main_split->Unsplit(preview_); // プレビュー側を畳みノートブックを単独表示にする。
+            }
+        }
+        return; // 対象が無いので WebView2 へのナビゲートもしない。
+    }
 
     // サッシュの出し入れ：エディタとプレビューの両方が要るときだけ分割し、片方のみのときは畳む。
     if (main_split)
@@ -1633,10 +1750,24 @@ void MainFrame::on_close_tab(wxCommandEvent&)
     {
         return;
     }
+    // 空状態プレースホルダ（実タブ 0 件）は閉じる対象でない＝何もしない（DeletePage で 0 ページに
+    // しない安全網。page_close 経路の Veto と同じ趣旨）。
+    if (active_page_is_placeholder())
+    {
+        return;
+    }
     // 未保存タブを無確認で閉じない（保存/破棄/キャンセル。要件5.7・設計原則1）。中断なら閉じない。
     if (!confirm_discard_unsaved(sel))
     {
         return;
+    }
+    // 最後の実タブを閉じるとノートブックが 0 ページになり wxAuiNotebook が空状態でクラッシュする。
+    // DeletePage の前に空状態プレースホルダを末尾へ差し込み、瞬間でも 0 ページにしない（page_close
+    // 経路と同じワークアラウンド。プレースホルダは末尾固定・TabManager 非登録で index
+    // 整合は不変）。
+    if (notebook_->GetPageCount() == 1)
+    {
+        ensure_placeholder_page();
     }
     notebook_->DeletePage(static_cast<std::size_t>(sel));
     tabs_.close(static_cast<std::size_t>(sel));
@@ -1666,6 +1797,13 @@ void MainFrame::on_tree_file_activated(const std::string& rel_path)
 
 void MainFrame::on_notebook_page_changed(wxAuiNotebookEvent& evt)
 {
+    // プレースホルダページがアクティブになった（実タブが 0 件＝空状態）ときは TabManager 同期も
+    // プレビュー再評価も不要（プレースホルダは TabManager に登録しない見せ方専用ページ）。
+    if (active_page_is_placeholder())
+    {
+        evt.Skip();
+        return;
+    }
     const int sel = notebook_->GetSelection();
     if (sel != wxNOT_FOUND)
     {
@@ -1686,6 +1824,14 @@ void MainFrame::on_notebook_page_close(wxAuiNotebookEvent& evt)
         evt.Skip();
         return;
     }
+    // 空状態プレースホルダ（×を持たない見せ方専用ページ）は閉じさせない（Veto で残す）。
+    // 万一閉じられるとノートブックが 0 ページになり wxAuiNotebook が空状態でクラッシュする。
+    if (placeholder_page_ != nullptr &&
+        notebook_->GetPage(static_cast<std::size_t>(page)) == placeholder_page_)
+    {
+        evt.Veto();
+        return;
+    }
     // ×/中クリック閉じも未保存なら確認する。キャンセル/保存失敗ならページ閉じイベントを Veto する
     // （wxAuiNotebook は Veto を尊重しページを残す。要件5.7・設計原則1）。
     if (!confirm_discard_unsaved(page))
@@ -1693,9 +1839,60 @@ void MainFrame::on_notebook_page_close(wxAuiNotebookEvent& evt)
         evt.Veto();
         return;
     }
-    // 実際の DeletePage は wxAuiNotebook 側が行う。TabManager をそれに同期させる。
+    // 最後の実タブを閉じるケース（実タブ 1 枚）は PAGE_CLOSE イベント処理中に
+    // ノートブックの構造を変えてはならない。AddPage/DeletePage を本ハンドラ実行中に呼ぶと
+    // wxAuiNotebook 内部のページ配列/イテレータ/m_curpage が壊れ、イベント続行中にクラッシュする
+    // （実機トレースで確定。「プレースホルダが一瞬見えてから落ちる」症状と一致）。
+    // よって即時クローズを Veto で止め、構造変更（プレースホルダ追加→実タブ削除）は
+    // CallAfter でイベント処理外（クリーンなスタック）に逃がす。
+    if (notebook_->GetPageCount() == 1)
+    {
+        evt.Veto();
+        // page index を捕捉して遅延実行する。CallAfter 実行時点で page がまだ
+        // 「実タブ（EditorPanel）」であることを軽く検証してから構造変更する（間に他操作が
+        // 入っても安全側に倒す）。1→2（プレースホルダ追加で空にしない）→1（実タブ削除）。
+        const int page_to_close = page;
+        CallAfter([this, page_to_close]() { close_last_real_tab_deferred(page_to_close); });
+        return;
+    }
+    // 閉じても実タブが残るケース（実タブ 2 枚以上）は wxAuiNotebook に削除させる（実績ありで
+    // クラッシュしない経路）。TabManager をそれに同期させる。
     tabs_.close(static_cast<std::size_t>(page));
     evt.Skip();
+}
+
+void MainFrame::close_last_real_tab_deferred(int page)
+{
+    // PAGE_CLOSE イベント処理外（CallAfter のクリーンなスタック）で最後の実タブを閉じる。
+    // ここでは AddPage/DeletePage を行ってよい（イベント処理中ではないため wxAuiNotebook の
+    // 内部状態を壊さない）。
+    if (notebook_ == nullptr || page < 0)
+    {
+        return;
+    }
+    const std::size_t idx = static_cast<std::size_t>(page);
+    if (idx >= notebook_->GetPageCount())
+    {
+        return; // 間に他操作が入り index が無効化された＝何もしない（安全側）。
+    }
+    // 対象がまだ実タブ（EditorPanel）であることを検証する。プレースホルダや別ページに化けて
+    // いたら触らない（CallAfter 待ちの間に状態が変わり得る）。
+    auto* editor = dynamic_cast<EditorPanel*>(notebook_->GetPage(idx));
+    if (editor == nullptr)
+    {
+        return;
+    }
+    // 実タブが 1 枚だけのときに削除すると 0 ページになり wxAuiNotebook が空状態でクラッシュする。
+    // 先にプレースホルダを末尾へ追加して 0 ページを経由させない（1→2）。プレースホルダは
+    // 末尾固定・TabManager 非登録のため実タブの index 整合は崩れない。
+    if (notebook_->GetPageCount() == 1)
+    {
+        ensure_placeholder_page();
+    }
+    // TabManager を同期してから DeletePage する（2→1＝プレースホルダのみ）。
+    tabs_.close(idx);
+    notebook_->DeletePage(idx); // page を破棄する。
+    update_status();
 }
 
 void MainFrame::on_sys_colour_changed(wxSysColourChangedEvent& evt)
@@ -1865,7 +2062,10 @@ void MainFrame::save_session_state()
         ts.preview_scroll = 0; // WebView2 のスクロール復元は本タスク範囲外（0 固定）。
         state.tabs.push_back(std::move(ts));
     }
-    state.active_tab = notebook_->GetSelection(); // タブ無しは wxNOT_FOUND(-1)。
+    // 実タブの選択 index（タブ無しは wxNOT_FOUND(-1)）。空状態プレースホルダがアクティブな
+    // ＝実タブ 0 件のときは -1 を保存する（プレースホルダの notebook index を active_tab
+    // に書かない。 復元時に存在しないタブを選択しようとする不整合を防ぐ）。
+    state.active_tab = active_page_is_placeholder() ? -1 : notebook_->GetSelection();
 
     if (tree_ != nullptr)
     {

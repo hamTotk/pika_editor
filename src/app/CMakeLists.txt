@@ -68,7 +68,17 @@ target_link_libraries(pika
         pika_core
         wx::core
         wx::base
+        # クラッシュ診断（未処理例外フィルタ）のシンボル解決に DbgHelp を使う（main_gui.cpp）。
+        dbghelp
 )
+
+# クラッシュ時にシンボル名・行番号を出すため Release でも PDB を生成する（要件12.3 の診断ログ）。
+# 最適化（/O2・LTCG）は維持したまま /Zi でコンパイル、/DEBUG でリンクして .pdb を残す。
+# /OPT:REF /OPT:ICF を併用し /DEBUG による最適化抑制を打ち消す（コードは最適化済みのまま）。
+if(MSVC)
+    target_compile_options(pika PRIVATE $<$<CONFIG:Release>:/Zi>)
+    target_link_options(pika PRIVATE $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF>)
+endif()
 
 # 同梱アセット（preview.css 等）を exe 隣の assets/ へ配置する（app.pika 仮想ホストの配信元。
 # design 6章 C6・sprint5）。MainFrame::asset_dir() が exe ディレクトリ＋"assets" を解決するため、
