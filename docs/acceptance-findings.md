@@ -490,7 +490,14 @@
   （フィット/等倍トグル・degrade_model でヘッダ寸法>上限なら ImageTooLarge 誘導＝デコードせず「既定アプリで
   開く」）、(2) その他バイナリ=「対応していない形式」＋「既定のアプリで開く」ボタンの簡易 panel、(3) テキストは
   従来どおり EditorPanel。is_image/ピクセル判定・ガードは degrade_model を結線。
-- **状態**: 未対応（次段で dev-generator 実装予定。ユーザー判断「F-021+F-022 両方実装」）
+- **修正**: `open_file` に種別分岐を追加（`controller::open_view_model::resolve_open_view`＝画像拡張子→
+  ヘッダ寸法(`util::image_header` PNG/GIF/BMP 固定オフセット・他は 64MB フォールバック)→`resolve_degrade`
+  でピクセルガード／非画像は `util::binary_detect`(NUL/制御文字 heuristic)→バイナリ／他テキスト）。
+  `ImageViewPanel`(wxImage 自前描画・フィット/等倍トグル・WebView2非起動)・`UnsupportedViewPanel`
+  (種別ラベル＋既定アプリで開く)を新設。非 EditorPanel タブは保存/dirty/差分が既存ガードで no-op、
+  `active_content_class` を content_object_allowed=false に補強。MsgId 3件追加・`wxInitAllImageHandlers`。
+  テスト32件追加(OpenViewModel 12・ImageHeader 10・BinaryDetect 10)。
+- **状態**: ✅ 修正済み・実機検証済み（sample.png が画像表示＋等倍トグル／binary.bin が非対応表示。ctest 702件 PASS）
 
 ## F-023 最後のタブを閉じるとクラッシュ（wxAuiNotebook 空ノートブック／イベント中の構造変更）
 

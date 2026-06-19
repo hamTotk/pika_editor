@@ -33,6 +33,7 @@
 
 #include <wx/app.h>
 #include <wx/filename.h>
+#include <wx/image.h>
 #include <wx/stdpaths.h>
 #include <wx/string.h>
 
@@ -326,6 +327,10 @@ class PikaApp : public wxApp
         // 0. クラッシュ診断を最序盤で仕掛ける（要件12.3）。未処理例外時にスタックを
         //    %TEMP%\pika-crash.log へ書く（ユーザー内容は書かない＝コード番地とシンボルのみ）。
         SetUnhandledExceptionFilter(crash_handler);
+
+        // 0.5 画像簡易ビュー（要件12.2 I1・F-022）の wxImage 標準ハンドラを 1 回だけ登録する。
+        //     png/jpeg/gif/bmp 等の LoadFile を有効にする（依存追加なし＝wxWidgets 標準ハンドラ）。
+        ::wxInitAllImageHandlers();
 
         namespace ctl = pika::controller;
         namespace ipc = pika::core::ipc;

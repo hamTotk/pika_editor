@@ -9,6 +9,7 @@
 
 #include "util/result.h"
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -24,5 +25,15 @@ Result<void> write_atomic(std::string_view path, std::string_view bytes);
 // ファイル全体を読み込む（バイト列をそのまま返す。エンコーディング変換はしない）。
 // 読み込み・I/O の対称ヘルパ（テストとアトミック往復確認に使う）。
 Result<std::string> read_all(std::string_view path);
+
+// ファイル先頭の最大 max_bytes バイトだけを読み込む（種別判定の素材。F-022）。
+// 巨大画像/巨大バイナリを全読込せず、ヘッダ寸法解析（image_header）と非テキスト判定（binary_detect）
+// に必要な先頭だけを読む（固まらない・軽い・設計原則2/3）。ファイルが短ければその全長を返す。
+struct FileHead
+{
+    std::string bytes;           // 読み込んだ先頭バイト（最大 max_bytes）
+    std::uint64_t file_size = 0; // ファイル全体のサイズ（バイト。フォールバック閾値判定に使う）
+};
+Result<FileHead> read_head(std::string_view path, std::size_t max_bytes);
 
 } // namespace pika::util

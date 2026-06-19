@@ -13,6 +13,7 @@ add_executable(pika_tests
     controller/document_controller_test.cpp
     controller/editor_view_model_test.cpp
     controller/notification_model_test.cpp
+    controller/open_view_model_test.cpp
     controller/preview_builder_test.cpp
     controller/restore_plan_test.cpp
     controller/search_session_test.cpp
@@ -55,8 +56,10 @@ add_executable(pika_tests
     core/watcher/watcher_core_test.cpp
     core/workspace/workspace_model_test.cpp
     util/atomic_file_test.cpp
+    util/binary_detect_test.cpp
     util/encoding_test.cpp
     util/hash_test.cpp
+    util/image_header_test.cpp
     util/logger_test.cpp
     util/result_test.cpp
     util/task_runner_test.cpp

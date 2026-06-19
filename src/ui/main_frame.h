@@ -192,6 +192,19 @@ class MainFrame : public wxFrame
     // タブ記号・ステータスを更新する（F-010。閉じ/終了確認の前提となる dirty 結線。設計原則1）。
     void on_editor_dirty_changed(const std::string& abs, bool dirty);
 
+    // open_file の種別分岐（F-022。要件12.2・design 10章 B3）。種別判定は
+    // controller::resolve_open_view （wx 非依存・gtest 済み）に委ね、ここは結果に応じて
+    // EditorPanel／ImageViewPanel／ UnsupportedViewPanel のいずれかを notebook
+    // の新規ページとして追加する結線だけを担う。 テキスト経路（EditorPanel への decode/dirty
+    // 結線）を切り出した補助（従来の open_file 本体）。
+    void open_text_editor_page(const std::string& file_abs, const std::string& title,
+                               std::size_t idx);
+    // 画像簡易ビュー（ImageViewPanel）を開く（要件12.2 I1。WebView2 を起動しない）。
+    void open_image_page(const std::string& file_abs, const std::string& title, std::size_t idx);
+    // 巨大画像/バイナリの非対応ビューを開く（種別ラベルを分けて UnsupportedViewPanel を追加する）。
+    void open_unsupported_page(const std::string& file_abs, const std::string& title,
+                               std::size_t idx, bool too_large_image);
+
     // タブ見出しの状態記号（削除済み ＞ 未保存 ＞ 差分あり）を display_mark から結線する（ui-design
     // 5章）。保存・確認・外部変更・ページ切替の各経路から呼んで SetPageText を更新する。
     void refresh_tab_title(std::size_t index); // 1 タブ分
