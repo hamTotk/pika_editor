@@ -85,6 +85,21 @@ class PreviewView : public wxPanel
     // 現在の占有世代（ワーカー結果適用前照合に使う。design 4章）。
     std::uint64_t generation() const noexcept { return occupancy_.generation(); }
 
+    // 次回ナビゲートの完了（on_loaded）を性能計測のどの区間として測るか（系統C A章・F-026）。
+    // MainFrame が update_preview の直前に種別をセットし、本クラスは navigate 開始→on_loaded 完了の
+    // 実タイミングを PerfLog へ橋渡しする（区間の判定ロジックは持たず観測点を提供するだけ）。
+    enum class PerfTrigger
+    {
+        None,   // 計測しない（既定）。
+        Switch, // A4: タブ/モード切替後の再描画。
+        Edit,   // A5: 編集中のプレビュー更新（デバウンス込み）。
+    };
+    void set_next_perf_trigger(PerfTrigger t) { next_perf_trigger_ = t; }
+    // 立てたトリガを発射せず破棄する（系統C A章・F-026）。MainFrame が update_preview の
+    // 早期 return 経路（ソース単独・実タブ無し等＝navigate しない）に入ったときに呼ぶ。これを
+    // 怠ると消費されないトリガが次の無関係 navigate に誤紐付けされ、偽の A4 値を生む。
+    void clear_perf_trigger() noexcept { next_perf_trigger_ = PerfTrigger::None; }
+
   private:
     // 遅延生成：初回プレビュー要求でだけ wxWebView を作る（仮想ホスト/ハンドラ/設定もここで）。
     void ensure_webview();
@@ -116,6 +131,15 @@ class PreviewView : public wxPanel
     bool has_pending_ = false;
     std::string pending_html_;
     controller::PreviewKind pending_kind_ = controller::PreviewKind::Markdown;
+
+    // 性能計測（系統C A章・F-026）。初回プレビュー（A3）は ensure_webview が web_ を新規生成した
+    // 回を起点に on_loaded を終点とする。A4/A5 は MainFrame が set_next_perf_trigger で指定する。
+    // A2（Resume）は suspended_ からの復帰ナビゲートを起点・on_loaded を終点とする。これらは
+    // navigate→on_loaded が直列化される設計（nav_in_flight_）の「実際に進行中の 1 件」に紐づく。
+    bool perf_first_preview_pending_ = false; // 初回ナビ起点を打ったので on_loaded で A3 を確定する
+    bool perf_resume_pending_ = false;        // Resume 起点を打ったので on_loaded で A2 を確定する
+    PerfTrigger next_perf_trigger_ = PerfTrigger::None;     // 次ナビの A4/A5 種別（MainFrame 指定）
+    PerfTrigger inflight_perf_trigger_ = PerfTrigger::None; // 進行中ナビの A4/A5 種別
 };
 
 } // namespace pika::ui

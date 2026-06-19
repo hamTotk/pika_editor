@@ -1,6 +1,7 @@
 #include "ui/main_frame.h"
 
 #include "app/dir_enumerator.h"
+#include "app/perf_log.h"
 #include "controller/baseline_merge.h"
 #include "controller/degrade_model.h"
 #include "controller/diff_mode_model.h"
@@ -181,6 +182,11 @@ MainFrame::MainFrame(const core::settings::Settings& settings, const std::string
     // settings.toml の poll 監視タイマー（F3/F4）。load_and_watch_settings で Start する。
     settings_poll_timer_.SetOwner(this);
     Bind(wxEVT_TIMER, &MainFrame::on_settings_poll, this, settings_poll_timer_.GetId());
+    // A2/A8 計測補助タイマー（F-026）。--perf-log 時のみ Start する（既定は止まったまま＝production
+    // 挙動に影響しない）。プレビューを畳んだ状態で発火し、1 回だけ遊休サスペンドを試す。
+    perf_idle_suspend_timer_.SetOwner(this);
+    Bind(wxEVT_TIMER, &MainFrame::on_perf_idle_suspend_timer, this,
+         perf_idle_suspend_timer_.GetId());
     // フォーカス別ショートカット（Ctrl+Enter 等）を全体で 1 か所に集約して捌く（design 10章 J3）。
     Bind(wxEVT_CHAR_HOOK, &MainFrame::on_char_hook, this);
     // 終了（X/Alt+F4/終了メニュー）の未保存確認・Veto を 1 か所で受ける（要件5.7・設計原則1）。
@@ -190,6 +196,7 @@ MainFrame::MainFrame(const core::settings::Settings& settings, const std::string
 MainFrame::~MainFrame()
 {
     settings_poll_timer_.Stop();
+    perf_idle_suspend_timer_.Stop();
     stop_watching();
 }
 
@@ -597,15 +604,46 @@ void MainFrame::on_raw_event(const core::watcher::RawEvent& ev)
     {
         return;
     }
+    // A6（外部変更検知→反映）の起点（F-026）。生イベントを受けた最初の 1 件をこの検知バーストの
+    // 基点としてスタンプする（束で続く 2 件目以降は上書きしない＝最初の検知から測る）。終点は
+    // apply_fs_events が 1 件以上を反映しきった直後（drain_watcher 経由）。
+    if (!perf_extchange_pending_)
+    {
+        perf_extchange_pending_ = true;
+        app::PerfLog::instance().mark(app::PerfMark::ExternalChangeBegin);
+    }
     watcher_->on_raw(ev);
     drain_watcher(); // 既に窓を越えた合成があれば即反映する。
     // 窓経過後にもう一度確定させる（デバウンス既定100ms＋余裕。多重 Start は前回をリセットする）。
     debounce_timer_.Start(150, wxTIMER_ONE_SHOT);
 }
 
+void MainFrame::on_perf_idle_suspend_timer(wxTimerEvent& evt)
+{
+    // A2/A8 計測補助（F-026・--perf-log 時のみ Start される）。プレビューを畳んだまま一定アイドルが
+    // 過ぎたので、共有 WebView2 を 1 回サスペンドさせる。TrySuspend 完了ハンドラが A8（サスペンド後
+    // アイドルメモリ）を 1 点記録し、その後ユーザーがプレビューへ戻る再ナビゲートが A2（Resume 再
+    // 表示）を確定する。observation 専用＝production 既定（timer 未 Start）では決して走らない。
+    if (evt.GetId() != perf_idle_suspend_timer_.GetId())
+    {
+        evt.Skip();
+        return;
+    }
+    if (preview_)
+    {
+        preview_->suspend_if_idle();
+    }
+}
+
 void MainFrame::on_debounce_timer(wxTimerEvent&)
 {
     drain_watcher();
+    // デバウンス窓の最終ドレイン後もなお A6 起点が残る＝この検知バーストは反映を生まなかった
+    // （自己保存抑制・無変化合成など）。起点を下ろして次バーストの誤紐付け（偽 A6）を防ぐ。F-026。
+    if (perf_extchange_pending_)
+    {
+        perf_extchange_pending_ = false;
+    }
 }
 
 void MainFrame::drain_watcher()
@@ -679,6 +717,17 @@ void MainFrame::apply_fs_events(const std::vector<core::watcher::FsEvent>& event
     refresh_tree();
     refresh_all_tab_titles();
     update_status();
+
+    // A6（外部変更検知→反映）の終点（F-026）。ここまでで対象タブのライブリロード/未読バッジと
+    // ツリー反映が完了している。on_raw_event で立てた起点があれば区間 ms を確定し、フラグを下ろす
+    // （次の検知バーストの起点を再び取れるようにする）。観測専用＝既存挙動は変えない。
+    if (perf_extchange_pending_)
+    {
+        perf_extchange_pending_ = false;
+        app::PerfLog::instance().measure(app::PerfMark::ExternalChangeBegin,
+                                         app::PerfMark::ExternalChangeApplied,
+                                         /*budget_ms*/ 500.0);
+    }
 }
 
 void MainFrame::reload_open_tab_if_clean(const std::string& abs)
@@ -1009,24 +1058,42 @@ EditorPanel* MainFrame::active_editor() const
 void MainFrame::on_set_mode_source(wxCommandEvent&)
 {
     view_mode_ = controller::ViewMode::Source;
+    // A4（モード切替後の再表示）の計測トリガ（F-026）。次の update_preview
+    // の再ナビゲート完了で確定。
+    if (preview_)
+    {
+        preview_->set_next_perf_trigger(PreviewView::PerfTrigger::Switch);
+    }
     update_preview();
 }
 
 void MainFrame::on_set_mode_split(wxCommandEvent&)
 {
     view_mode_ = controller::ViewMode::Split;
+    if (preview_)
+    {
+        preview_->set_next_perf_trigger(PreviewView::PerfTrigger::Switch);
+    }
     update_preview();
 }
 
 void MainFrame::on_set_mode_preview(wxCommandEvent&)
 {
     view_mode_ = controller::ViewMode::Preview;
+    if (preview_)
+    {
+        preview_->set_next_perf_trigger(PreviewView::PerfTrigger::Switch);
+    }
     update_preview();
 }
 
 void MainFrame::on_toggle_diff(wxCommandEvent& evt)
 {
     diff_on_ = evt.IsChecked();
+    if (preview_)
+    {
+        preview_->set_next_perf_trigger(PreviewView::PerfTrigger::Switch);
+    }
     update_preview();
 }
 
@@ -1596,6 +1663,12 @@ void MainFrame::update_preview()
                 main_split->Unsplit(preview_); // プレビュー側を畳みノートブックを単独表示にする。
             }
         }
+        // navigate しないので、立っていた A4/A5 計測トリガを破棄する（後続 navigate への
+        // 誤紐付け＝偽 A4 を防ぐ。F-026）。
+        if (preview_)
+        {
+            preview_->clear_perf_trigger();
+        }
         return; // 対象が無いので WebView2 へのナビゲートもしない。
     }
 
@@ -1623,7 +1696,25 @@ void MainFrame::update_preview()
     }
     if (!layout.webview_active)
     {
+        // ソース（差分OFF）。WebView2 を作らず navigate もしない＝立てた A4/A5 トリガを破棄する
+        // （Source モード切替で偽 A4 を出さない。F-026）。
+        if (preview_)
+        {
+            preview_->clear_perf_trigger();
+            // A2/A8 計測補助（F-026）。--perf-log 時のみ：プレビューを畳んだ＝WebView2 非表示で
+            // TrySuspend が成功し得る状態になったので、一定アイドル後に 1 回サスペンドを試す。
+            // production 既定では timer を Start しない（enabled() ガード＝挙動不変）。
+            if (app::PerfLog::instance().enabled())
+            {
+                perf_idle_suspend_timer_.Start(1500, wxTIMER_ONE_SHOT);
+            }
+        }
         return; // ソース（差分OFF）。WebView2 を作らない（遅延初期化を維持）。
+    }
+    // プレビューが活きるモードに戻った＝アイドルサスペンドの待機は無効化する（計測補助・F-026）。
+    if (app::PerfLog::instance().enabled())
+    {
+        perf_idle_suspend_timer_.Stop();
     }
 
     EditorPanel* editor = active_editor();
@@ -1884,6 +1975,13 @@ void MainFrame::on_notebook_page_changed(wxAuiNotebookEvent& evt)
     if (sel != wxNOT_FOUND)
     {
         tabs_.activate(static_cast<std::size_t>(sel));
+    }
+    // A4（タブ切替後の再表示）の計測トリガ（F-026）。プレビューが活きるモードのときだけ、次の
+    // update_preview の再ナビゲート完了で確定する（ソース単独では WebView2
+    // を触らない＝計測対象外）。
+    if (preview_ && view_mode_ != controller::ViewMode::Source)
+    {
+        preview_->set_next_perf_trigger(PreviewView::PerfTrigger::Switch);
     }
     // アクティブタブが変われば差分可否・プレビュー内容も変わる（種別/サイズ依存）ので再評価する。
     update_preview();

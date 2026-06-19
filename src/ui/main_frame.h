@@ -249,6 +249,20 @@ class MainFrame : public wxFrame
     std::unique_ptr<app::WatchThread> watch_thread_;      // ReadDirectoryChangesW 監視スレッド
     wxTimer debounce_timer_; // デバウンス窓経過後に poll を再実行する単発タイマー
 
+    // A6（外部変更検知→反映）の計測（系統C A章・F-026）。最初の生イベント（on_raw_event）受領を
+    // 起点としてスタンプし、変更が実際にエディタ/ツリーへ反映完了した時点（apply_fs_events で
+    // 1 件以上の変更を反映しきった直後）を終点に区間 ms を出す。束で来る連続イベントの 2 件目
+    // 以降は起点を上書きしない（最初の検知を基点にする）。観測専用＝既存挙動は変えない。
+    bool perf_extchange_pending_ = false;
+
+    // A2/A8 計測補助（系統C A章・F-026）。production では遊休サスペンド（DEC-02）を駆動する経路が
+    // 無い（suspend_if_idle の呼び出し元ゼロ）ため、--perf-log 指定時に限り、プレビューが畳まれた
+    // （Source モード＝WebView2 が非表示で TrySuspend が成功し得る）状態で一定アイドル後に 1 回だけ
+    // suspend_if_idle を発火させる隠し計測手段。これで A8（サスペンド後アイドルメモリ）と、その後の
+    // 再ナビゲートでの A2（Resume 再表示）が測れる。enabled() ガードで production 既定挙動は不変。
+    wxTimer perf_idle_suspend_timer_;
+    void on_perf_idle_suspend_timer(wxTimerEvent& evt);
+
     // settings.toml の poll 監視（F3/F4・F-016）。読み取り専用・低頻度変更のため軽量な poll で十分
     // （ReadDirectoryChangesW は使わない＝「軽い」原則）。前回観測した mtime/size と比較して変化時
     // のみ再読込する。settings_seen_ は初回 probe 済みフラグ（未配置→配置の検知に使う）。

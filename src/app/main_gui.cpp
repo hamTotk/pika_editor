@@ -19,6 +19,7 @@
 #include <shlobj.h>
 #include <strsafe.h>
 
+#include "app/perf_log.h"
 #include "app/pipe_server.h"
 #include "controller/app_controller.h"
 #include "controller/data_root.h"
@@ -119,13 +120,43 @@ std::string resolve_data_root_path()
     return dr.resolved ? dr.path : std::string();
 }
 
+// 性能計測フラグ（--perf-log）が含まれるか。系統C A章（性能ゲート）の in-app 計測を有効化する
+// 無害なオプション（F-026）。CLI パーサ（core/ipc）には足さず main_gui で拾うことで、CLI の
+// 役割決定・転送 JSON・gtest 済みパース挙動を一切変えない（既定オフ＝未指定時はコストゼロ）。
+// 任意で `--perf-log=<path>` でログ出力先を指定できる（未指定は %TEMP%\pika-perf.log）。
+bool find_perf_log_flag(int argc, wxChar** argv, std::string& out_path)
+{
+    bool found = false;
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string a(wxString(argv[i]).ToUTF8().data());
+        if (a == "--perf-log")
+        {
+            found = true;
+        }
+        else if (a.rfind("--perf-log=", 0) == 0)
+        {
+            found = true;
+            out_path = a.substr(std::char_traits<char>::length("--perf-log="));
+        }
+    }
+    return found;
+}
+
 // argv（wx が渡す引数）を UTF-8 std::string 列へ（プログラム名は除く）。
+// --perf-log（系統C 計測フラグ・F-026）は CLI 解釈の対象外＝plan_open へ渡さない（不正引数に
+// しない）。それ以外の引数だけを CLI パーサへ流す（既存の役割決定・転送を変えない）。
 std::vector<std::string> collect_args(int argc, wxChar** argv)
 {
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i)
     {
-        args.emplace_back(wxString(argv[i]).ToUTF8().data());
+        const std::string a(wxString(argv[i]).ToUTF8().data());
+        if (a == "--perf-log" || a.rfind("--perf-log=", 0) == 0)
+        {
+            continue; // 計測フラグは CLI 解釈に乗せない。
+        }
+        args.emplace_back(a);
     }
     return args;
 }
@@ -324,6 +355,18 @@ class PikaApp : public wxApp
   public:
     bool OnInit() override
     {
+        // 0. 性能計測（系統C A章・F-026）。プロセス開始の最序盤を A1 の起点として最初にスタンプし、
+        //    --perf-log 指定時はログ出力を有効化する（既定オフ＝未指定時はファイルを書かない）。
+        //    起点スタンプ自体は安価な QPC 1 回で、無効時もここに置くことで A1 を正確に取れる。
+        {
+            std::string perf_path;
+            if (find_perf_log_flag(argc, argv, perf_path))
+            {
+                pika::app::PerfLog::instance().enable(perf_path);
+            }
+            pika::app::PerfLog::instance().mark(pika::app::PerfMark::StartupBegin);
+        }
+
         // 0. クラッシュ診断を最序盤で仕掛ける（要件12.3）。未処理例外時にスタックを
         //    %TEMP%\pika-crash.log へ書く（ユーザー内容は書かない＝コード番地とシンボルのみ）。
         SetUnhandledExceptionFilter(crash_handler);
@@ -441,6 +484,17 @@ class PikaApp : public wxApp
         // 5. MainFrame 生成・表示（最短経路。design 5.1 手順3）。
         SetTopWindow(frame_);
         frame_->Show(true);
+
+        // A1（起動→ウィンドウ表示）の終点を「Show 後の最初の idle」で取る（F-026）。CallAfter は
+        // 現在のイベント処理が一巡し、ウィンドウが実際に描画されたあとの最初のアイドルで呼ばれるため、
+        // 「ウィンドウが画面に出た瞬間」に最も近い in-app
+        // 計測点になる。表示後のツリー列挙・監視開始は この計測の後段（手順6）に走るので、A1
+        // は純粋に起動→表示だけを測る（design 11章の予算分解）。
+        CallAfter([]() {
+            pika::app::PerfLog::instance().measure(pika::app::PerfMark::StartupBegin,
+                                                   pika::app::PerfMark::StartupShown,
+                                                   /*budget_ms*/ 500.0);
+        });
 
         // 5.5 settings.toml を読み込み settings_
         // を確定させ、監視（poll）を開始する（F3/F4・F-016）。
