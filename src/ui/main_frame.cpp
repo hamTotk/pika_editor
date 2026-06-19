@@ -714,11 +714,27 @@ void MainFrame::on_editor_dirty_changed(const std::string& abs, bool dirty)
     update_status();
 }
 
-void MainFrame::apply_open_targets(const std::vector<std::string>& file_abs_list)
+void MainFrame::apply_open_targets(const std::vector<core::ipc::OpenTarget>& targets,
+                                   bool goto_source)
 {
-    for (const auto& f : file_abs_list)
+    for (const auto& t : targets)
     {
-        open_file(f);
+        open_file(t.path);
+        // open_file 直後は当該タブがアクティブ＝active_editor() がそれ。line>0 のときだけ移動する
+        // （-g 由来のカーソル移動。要件3.1/3.4）。範囲外値は Scintilla が安全に丸める。
+        if (t.line > 0)
+        {
+            if (auto* ed = active_editor())
+            {
+                ed->goto_line(t.line, t.column);
+            }
+        }
+    }
+    // -g（行確認用途）はソース表示固定にする（要件3.1）。プレビュー/分割のままだと行が見えない。
+    if (goto_source)
+    {
+        view_mode_ = controller::ViewMode::Source;
+        update_preview();
     }
     // 転送を受けた既存ウィンドウは前面化する（単一インスタンス転送の UX。design 5.1）。
     Raise();

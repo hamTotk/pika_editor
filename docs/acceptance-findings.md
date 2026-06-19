@@ -422,6 +422,41 @@
   に `SetFocus` で循環。プレビュー未生成時はスキップ。controller に FocusCycle アクションを足すか UI 直結。
 - **状態**: 未対応（G章一括でユーザー判断）
 
+## F-019 単一インスタンス転送のクライアント終了コードが 0 でなく 255（H1/H4）
+
+- **重大度**: 低〜中（転送・前面化は正常動作。終了コードのみ仕様不一致。シェル連携 `pika f && next` で
+  next が走らない等の副作用。要件3.4・design 5.1「終了コード0で終了」）。
+- **対応章**: H1（転送）/H4（転送時 exit 0）。実機: 起動済みへ `pika target.md` を転送→既存ウィンドウに
+  開き前面化・新ウィンドウは作らず即終了(91ms)。だが**終了コード=255**。
+- **根本原因**: `main_gui.cpp` のクライアント経路は `send_to_server` 後に **`return false`**（OnInit=false）。
+  wxWidgets は OnInit=false で wxEntry が -1 を返す＝プロセス終了コード 255。コメントは「終了コード0」と
+  あるが実挙動と乖離。
+- **対応方針**: 転送成功後は exit 0 で終わる。`send_to_server` 後に `std::exit(0)`（wx 起動前なので main
+  ループ無し・後始末不要）か、SetExitCode(0)＋適切な経路。送信失敗時の扱い（スタンドアロン昇格 or 非0）は
+  別途検討（現状の fail-closed 縮退と整合させる）。
+- **修正**: `main_gui` クライアント経路を `if (send_to_server(...)) std::exit(0);`＋送信失敗時のみ `return false`
+  に変更。`send_to_server` は bool（pipe_server.h）。実機: `pika README.md` 転送で **exit code=0**。
+- **状態**: ✅ 修正済み・実機検証済み
+
+## F-020 `-g doc.md:120` の行ジャンプが未適用（H2）
+
+- **重大度**: 中（要件3.1/3.4 の `-g` 行指定オープンが効かない。ファイルは開くがカーソルが指定行へ移動
+  しない）。
+- **対応章**: H2。`core/ipc` の `OpenTarget{ path, line, column }` は line/column を保持し parse もするが、
+  GUI が捨てている。
+- **根本原因**: `main_gui` の受信ループと `MainFrame::apply_open_targets(vector<string>)` が **path のみ**
+  使い line/column を渡していない（apply_open_targets は `open_file(f)` するだけ）。`main_frame.h` の
+  コメントも「line/column は将来のカーソル移動用（本 sprint はファイルを開くまで）」と未実装を明記。
+  起動時の `file_paths(plan)` 経路も同様に line を落とす。
+- **対応方針**: 転送 JSON と起動 plan から line/column を `apply_open_targets` まで運び、`open_file` 後に
+  EditorPanel へ行ジャンプ（`set_caret_position` 相当＝行→オフセット変換 or Scintilla GotoLine）。1始まり・
+  0=指定なし。goto_mode はソースモード固定の意図（要件3.1）も併せて反映を検討。
+- **修正**: `EditorPanel::goto_line(line, column)` を追加（GotoLine/FindColumn＋EnsureVisibleEnforcePolicy＋
+  ScrollToLine）。`apply_open_targets` を `vector<OpenTarget>＋goto_source` 受けに変更し、open_file 後に
+  `t.line>0` なら active_editor()->goto_line。`main_gui` の受信ループ/起動経路とも OpenTarget を直渡し
+  （`req.goto_mode`/`plan.goto_mode` を goto_source として伝播＝-g はソース表示固定）。`file_paths` ヘルパ削除。
+- **状態**: ✅ 修正済み・実機検証済み（`pika -g long.md:120` 転送→120行目表示・カーソル該当行・ソース表示）
+
 | 項目 | 結果 | 根拠 |
 |------|------|------|
 | H5 CLI `--version`/`--help` | ✅ | exit 0・パイプ出力欠落/化けなし・制御がシェルへ戻る |

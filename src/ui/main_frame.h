@@ -19,6 +19,7 @@
 #include "controller/tab_manager.h"
 #include "controller/workspace_controller.h"
 #include "core/document/review_flow.h"
+#include "core/ipc/ipc_message.h"
 #include "core/settings/settings.h"
 #include "core/watcher/fs_event.h"
 #include "core/watcher/watcher_core.h"
@@ -60,9 +61,12 @@ class MainFrame : public wxFrame
     // 1 ファイルをタブで開く（絶対パス）。既存タブがあればアクティブにする（TabManager に委譲）。
     void open_file(const std::string& file_abs);
 
-    // 単一インスタンス転送で受け取った開く対象を反映する（パイプ受信→UI スレッド）。
-    // line/column は将来のカーソル移動用（本 sprint はファイルを開くまで）。
-    void apply_open_targets(const std::vector<std::string>& file_abs_list);
+    // 単一インスタンス転送/起動で受け取った開く対象を反映する（パイプ受信→UI スレッド・起動経路）。
+    // 各 target の line>0 なら開いた直後のアクティブエディタへ行ジャンプする（-g。要件3.1/3.4）。
+    // goto_source は -g 由来でソース表示固定の意図（行確認用途）。true なら表示モードを Source
+    // にする。
+    void apply_open_targets(const std::vector<core::ipc::OpenTarget>& targets,
+                            bool goto_source = false);
 
     // 引数なし起動の前回セッション復元（要件10.1・F1）。RestorePlan（controller・wx 非依存）を
     // 機械的に消費し、ウィンドウ位置・ワークスペース・タブ・キャレット/スクロール・表示モードを当てる。

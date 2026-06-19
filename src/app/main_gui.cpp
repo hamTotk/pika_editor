@@ -34,6 +34,7 @@
 #include <wx/stdpaths.h>
 #include <wx/string.h>
 
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <sys/stat.h>
@@ -137,18 +138,6 @@ pika::util::Logger make_diag_logger()
     });
 }
 
-// 受理された OpenPlan からファイル対象の絶対パス列を取り出す（タブで開く対象）。
-std::vector<std::string> file_paths(const pika::controller::OpenPlan& plan)
-{
-    std::vector<std::string> out;
-    out.reserve(plan.file_targets.size());
-    for (const auto& t : plan.file_targets)
-    {
-        out.push_back(t.path);
-    }
-    return out;
-}
-
 } // namespace
 
 class PikaApp : public wxApp
@@ -218,9 +207,15 @@ class PikaApp : public wxApp
         if (decision.role == ctl::InstanceRole::Client)
         {
             // 敗者:
-            // 引数を絶対パス化のうえ既存サーバーへ転送し、終了コード0で終了する（design 5.1）。
-            pika::app::send_to_server(decision.pipe_name, decision.transfer_json);
-            return false; // OnInit=false で wx を起動せず終了（exit code 0）。
+            // 引数を絶対パス化のうえ既存サーバーへ転送し、終了コード0で終了する（要件3.4・design
+            // 5.1）。OnInit=false だと wxEntry が -1（=プロセス終了コード 255）を返してしまうため、
+            // 転送成功時は std::exit(0) で明示的に 0 終了する。wx メインループ未開始・後始末は
+            // OS がパイプ等を解放する。送信失敗時のみ従来どおり非0（return false）で終わる。
+            if (pika::app::send_to_server(decision.pipe_name, decision.transfer_json))
+            {
+                std::exit(0);
+            }
+            return false; // 転送失敗。
         }
 
         // 3. 設定の同期読み（起動最序盤。design 5.1 手順1）。読み取り専用。
@@ -246,12 +241,13 @@ class PikaApp : public wxApp
                 {
                     return; // 信頼境界: スキーマ不一致は破棄。
                 }
-                std::vector<std::string> files;
-                for (const auto& t : req.targets)
-                {
-                    files.push_back(t.path);
-                }
-                CallAfter([this, files]() { frame_->apply_open_targets(files); });
+                // path だけでなく line/column も保持したまま UI スレッドへ渡す（-g 行ジャンプ。
+                // 要件3.1/3.4）。goto_mode なら開いた後ソース表示固定にする。
+                std::vector<pika::core::ipc::OpenTarget> targets = req.targets;
+                const bool goto_source = req.goto_mode;
+                CallAfter([this, targets, goto_source]() {
+                    frame_->apply_open_targets(targets, goto_source);
+                });
             });
         }
 
@@ -279,10 +275,11 @@ class PikaApp : public wxApp
             {
                 frame_->open_workspace(plan.folder);
             }
-            const std::vector<std::string> files = file_paths(plan);
-            if (!files.empty())
+            // OpenTarget（path+line+column）を直接渡し、-g の行ジャンプを起動経路でも適用する
+            // （要件3.1/3.4）。goto_mode ならソース表示固定にする。
+            if (!plan.file_targets.empty())
             {
-                frame_->apply_open_targets(files);
+                frame_->apply_open_targets(plan.file_targets, plan.goto_mode);
             }
         }
         return true;

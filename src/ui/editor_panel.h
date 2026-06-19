@@ -48,6 +48,11 @@ class EditorPanel : public wxStyledTextCtrl
     std::int64_t first_visible_line() const;
     void set_first_visible_line(std::int64_t line);
 
+    // 指定行（1 始まり）へキャレットを移動し、その行を表示範囲へ収める（-g 行ジャンプ。要件3.1）。
+    // column（1 始まり・0 は指定なし）があれば行頭からの桁位置へ寄せる。範囲外は Scintilla が
+    // 安全に丸める。line_1based <= 0 は何もしない。
+    void goto_line(int line_1based, int column_1based);
+
     // dirty 変化の通知コールバック（true=未保存になった/false=クリーンに戻った）。
     // Scintilla の savepoint 通知（SAVEPOINTLEFT/SAVEPOINTREACHED）から呼ぶ。
     // MainFrame が TabManager の未保存フラグ・タブ記号へ結線する（design 5.3・要件5.3）。
