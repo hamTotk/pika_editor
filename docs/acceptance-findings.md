@@ -499,6 +499,26 @@
   テスト32件追加(OpenViewModel 12・ImageHeader 10・BinaryDetect 10)。
 - **状態**: ✅ 修正済み・実機検証済み（sample.png が画像表示＋等倍トグル／binary.bin が非対応表示。ctest 702件 PASS）
 
+## F-024 I章の残り（読取専用誘導/空状態3分岐/診断ログ/FSエッジ）の GUI 結線が未/部分（ユーザー判断＝後回し）
+
+- **重大度**: 低〜中（縮退ロジック `controller/degrade_model`・`view_state` は系統A gtest 済み。GUI 結線が
+  欠ける/手動再現困難。データ損失なし）。
+- **対応章/内訳**:
+  - **I3**: 読取専用ファイルの保存時「名前を付けて保存/属性解除」誘導（degrade ReadOnly→SaveAsOrUnlock）が
+    未配線。ただし G10 の保存失敗モーダル「書き込み権限の確認を」で部分カバー。
+  - **I4**(AccessDenied)/I6(NetworkDrive)/I7(CloudPlaceholder): degrade_model のロジックは gtest 済みだが
+    open_file/列挙経路での GUI 結線が未or部分。実環境(排他ロック/NW/OneDrive)での手動再現も困難。
+  - **I5**: `enumerate_tree`(F-021) は recursive_directory_iterator でリンク非追従＝無限展開はしない（安全）。
+    degrade SymlinkLoop の明示通知は未配線。
+  - **I8**: ワークスペース消失→空状態は F2 で部分確認。ドライブ切断の手動再現困難。
+  - **I10**: 空状態が `EmptyNoFolder` の1文言のみ。view_state の3分岐（フォルダ未オープン/検索0件/消化後）の
+    GUI 結線が未＝文言が状況で変わらない。
+  - **I11**: ファイルログ未実装（診断は OutputDebugString のみ・main_gui に「ファイルログ未配線」コメント）。
+    5MB×3世代ローテーション・「ログフォルダを開く」メニューが無い（要件12.3・dev sprint8 should）。
+- **対応方針**: 各々 degrade_model/view_state の結線＋UI（保存誘導ダイアログ・空状態文言分岐・ファイルロガー
+  ＋ログメニュー）。I章の中核（画像/バイナリ/巨大画像ガード＝I1/I2/I9）は F-022 で完了済み。
+- **状態**: 未対応（ユーザー判断「全部後回し・J章へ」）。実装可否は後日判断。
+
 ## F-023 最後のタブを閉じるとクラッシュ（wxAuiNotebook 空ノートブック／イベント中の構造変更）
 
 - **重大度**: 大（クラッシュ＝アプリ異常終了。タブを全部閉じる操作で必ず発生）。F-021 実機検証中に判明。
