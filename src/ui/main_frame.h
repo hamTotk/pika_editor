@@ -173,7 +173,20 @@ class MainFrame : public wxFrame
     void on_tree_file_activated(const std::string& rel_path);
     void on_notebook_page_changed(wxAuiNotebookEvent& evt);
     void on_notebook_page_close(wxAuiNotebookEvent& evt);
+    // 最後の実タブを閉じる遅延処理（PAGE_CLOSE イベント処理外＝CallAfter で呼ぶ）。
+    // イベント中に AddPage/DeletePage すると wxAuiNotebook 内部が壊れて落ちるため、構造変更を
+    // クリーンなスタックへ逃がす（1→2→1。空ページを経由しない）。
+    void close_last_real_tab_deferred(int page);
     void on_sys_colour_changed(wxSysColourChangedEvent& evt);
+
+    // 空状態プレースホルダページ（最後の実タブを閉じても notebook を 0 ページにしない安全網）。
+    // wxAuiNotebook は最後のページ削除で 0 ページになる内部処理でクラッシュするため、実タブが 0
+    // 件に なる直前に閉じられない簡易パネルを末尾へ差し込む。TabManager
+    // には登録しない見せ方専用ページで、 実タブが 1 枚でも開けば除去する＝実タブの index と
+    // TabManager の index の同順は崩れない。
+    void ensure_placeholder_page(); // 空状態プレースホルダを末尾へ追加（既にあれば何もしない）
+    void remove_placeholder_page(); // 空状態プレースホルダを除去（無ければ何もしない）
+    bool active_page_is_placeholder() const; // 現在の選択ページがプレースホルダか
 
     // エディタの dirty 変化（Scintilla savepoint 通知）を TabManager の未保存フラグへ反映し、
     // タブ記号・ステータスを更新する（F-010。閉じ/終了確認の前提となる dirty 結線。設計原則1）。
@@ -200,6 +213,9 @@ class MainFrame : public wxFrame
 
     FileTreePanel* tree_ = nullptr;
     wxAuiNotebook* notebook_ = nullptr; // タブバー＋エディタ群
+    // 空状態プレースホルダページ（実タブ 0 件のとき notebook を 0 ページにしない安全網。末尾固定・
+    // TabManager 非登録）。実タブが 1 枚でも開けば除去するため、実タブ存在時は常に nullptr。
+    wxWindow* placeholder_page_ = nullptr;
     wxWindow* notification_area_ = nullptr;
     wxStatusBar* status_ = nullptr;
     PreviewView* preview_ = nullptr; // 共有 1 枚 WebView2（遅延生成。sprint5）
@@ -207,6 +223,11 @@ class MainFrame : public wxFrame
     // 表示モード × 差分トグル（直交。ui-design 8章）。判断ロジックは controller::diff_mode_model。
     controller::ViewMode view_mode_ = controller::ViewMode::Source;
     bool diff_on_ = false;
+
+    // update_preview の再入防止（安全網）。スプリッタの Split/Unsplit/Show が wxAuiNotebook の
+    // PAGE_CHANGED を再発火し on_notebook_page_changed→update_preview を無限再帰させる経路を断つ
+    // （最後のタブを閉じて空になる経路でスタックオーバーフロー）。RAII で確実に戻す。
+    bool updating_preview_ = false;
 
     controller::TabManager tabs_; // タブ状態機械（wx 非依存・gtest 済み）
     // 外部変更の反映（sprint4。判断ロジックは wx 非依存・gtest 済み）。

@@ -15,7 +15,9 @@
 #endif
 #include <windows.h>
 
+#include <dbghelp.h>
 #include <shlobj.h>
+#include <strsafe.h>
 
 #include "app/pipe_server.h"
 #include "controller/app_controller.h"
@@ -138,6 +140,182 @@ pika::util::Logger make_diag_logger()
     });
 }
 
+// ---- クラッシュ診断（未処理例外フィルタ）。要件12.3 のログ規約に従い、スタックのみを書き、
+//      ユーザーのファイル内容は一切書かない。クラッシュ中なのでヒープ確保を避け、固定バッファと
+//      DbgHelp 呼び出しだけで %TEMP%\pika-crash.log へ追記して flush し、既定処理で終了する。
+
+// 固定バッファへ ASCII 文字列を追記する小ヘルパ（クラッシュ中の new を避ける）。
+void crash_append(char* buf, std::size_t cap, std::size_t& pos, const char* s)
+{
+    while (s != nullptr && *s != '\0' && pos + 1 < cap)
+    {
+        buf[pos++] = *s++;
+    }
+    buf[pos] = '\0';
+}
+
+// 符号なし 64bit を 16 進（0x 前置き）で固定バッファへ追記する。
+void crash_append_hex(char* buf, std::size_t cap, std::size_t& pos, unsigned long long v)
+{
+    char tmp[19];
+    int n = 0;
+    tmp[n++] = '0';
+    tmp[n++] = 'x';
+    char digits[16];
+    int d = 0;
+    if (v == 0)
+    {
+        digits[d++] = '0';
+    }
+    while (v != 0 && d < 16)
+    {
+        const unsigned int nib = static_cast<unsigned int>(v & 0xF);
+        digits[d++] = static_cast<char>(nib < 10 ? ('0' + nib) : ('a' + (nib - 10)));
+        v >>= 4;
+    }
+    while (d > 0 && pos + 1 < cap && n < static_cast<int>(sizeof(tmp)))
+    {
+        tmp[n++] = digits[--d];
+    }
+    tmp[n] = '\0';
+    crash_append(buf, cap, pos, tmp);
+}
+
+// 符号なし 10 進（行番号用）。
+void crash_append_dec(char* buf, std::size_t cap, std::size_t& pos, unsigned long long v)
+{
+    char digits[20];
+    int d = 0;
+    if (v == 0)
+    {
+        digits[d++] = '0';
+    }
+    while (v != 0 && d < 20)
+    {
+        digits[d++] = static_cast<char>('0' + static_cast<unsigned int>(v % 10));
+        v /= 10;
+    }
+    char tmp[21];
+    int n = 0;
+    while (d > 0 && n < 20)
+    {
+        tmp[n++] = digits[--d];
+    }
+    tmp[n] = '\0';
+    crash_append(buf, cap, pos, tmp);
+}
+
+LONG WINAPI crash_handler(EXCEPTION_POINTERS* info)
+{
+    // %TEMP%\pika-crash.log を追記モードで開く（無ければ作る）。失敗しても既定処理へ進む。
+    wchar_t tmp_dir[MAX_PATH];
+    DWORD dn = GetTempPathW(MAX_PATH, tmp_dir);
+    if (dn == 0 || dn >= MAX_PATH)
+    {
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+    wchar_t log_path[MAX_PATH];
+    if (FAILED(StringCchCopyW(log_path, MAX_PATH, tmp_dir)) ||
+        FAILED(StringCchCatW(log_path, MAX_PATH, L"pika-crash.log")))
+    {
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+    HANDLE fh = CreateFileW(log_path, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (fh == INVALID_HANDLE_VALUE)
+    {
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+
+    // 固定バッファ（スタック上）へ整形する。ユーザー内容は触れない＝コード番地とシンボル名のみ。
+    char out[8192];
+    std::size_t pos = 0;
+    out[0] = '\0';
+
+    crash_append(out, sizeof(out), pos, "==== pika crash ====\r\n");
+    crash_append(out, sizeof(out), pos, "exception_code=");
+    if (info != nullptr && info->ExceptionRecord != nullptr)
+    {
+        crash_append_hex(out, sizeof(out), pos,
+                         static_cast<unsigned long long>(info->ExceptionRecord->ExceptionCode));
+    }
+    crash_append(out, sizeof(out), pos, "\r\n");
+
+    // シンボル解決を初期化（クラッシュ中だが DbgHelp の最小利用は許容＝スタックのみ）。
+    HANDLE proc = GetCurrentProcess();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS);
+    const BOOL sym_ok = SymInitialize(proc, nullptr, TRUE);
+
+    // バックトレースを取得する（最大 62 フレーム＝CaptureStackBackTrace の上限近辺）。
+    void* frames[62];
+    const USHORT n = CaptureStackBackTrace(0, 62, frames, nullptr);
+
+    // SYMBOL_INFO は末尾に名前バッファを持つ（固定長＝ヒープを使わない）。
+    char sym_storage[sizeof(SYMBOL_INFO) + 256];
+    auto* symbol = reinterpret_cast<SYMBOL_INFO*>(sym_storage);
+
+    for (USHORT i = 0; i < n; ++i)
+    {
+        const DWORD64 addr = reinterpret_cast<DWORD64>(frames[i]);
+        crash_append(out, sizeof(out), pos, "  ");
+        crash_append_hex(out, sizeof(out), pos, static_cast<unsigned long long>(addr));
+
+        // モジュール名（ベース名のみ）を付す。
+        IMAGEHLP_MODULE64 mod;
+        ZeroMemory(&mod, sizeof(mod));
+        mod.SizeOfStruct = sizeof(IMAGEHLP_MODULE64);
+        if (sym_ok && SymGetModuleInfo64(proc, addr, &mod))
+        {
+            crash_append(out, sizeof(out), pos, " ");
+            crash_append(out, sizeof(out), pos, mod.ModuleName);
+        }
+
+        // 関数名＋オフセット。
+        if (sym_ok)
+        {
+            ZeroMemory(sym_storage, sizeof(sym_storage));
+            symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+            symbol->MaxNameLen = 255;
+            DWORD64 disp = 0;
+            if (SymFromAddr(proc, addr, &disp, symbol))
+            {
+                crash_append(out, sizeof(out), pos, " ");
+                crash_append(out, sizeof(out), pos, symbol->Name);
+                crash_append(out, sizeof(out), pos, "+");
+                crash_append_hex(out, sizeof(out), pos, static_cast<unsigned long long>(disp));
+            }
+            // ファイル名は書かない（ユーザー内容ではないがソースパス露出を避け、行番号のみ）。
+            IMAGEHLP_LINE64 line;
+            ZeroMemory(&line, sizeof(line));
+            line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+            DWORD line_disp = 0;
+            if (SymGetLineFromAddr64(proc, addr, &line_disp, &line))
+            {
+                crash_append(out, sizeof(out), pos, " line:");
+                crash_append_dec(out, sizeof(out), pos,
+                                 static_cast<unsigned long long>(line.LineNumber));
+            }
+        }
+        crash_append(out, sizeof(out), pos, "\r\n");
+
+        if (pos + 256 >= sizeof(out))
+        {
+            break; // バッファ満杯付近で打ち切る（オーバーランしない）。
+        }
+    }
+    crash_append(out, sizeof(out), pos, "====================\r\n");
+
+    DWORD written = 0;
+    WriteFile(fh, out, static_cast<DWORD>(pos), &written, nullptr);
+    FlushFileBuffers(fh);
+    CloseHandle(fh);
+    if (sym_ok)
+    {
+        SymCleanup(proc);
+    }
+    return EXCEPTION_EXECUTE_HANDLER; // 既定処理＝プロセス終了。
+}
+
 } // namespace
 
 class PikaApp : public wxApp
@@ -145,6 +323,10 @@ class PikaApp : public wxApp
   public:
     bool OnInit() override
     {
+        // 0. クラッシュ診断を最序盤で仕掛ける（要件12.3）。未処理例外時にスタックを
+        //    %TEMP%\pika-crash.log へ書く（ユーザー内容は書かない＝コード番地とシンボルのみ）。
+        SetUnhandledExceptionFilter(crash_handler);
+
         namespace ctl = pika::controller;
         namespace ipc = pika::core::ipc;
 
