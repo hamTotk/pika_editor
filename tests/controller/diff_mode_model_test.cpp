@@ -51,14 +51,15 @@ TEST(DiffModeModelTest, SplitWithoutDiffShowsEditorAndPreview)
     EXPECT_TRUE(l.webview_active);
 }
 
-TEST(DiffModeModelTest, SplitWithDiffShowsEditorAndDiffFace)
+TEST(DiffModeModelTest, SplitWithDiffUsesPreviewDiffGrid)
 {
-    // 分割＋差分ON＝エディタ（Scintilla）＋差分面。プレビューは差分面へ差し替わる。
+    // 分割＋差分ON＝プレビュー＋差分と同じ「1枚WebView2内に左プレビュー・右差分の grid」
+    // （B11 仕様変更。レビュー用途で生ソースより整形＋差分の対比を採る）。エディタは出さない。
     const PaneLayout l = resolve_pane_layout(ViewMode::Split, /*diff_on*/ true);
-    EXPECT_TRUE(l.show_editor);
-    EXPECT_FALSE(l.show_preview);
+    EXPECT_FALSE(l.show_editor);
+    EXPECT_TRUE(l.show_preview);
     EXPECT_TRUE(l.show_diff);
-    EXPECT_FALSE(l.preview_diff_grid);
+    EXPECT_TRUE(l.preview_diff_grid);
     EXPECT_TRUE(l.webview_active);
 }
 
