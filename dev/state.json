@@ -1,20 +1,10 @@
 {
-  "current_sprint": 9,
+  "current_sprint": 1,
   "iteration": 1,
-  "total_turns": 9,
+  "total_turns": 0,
   "max_turns_per_sprint": 3,
   "max_total_turns": 15,
-  "history": [
-    {"sprint": 1, "iteration": 1, "score": 100, "passed": true, "duration_sec": 540, "commit": "e9ab567"},
-    {"sprint": 2, "iteration": 1, "score": 100, "passed": true, "duration_sec": 600, "commit": "afba1d9"},
-    {"sprint": 3, "iteration": 1, "score": 95, "passed": true, "duration_sec": 900, "commit": "0096801"},
-    {"sprint": 4, "iteration": 1, "score": 90, "passed": true, "duration_sec": 840, "commit": "24e7d7b"},
-    {"sprint": 5, "iteration": 1, "score": 86, "passed": false, "duration_sec": 960, "commit": "63383e6"},
-    {"sprint": 5, "iteration": 2, "score": 92, "passed": true, "duration_sec": 900, "commit": "cb33fd7"},
-    {"sprint": 6, "iteration": 1, "score": 94, "passed": true, "duration_sec": 900, "commit": "d5ea507"},
-    {"sprint": 7, "iteration": 1, "score": 97, "passed": true, "duration_sec": 900, "commit": "f5c074f"},
-    {"sprint": 8, "iteration": 1, "score": 98, "passed": true, "duration_sec": 900, "commit": "feb6791"}
-  ],
-  "status": "done",
-  "sprint_criteria_done": {"sprint": 8, "reviewers": ["security", "ux"]}
+  "history": [],
+  "status": "running",
+  "sprint_criteria_done": {"sprint": 1, "reviewers": []}
 }
