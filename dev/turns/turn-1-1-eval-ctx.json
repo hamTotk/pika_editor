@@ -1,0 +1,21 @@
+{
+  "project_dir": "C:/dev/pika_editor",
+  "spec": "C:/dev/pika_editor/dev/spec.md",
+  "sprints": "C:/dev/pika_editor/dev/sprints.json",
+  "sprint_id": 1,
+  "iteration": 1,
+  "verify_results": "C:/dev/pika_editor/dev/turns/turn-1-1-verify.json",
+  "review_findings": [
+    "C:/dev/pika_editor/dev/turns/turn-1-1-review-security.json",
+    "C:/dev/pika_editor/dev/turns/turn-1-1-review-performance.json",
+    "C:/dev/pika_editor/dev/turns/turn-1-1-review-data.json",
+    "C:/dev/pika_editor/dev/turns/turn-1-1-review-frontend-ui.json",
+    "C:/dev/pika_editor/dev/turns/turn-1-1-review-ux.json"
+  ],
+  "use_playwright": false,
+  "turns_dir": "C:/dev/pika_editor/dev/turns",
+  "output_contract": {
+    "eval_file": "C:/dev/pika_editor/dev/turns/turn-1-1-eval.json",
+    "schema": "~/.claude/skills/assign-dev-evaluator/eval-schema.json"
+  }
+}

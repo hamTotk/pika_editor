@@ -193,3 +193,34 @@ CLI パース・役割決定の判断は系統A（core/ipc・controller/app_cont
 - 系統A（決定論・自動・must）: `ctest --preset x64-core-test`（controller/core/util の gtest）。
 - 系統B（GUI 配線・自動・must）: `cmake --build --preset x64-release`（/W4・警告エラーでコンパイル+リンク成立）。
 - 系統C（手動・本書）: 上記の各表。GUI 実機・性能計測・実 FS が要る項目を集約。リリース前に実施する。
+
+---
+
+# === Tauri フル刷新フェーズ 系統C チェックリスト（sprint 1〜）===
+
+> Tauri（Rust + WebView2 + TS）刷新フェーズの手動受け入れ。検証手段が dev/spec.md「検証戦略」で
+> 二系統に再定義された（系統A=`cargo test`／系統A補=`cargo build`＋frontend 型チェック `npm run typecheck`／
+> 系統C=本表）。実施は基準機の Release ビルド（`npm run build` → `cargo build --release` の `pika.exe`）。
+> 旧 wx 前提の A〜K 表は新スタックで再検証扱い（手動チェック項目自体は流用・design doc 16章）。
+
+## TA. sprint 1 必達 Open（design doc 15章・所見は acceptance-findings.md T-xxx）
+
+| # | 項目 | 受け入れ基準 | 根拠（requirements / design doc） | 結果 |
+|---|------|-------------|------|------|
+| TA1 | IPC コスト実測 | プレビューHTML invoke vs custom protocol 直配信・保存 Channel・diff・巨大 range のラウンドトリップが性能目標内（更新300ms/初回2.0秒） | 要件2.1・design doc 3章/15章-1（T-001） | [ ] 未実施（要基準機実測） |
+| TA2 | 別WebView 権限ゼロ隔離 | プレビュー別WebView から `invoke`/`__TAURI_INTERNALS__` 経由の任意 command が到達不能（1つでも到達したら設計やり直し） | design doc 6章/15章-3（T-002） | [ ] 未実施（sprint 4 本番経路で実証） |
+| TA3 | WebView2 不在時起動 | 不在/破損時に Tauri 起動前の最小ネイティブ MessageBox で導入案内し終了（exit≠0） | 要件2.3 改訂・design doc 18章/15章-5（T-003） | [ ] 未実施（不在環境を模擬して確認） |
+| TA4 | 最薄ループ貫通 | フォルダを開く→ツリー→タブで CM6→編集→保存 が手で通る | design doc 14章-1（T-004） | [ ] 未実施（要基準機起動） |
+
+## TB. 各スプリント末の性能計測（要件2.1・design doc 12章）
+
+| # | 指標 | 上限 | 結果 |
+|---|------|------|------|
+| TB1 | 起動時間 | 0.5 秒 | [ ] |
+| TB2 | プレビュー初回 | 2.0 秒 | [ ] |
+| TB3 | プレビュー更新 | 300 ms | [ ] |
+| TB4 | 外部変更反映 | 500 ms | [ ] |
+| TB5 | メモリ各上限 / IPC ラウンドトリップ / 常駐リーク（18時間ソーク） | 要件2.1 | [ ] |
+
+> 後続スプリントで watcher オーバーフロー・CM6 巨大ファイル体感・a11y 実機・プレビュー内検索・
+> requirements 各章受け入れ基準の写経を本表へ追加する（各項目に節番号を併記する方針を継続）。

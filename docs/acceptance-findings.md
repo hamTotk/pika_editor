@@ -646,3 +646,63 @@
   （`SplitWithDiffUsesPreviewDiffGrid`）。グリッド文書生成（`preview_builder_test.cpp`）は流用で不変。
 - **状態**: 実装済（コミット前・作業ツリー）。**実機再確認前（未確定）**＝分割＋差分ONで左=整形/右=差分、
   差分OFFで編集分割へ復帰、ソース+差分（差分面のみ）・プレビュー+差分（grid）が不変、を実機確認待ち。
+
+---
+
+# === Tauri フル刷新フェーズ（系統C 所見・sprint 1〜）===
+
+> 以下は wxWidgets/C++ 版から Tauri（Rust + WebView2 + TS）へのフル刷新フェーズの所見。
+> 旧 wx 前提の F-xxx 所見は新スタックで再検証扱い（design doc 16章）。検証環境は基準機の
+> Release ビルド（`cargo build --release` ＋ `npm run build` 後の `pika.exe`）。
+> 本フェーズの系統C 必達項目は dev/spec.md「検証戦略 系統C」と design doc 15章 Open に対応する。
+
+## T-001 IPC コスト実測（design doc 15章-1・3章／要件2.1）
+
+- **重大度**: 高（性能目標 2.1 の根幹。転送方式を誤ると更新300ms/初回2.0秒を構造的に外す）。
+- **対応章**: design doc 3章「IPC コスト予算」・15章-1／要件2.1。
+- **検証内容**: プレビュー相当 HTML を (a) `invoke` で JSON 文字列として返す経路と
+  (b) custom protocol（`pika-preview://`）が別WebView へ直配信する経路でラウンドトリップを実測し、
+  64KB〜数MB のペイロードで更新300ms・初回2.0秒を満たす転送方式を確定する。
+  保存（編集バッファ全量）は Channel API、巨大ファイル range 読取は custom protocol range を測る。
+- **設計上の確定**: design doc 3章の予算表に従い、プレビュー HTML は **custom protocol 直配信**（invoke で返さない）、
+  保存は Channel、ツリー/小データのみ invoke(JSON)。本スプリント（sprint 1）の最薄ループでは
+  保存をテキスト invoke で暫定配線し、本計測でこの予算への適合を確認する。
+- **状態**: 設計確定・実装経路（custom protocol/Channel の置き場所）を sprint 4/6 で本配線。**基準機 Release での
+  ラウンドトリップ実測は未実施（要実機）**。実測値を本欄に追記する。
+
+## T-002 別WebView 権限ゼロ隔離の実証（design doc 15章-3・6章）
+
+- **重大度**: 高（設計の根幹。1つでも到達したら設計やり直し）。
+- **対応章**: design doc 6章「隔離方式: 権限ゼロの別 WebView」・15章-3。
+- **検証内容**: プレビュー用の別WebView を capability ゼロ（command 無し・`core:default` 不付与）で生成し、
+  その WebView 内から `invoke(...)` / `window.__TAURI_INTERNALS__` 経由の任意 command が **到達不能**で
+  あることを Windows 実機 Release で確認する。1つでも到達したら設計やり直しとする。
+- **設計上の確定**: capability マップ（design doc 9章）で、メインウィンドウ（label "main"）にのみ
+  `capabilities/main.json` を割り当て、プレビュー WebView（label "preview"・sprint 4 で生成）には
+  **capability ファイルを置かない**。Tauri は未宣言ウィンドウへ command を一切許可しないため、
+  プレビュー WebView は権限ゼロになる（src-tauri/src/main.rs の run() コメント参照）。
+- **状態**: capability マップの土台を sprint 1 で確立（main のみ最小・preview はファイル不在＝ゼロ）。
+  **プレビュー WebView の実生成と到達不能の実機実証は sprint 4 の本番経路で実施**（本スプリントは経路設計の確立）。
+
+## T-003 WebView2 不在時起動（design doc 15章-5・18章／要件2.3 改訂）
+
+- **重大度**: 高（不在時にウィンドウすら描けず、最小ダイアログが無いと無反応終了になる）。
+- **対応章**: design doc 18章「WebView2 不在時のフォールバック」・要件2.3 改訂。
+- **検証内容**: WebView2 Runtime 不在/破損時、Tauri 起動「前」に Win32 MessageBox（WebView 非依存）で
+  Evergreen Runtime の導入を案内して終了する。不在環境を模擬（HKLM/HKCU の Evergreen GUID キー `pv` を
+  退避/改名）して手動確認する。
+- **実装**: `src-tauri/src/webview2.rs` に実装。`ensure_runtime_available()` が
+  HKLM\...\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}\pv（64bit ビュー）または
+  HKCU\... の同キーを読み、非空（"0.0.0.0" 以外）の版があれば導入済みと判定。不在なら `main()` が
+  Tauri 起動前に `show_missing_runtime_dialog()`（`MessageBoxW`）で案内し `exit(1)`。
+- **状態**: 実装済（cargo build 成立）。**不在環境を模擬した実機手動確認は未実施（要実機）**。模擬手順と
+  ダイアログ表示・終了コードの実測結果を本欄に追記する。
+
+## T-004 最薄ループの貫通（sprint 1・中心体験①／系統C）
+
+- **重大度**: 高（以後の全スプリントが土台にする）。
+- **検証内容**: `pika.exe` が起動し、フォルダパスを入力→`invoke('open_workspace')`→ツリー表示→
+  ファイルをクリックでタブ＋CM6 を開く→編集（dirty 化）→「保存」で `save_file`（現状 invoke 配線）まで
+  手で通す。GUI 実機が要るため系統C。
+- **状態**: 実装済（cargo build＋npm build 成立・cargo test PASS）。**基準機での実機起動と一連の貫通操作は
+  未実施（要実機）**。起動時間・初回プレビューは T-001 と併せて計測する。

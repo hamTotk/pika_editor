@@ -1,0 +1,105 @@
+/*
+ * pika テーマトークン（単一源）。
+ * 出典: docs/ui-mock.html の :root/.theme-light/.theme-dark の CSS 変数（ui-design 2章・design doc 10章）。
+ * ネイティブ wx 版の wxColour ハードコードを置換する全Web 質感の正本。配色値はミラーであり改変しない。
+ *
+ * テーマ選択（design doc 10章・既定システム追従）:
+ *   html[data-theme="light"]  -> 明示ライト
+ *   html[data-theme="dark"]   -> 明示ダーク
+ *   html[data-theme="system"] -> prefers-color-scheme に追従
+ * 強制配色（forced-colors / prefers-contrast）は a11y 仕上げ（sprint 7・design doc 17章）で
+ *   独自トークンを降格し OS の system-color に委ねる。本スプリントは骨格のみ。
+ */
+
+:root,
+html[data-theme="light"] {
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
+  --font-read: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --row-h: 25px;
+
+  --bg-window: #ebebee;
+  --bg-sunken: #e6e6ea;
+  --bg-raised: #fafafb;
+  --bg-hover: #00000008;
+  --bg-active: #00000010;
+  --text-1: #26262b;
+  --text-2: #5a5a62;
+  --text-3: #8a8a93;
+  --text-faint: #a9a9b1;
+  --border-1: #dcdce0;
+  --border-2: #cacace;
+  --accent: #4f74a8;
+  --accent-strong: #3d63a0;
+  --alert: #a8602a;
+  --diff-add-bg: #e9f2ec;
+  --diff-add-tx: #2f6b41;
+  --diff-add-gut: #d6e6dc;
+  --diff-add-word: #bbddc6;
+  --diff-del-bg: #f6ebec;
+  --diff-del-tx: #a4423c;
+  --diff-del-gut: #eed2d1;
+  --diff-del-word: #e7bebb;
+  --shadow: 0 1px 3px #00000017;
+  color-scheme: light;
+}
+
+/* ダーク値（反転でなく再調整・純黒回避）。 */
+html[data-theme="dark"] {
+  --bg-window: #1d1d21;
+  --bg-sunken: #19191d;
+  --bg-raised: #212126;
+  --bg-hover: #ffffff0a;
+  --bg-active: #ffffff14;
+  --text-1: #d9d9df;
+  --text-2: #97979f;
+  --text-3: #66666e;
+  --text-faint: #4e4e56;
+  --border-1: #2b2b31;
+  --border-2: #393940;
+  --accent: #7d9ec9;
+  --accent-strong: #5b86bf;
+  --alert: #c98a52;
+  --diff-add-bg: #18271d;
+  --diff-add-tx: #6fb585;
+  --diff-add-gut: #244430;
+  --diff-add-word: #2f5b3d;
+  --diff-del-bg: #271a1c;
+  --diff-del-tx: #d18b86;
+  --diff-del-gut: #432528;
+  --diff-del-word: #5f3535;
+  --shadow: 0 1px 3px #00000033;
+  color-scheme: dark;
+}
+
+/* システム追従: prefers-color-scheme:dark のときダーク値を適用。 */
+@media (prefers-color-scheme: dark) {
+  html[data-theme="system"] {
+    --bg-window: #1d1d21;
+    --bg-sunken: #19191d;
+    --bg-raised: #212126;
+    --bg-hover: #ffffff0a;
+    --bg-active: #ffffff14;
+    --text-1: #d9d9df;
+    --text-2: #97979f;
+    --text-3: #66666e;
+    --text-faint: #4e4e56;
+    --border-1: #2b2b31;
+    --border-2: #393940;
+    --accent: #7d9ec9;
+    --accent-strong: #5b86bf;
+    --alert: #c98a52;
+    --diff-add-bg: #18271d;
+    --diff-add-tx: #6fb585;
+    --diff-add-gut: #244430;
+    --diff-add-word: #2f5b3d;
+    --diff-del-bg: #271a1c;
+    --diff-del-tx: #d18b86;
+    --diff-del-gut: #432528;
+    --diff-del-word: #5f3535;
+    --shadow: 0 1px 3px #00000033;
+    color-scheme: dark;
+  }
+}

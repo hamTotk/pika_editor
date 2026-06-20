@@ -1,0 +1,27 @@
+{
+  "reviewer": "security",
+  "sprint_id": 1,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "入力検証 / パス封じ込め",
+      "message": "Tauri command open_workspace/read_file/save_file は frontend から渡された path: String を canonicalize / prefix 検証なしでそのまま std::fs に渡す。本スプリントの脅威モデルでは未信頼コンテンツ(文書由来 HTML/MD)は権限ゼロ別 WebView に物理隔離され、これらの command を呼べるのは pika 自作の信頼済みアプリシェルのみ(capability=main 限定・preview はゼロ)なので critical ではない。また任意パスの読み書きはエディタの本来機能であり脆弱性ではない。ただし spec 自身が『受信引数の再検証(core 検証層で再正規化・健全性検査)』を約束しており(sprint 5 の named pipe 引数 / design doc 9章)、現状 command 層に検証層が一切無いことは将来の信頼境界(パイプ転送引数・将来の dialog plugin 導入)で漏れの起点になりうる。pika-core 側に集約する受信パス再検証ロジックを sprint 5 で必ず通すこと、それまで command を信頼境界の外に晒さないことを feedback として残す。",
+      "location": "src-tauri/src/commands.rs:23"
+    },
+    {
+      "severity": "low",
+      "area": "CSP / 多層防御",
+      "message": "main シェルの CSP img-src に 'asset: http://asset.localhost' が含まれるが、tauri.conf.json に assetProtocol スコープ設定が無く asset protocol は既定で無効。scaffold テンプレート由来の未使用許可で実害は無いが、最小権限原則上は実際に使う custom protocol(sprint 4 で pika-preview://)へ整理し未使用の asset: 許可は削るのが望ましい。なお script-src 'self'(unsafe-inline/eval 無し)・default-src 'self'・dangerous 系オーバーライド無しで main シェル CSP のハードニング自体は良好。",
+      "location": "src-tauri/tauri.conf.json:27"
+    },
+    {
+      "severity": "low",
+      "area": "情報漏洩 / エラー文言",
+      "message": "command のエラーが format!(\"読み込みに失敗: {e}\") 等で std::io::Error をそのまま frontend へ返す(notify でユーザー表示)。ローカル単一ユーザーツールゆえ機密漏洩リスクは低いが、絶対パスや OS 内部メッセージがそのまま UI に出る。後続スプリントで pika-core::PikaError に正規化し、診断ログ(要件12.3・内容非記録)とユーザー向け文言を分離する設計に揃えると一貫する。",
+      "location": "src-tauri/src/commands.rs:48"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 1(旧 C++ ツリー退避/除去＋Tauri scaffold＋最薄ループ)のセキュリティ観点では critical は無い。機密のハードコードなし、injection/RCE/SSRF/認可バイパスの到達経路なし(本スプリントにネットワークサーバ・認証認可面は無い)。frontend は tree/tabs/notifications/status とも textContent 一貫で innerHTML XSS sink なし。設計の根幹である未信頼文書の権限ゼロ別 WebView 隔離は capability=core:default を main 限定・preview はファイル不在=ゼロで土台が正しく敷かれ、実機到達不能実証は sprint 4 へ正しく送られ acceptance-findings T-002 に記録済み。依存も tauri-plugin-fs/shell/dialog 等の広域スコープ plugin を入れておらず最小。canon 改訂(CLAUDE.md/requirements/acceptance)も CSP/ammonia サニタイズ/CVE-2024-35222 回避(iframe 不採用)を正しく文書化しセキュリティ後退なし。high 以下として、command 層に受信パス再検証層が無い点(spec 約束の sprint 5 検証を確実に通すこと)・未使用の asset: CSP 許可・io::Error の素通し返却を feedback に残す。いずれも本スプリントの脅威モデル内では合格を妨げない。"
+}

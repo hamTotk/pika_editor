@@ -1,0 +1,17 @@
+[
+  {
+    "command": "cargo test",
+    "exit_code": 0,
+    "tail": "running 14 tests\ntest cli::tests::ドライブレターのみで位置なし ... ok\ntest cli::tests::ドライブレターのコロンを保護しつつ桁省略 ... ok\ntest cli::tests::ドライブレターのコロンを分割しない ... ok\ntest cli::tests::ドライブレター小文字でも保護する ... ok\ntest data_root::tests::portable_txt_なしはインストール分岐 ... ok\ntest cli::tests::位置指定なしはファイルのみ ... ok\ntest cli::tests::空引数はエラー ... ok\ntest cli::tests::行のみ指定は桁が_none ... ok\ntest data_root::tests::portable_txt_ありはポータブル分岐 ... ok\ntest data_root::tests::インストール分岐で_localappdata_不在はエラー ... ok\ntest data_root::tests::インストール分岐で_localappdata_空文字はエラー ... ok\ntest data_root::tests::ポータブルは_localappdata_不在でも解決できる ... ok\ntest cli::tests::ドライブレター直後のコロンだけでは剥がさない ... ok\ntest cli::tests::非整数の末尾セグメントは位置にしない ... ok\ntest result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n合計18件PASS(pika_cli 4 + pika_core 14)。EXIT: 0"
+  },
+  {
+    "command": "cargo build",
+    "exit_code": 0,
+    "tail": "Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s\ncrates/* と src-tauri 全体が警告エラー扱い(warnings=deny)で exit 0。EXIT: 0"
+  },
+  {
+    "command": "npm run typecheck",
+    "exit_code": 0,
+    "tail": "> pika-frontend@0.1.0 typecheck\n> tsc -p tsconfig.app.json\n(出力なし=型エラーゼロ)。EXIT: 0"
+  }
+]

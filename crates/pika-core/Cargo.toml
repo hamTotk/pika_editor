@@ -1,0 +1,16 @@
+[package]
+name = "pika-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "pika コアサービス層（UI/Tauri/wry 非依存・cargo test の決定論ゲート対象）"
+
+[lints]
+workspace = true
+
+[dependencies]
+# 重要: 本クレートは Tauri / wry / WebView に一切依存しない（design doc 4章「コアは UI を知らない」）。
+# acceptance_criteria の「pika-core が Tauri に依存しない（dependencies に tauri/wry が無い）」を満たす。
+thiserror = { workspace = true }

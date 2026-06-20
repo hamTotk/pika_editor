@@ -1,0 +1,179 @@
+/*
+ * pika アプリシェルのレイアウト（最薄ループ用の最小骨格）。
+ * 寸法は段階的に rem/em 基準へ移す（design doc 10章・ui-design 改訂は sprint 7）。
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-ui);
+  color: var(--text-1);
+  background: var(--bg-window);
+  font-size: 14px;
+}
+
+#app {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100vh;
+  position: relative;
+}
+
+#toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border-1);
+}
+
+#toolbar button {
+  font: inherit;
+  color: var(--text-1);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+#toolbar button:hover {
+  background: var(--bg-hover);
+}
+
+#toolbar button:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+#workbench {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 0;
+}
+
+#tree-pane {
+  background: var(--bg-sunken);
+  border-right: 1px solid var(--border-1);
+  overflow: auto;
+}
+
+#tree {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+}
+
+#tree [role="treeitem"] {
+  height: var(--row-h);
+  display: flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--text-1);
+  user-select: none;
+}
+
+#tree [role="treeitem"]:hover {
+  background: var(--bg-hover);
+}
+
+#tree [role="treeitem"][aria-selected="true"] {
+  background: var(--bg-active);
+}
+
+#editor-pane {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+  background: var(--bg-raised);
+}
+
+#tabs {
+  display: flex;
+  gap: 2px;
+  padding: 4px 4px 0;
+  border-bottom: 1px solid var(--border-1);
+  min-height: 30px;
+}
+
+#tabs [role="tab"] {
+  font: inherit;
+  padding: 4px 10px;
+  border: 1px solid var(--border-1);
+  border-bottom: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: var(--bg-sunken);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+#tabs [role="tab"][aria-selected="true"] {
+  background: var(--bg-raised);
+  color: var(--text-1);
+}
+
+#editor-host {
+  overflow: auto;
+  padding: 0;
+}
+
+#editor-host textarea {
+  width: 100%;
+  height: 100%;
+  border: none;
+  outline: none;
+  resize: none;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 8px 12px;
+  color: var(--text-1);
+  background: var(--bg-raised);
+}
+
+/* 通知バー（非モーダル・最大3本＋他N件はキュー実装で sprint 7）。 */
+#notifications {
+  position: absolute;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  pointer-events: none;
+}
+
+#notifications .notice {
+  pointer-events: auto;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
+  padding: 6px 12px;
+  max-width: 520px;
+}
+
+#notifications .notice[data-kind="error"] {
+  border-color: var(--alert);
+}
+
+/* ステータスは右下固定・表示専用（ui-design §9）。クリック透過。 */
+#status {
+  position: absolute;
+  right: 8px;
+  bottom: 4px;
+  color: var(--text-3);
+  font-size: 12px;
+  pointer-events: none;
+  user-select: none;
+}

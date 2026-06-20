@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-capability",
+  "description": "メインウィンドウの最小権限。pika 独自 command のみを許可し、プレビュー別WebView には一切付与しない（design doc 9章 capability マップ・最小権限）。",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

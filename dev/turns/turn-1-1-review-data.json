@@ -1,0 +1,27 @@
+{
+  "reviewer": "data",
+  "sprint_id": 1,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "保存の原子性/データ耐久性",
+      "message": "save_file command が std::fs::write による非アトミックな truncate-then-write でユーザーファイルを保存する。書込中クラッシュ/電源断でファイルが途中切詰め(データ消失)になりうる。design doc 1章『データを失わない』最上位原則・design.md L177『一時ファイル→ReplaceFile(アトミック・属性/ACL維持)』に未到達。本スプリントは最薄ループの placeholder でありコード内コメントで後続スプリントへ明示的に deferral 済み、sprint6 should にもアトミック書込が定義されているため critical/high ではないが、placeholder のまま本番経路に残らないよう sprint6 で確実に ReplaceFile 化されることを追跡すべき。",
+      "location": "src-tauri/src/commands.rs:56"
+    },
+    {
+      "severity": "low",
+      "area": "データルート解決の堅牢性",
+      "message": "resolve_data_root は portable/installed の分岐と %LOCALAPPDATA% 欠落/空文字をエラー化しており分岐は十分テストされ正しい。一方で local_appdata が相対パスや非絶対の異常値だった場合の健全性検査は無い(PathBuf に素直に push)。データルートは退避・index.json・state.json の格納先で『ワークスペースを汚さない/データを失わない』の根。現状 OS が常に絶対の %LOCALAPPDATA% を渡す前提なので実害は小さく sprint1 の純粋関数スコープとしては妥当だが、データルート生成を実配線する段(snapshot store=sprint3 の厳格DACL付きディレクトリ作成)で絶対パス健全性検査を併設するのが望ましい。",
+      "location": "crates/pika-core/src/data_root.rs:40"
+    },
+    {
+      "severity": "low",
+      "area": "永続化スキーマ(canon)整合",
+      "message": "本スプリントの実コードには永続化スキーマ(index.json/objects/state.json)・トランザクション・マイグレーションは未実装で、データ層は資料上 sprint3(snapshot/diff)・sprint5(state.json 復元3分岐)へ正しく後送りされている。canon 改訂(着手段階)後も design.md L250-262 の index.json エントリ形状・content-addressed objects+自己記述メタ・mark-and-sweep・LF正規化後XXH3・ReplaceFile アトミック書込・index.json 破損時の objects 走査再生成という data-integrity 設計は保全されており、スキーマの後退・矛盾は持ち込まれていない。データ観点での懸念事項なし(記録目的)。",
+      "location": "docs/design.md:250"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint1 は旧C++退避+Tauri scaffold+canon改訂着手の準備スプリントで、データ層(永続化スキーマ・トランザクション・マイグレーション・退避ストア)は仕様どおり sprint3/5 へ後送りされ本スプリントの実コードには存在しない。唯一のデータ層コード resolve_data_root は portable/installed 分岐と %LOCALAPPDATA% 欠落/空のエラー化が網羅テストされ正しい。データ破損・不整合・不可逆マイグレーション・トランザクション原子性欠陥(=critical 定義)に該当する欠陥は無く critical=0。残る指摘は (medium) save_file が最薄ループ placeholder として非アトミック truncate-write でありデータ耐久性ギャップ — 既にコメント/後続 should で deferral 追跡済みのため本スプリント減点ではなく sprint6 でのアトミック化追跡事項、(low) データルート絶対パス健全性検査の将来追加、(low) 永続化スキーマ canon が改訂後も保全されている確認の3件。build/target/dist/gen が changed.txt に出るが .gitignore 済み・git 未追跡を確認済みでリポジトリ/データストア整合への懸念なし。"
+}

@@ -1,0 +1,39 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 1,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "アクセシビリティ / キーボード操作",
+      "message": "ファイルツリーがキーボードだけでは操作不能。treeitem の li は tabIndex=-1 で click ハンドラのみ（keydown/Enter/Space なし、フォーカスを置けるアイテムも無い）ため、キーボード利用者はツリーからファイルを開けない。最薄ループ自体はツールバーの『フォルダを開く』ボタン(button・キーボード到達可)＋パス入力でフォルダを開け、ファイル選択以外はキーボードで完結するため critical(主要操作が不能)には当てない。ツリーからのファイルオープンが現状マウス専有なのは frontend-ui の致命的 a11y の一歩手前。criteria では role=tree のキーボードナビ/F6 は sprint7(design doc 17章)へ明示的に繰り延べられており既知の繰り延べだが、繰り延べ範囲に『ツリーからファイルを開く操作そのものがキーボード不能』が含まれることを sprint7 で必ず解消対象に含めるべき(roving tabindex + Enter/Space)。",
+      "location": "src/ui/tree.ts:13-29"
+    },
+    {
+      "severity": "medium",
+      "area": "ビジュアル一貫性 / デッドコード",
+      "message": "app.css の #editor-host textarea ルール(13行・outline:none/resize:none 等)は実体に対応しない死にコード。エディタは CodeMirror 6(src/editor/index.ts が EditorView を生成・contenteditable ベース)で textarea を描画しないため、このセレクタはどの要素にもマッチせず、CM6 の実描画スタイル(.cm-editor/.cm-scroller 等)はここで効かない。CM6 のフォントは editor/index.ts の EditorView.theme で別途当てているため見た目は成立しているが、CSS に存在しない要素前提のスタイルが残るのは一貫性/YAGNIの観点でノイズ。CM6 ルートへ寄せるか削除が望ましい。",
+      "location": "src/styles/app.css:130-142"
+    },
+    {
+      "severity": "medium",
+      "area": "アクセシビリティ / フォーカス可視化",
+      "message": "フォーカスの可視化スタイル(:focus-visible)がアプリシェル全体に未定義。ツールバーの button、role=tab、フォルダパス入力にカスタムフォーカスリングが無く、ダークテーマ(tokens.css の html[data-theme=dark])ではブラウザ既定のフォーカスリングがコントラスト不足になりやすい。キーボード操作時の現在位置が分かりづらい。criteria 上 a11y 仕上げは sprint7 だが、フォーカス可視化はトークン(--accent)で安価に入る基礎であり sprint7 のチェック対象に含めること。",
+      "location": "src/styles/app.css:38-55,109-123"
+    },
+    {
+      "severity": "low",
+      "area": "ビジュアル一貫性 / トークン",
+      "message": "app.css に固定px(font-size:14px/13px/12px、grid 260px、min-height:30px、bottom:28px 等)とエディタ内 fontSize:'13px'(editor/index.ts)がハードコードされている。tokens.css は色/radius/row-h をトークン化済みだが、寸法・タイポスケールはトークン化されていない。コメントで『寸法は段階的に rem/em 基準へ(sprint7)』と明記済みのため繰り延べは妥当だが、forced-colors/テキストスケール対応(sprint7 must)で rem 化が必要になる箇所として記録。本スプリントの骨格としては許容。",
+      "location": "src/styles/app.css:21,49,59,107,148; src/editor/index.ts:49"
+    },
+    {
+      "severity": "low",
+      "area": "状態の網羅 / Empty 状態",
+      "message": "ツリー/タブの empty(0件)状態が無描画(空コンテナ)。setStatus で『フォルダを開いてください』『N件』の文言は出るが、ツリーペイン/タブ領域自体の Empty 表示(フォルダ未オープン/0件)は無い。ui-design 15章の『ビュー別5状態(Empty 3分岐)』は criteria で sprint7 の must として明示繰り延べ済みのため本スプリントでは欠落扱いにしない。骨格段階の既知ギャップとして記録。",
+      "location": "src/ui/tree.ts:9-30; src/main.ts:70"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint1 は『旧C++退避＋Tauri scaffold＋最薄ループ(開く→ツリー→タブ→CM6編集→保存)』が主目的で、a11y/状態記号/5状態/通知キュー/差分レンダラは criteria 上 sprint3/7 へ明示的に繰り延べられている。frontend-ui 観点で critical(主要操作が不能/不可視・致命的a11y違反)はゼロ。最薄ループの主要操作はキーボード到達可能なツールバーで完結し、tokens.css(ui-mock の配色を単一源にミラー)・モジュール分割(tree/tabs/status/notifications/editor/theme/a11y/diff/preview)・role の土台(tree/tablist/status/aria-live)は design doc 5章/10章/17章の方向に正しく沿っている。修正すべき明確な欠陥は high 1件(ツリーがキーボードだけでファイルを開けない=sprint7 のキーボードナビ実装に必ず含めるべき)、改善推奨 medium 2件(CM6 不在の textarea 死にCSS / フォーカス可視化未定義)、繰り延べ既知ギャップ low 2件(寸法トークン化 / Empty 状態)。いずれも sprint7 の a11y/5状態仕上げで回収される設計で、ゲートをブロックしない。"
+}

@@ -1,0 +1,45 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 1,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "エラー回復(エラー文言)",
+      "message": "frontend の各 invoke 失敗が生の Rust/OS エラーをそのまま表示する。commands.rs の read_file/save_file/open_workspace は std::io::Error の Display をそのまま format! で文字列化し(例『読み込みに失敗: The system cannot find the file specified.』)、main.ts はそれを String(e) で通知バーへ出す。OS 由来のエラー文は英語になりうるため、日本語のみ UI(CLAUDE.md)の中に英語断片が混じり、ux 観点の『何が起きたか+なぜ+どうすればよいか』のうち『次の一手』が示されない。最薄ループの段階なので致命ではないが、io::Error の種類(NotFound/PermissionDenied 等)を日本語の定型文言+次の操作へマップする方針を sprint 1 の段階で error.rs / commands.rs 側に持たせておくと後続スプリントの通知バーキュー(s7)と整合する。Nielsen #2(現実世界との一致)/#9(エラー回復支援)。",
+      "location": "src-tauri/src/commands.rs:29,48,57 / src/main.ts:38,72,88"
+    },
+    {
+      "severity": "medium",
+      "area": "CLI の DX(引数検証)",
+      "message": "pika-cli の run() は未知フラグ・誤った引数を黙って受理し exit 0 を返す。-g/-h/-v 以外の引数(例 'pika --badflag' や 'pika -G file')は最後の『引数なし、または単なるパス列はとりあえず受理』分岐に落ち、エラーも警告も出さず ExitCode::SUCCESS になる。ux 観点では『誤入力を未然に防ぐ(Nielsen #5)』『失敗を失敗として伝える』が満たされず、タイプミスした起動オプションが無言で無視される DX 上の落とし穴になる。終了コード規約のコメント(0=受理/2=引数エラー)に照らしても、未知オプションは 2 を返すか『不明なオプション: --badflag。--help を参照してください』を stderr に出すのが望ましい。sprint 5 で GUI 起動本配線に進む前に、console 段で引数検証する本クレートの責務として早めに整えると良い。",
+      "location": "crates/pika-cli/src/main.rs:79-80"
+    },
+    {
+      "severity": "medium",
+      "area": "空状態/オンボーディング",
+      "message": "起動直後の空状態の案内が右下ステータスの一行(『フォルダを開いてください』)のみで、視認性が弱い。ステータス領域は ui-design §9 に従い右下固定・小さめ・pointer-events:none(app.css #status)で、初回利用者がまず目を向けるツリー枠/エディタ枠は完全に空のまま。ux 観点の『初回利用(空状態)で次にすべきことが示されるか』として、ツリーまたはエディタ中央に『フォルダのパスを入力して〔フォルダを開く〕を押す』程度の空状態ガイドがあると迷いが減る。spec の should で 5 状態(Empty/Loading 等)の本実装は sprint 7 送りと明記されているため critical/high ではないが、最薄ループでも空状態文言を主要視線位置へ置く余地を残す。Nielsen #1(状態の可視化)/#10(ヘルプ)。",
+      "location": "src/main.ts:96 / src/index.html:28-31 / src/styles/app.css:171-179"
+    },
+    {
+      "severity": "low",
+      "area": "柔軟性と効率(近道)",
+      "message": "主要タスク『保存』にキーボードショートカット(Ctrl+S)が無く、ツールバーの〔保存〕ボタンのクリックでしか保存できない。frontend に keydown ハンドラは未配線(grep で該当なし)。Markdown エディタの最頻操作としては Ctrl+S 不在は熟練者効率を損なう。要件11.2/sprint 7 should にショートカット表の実装が予定されているため本スプリントでは low。CM6 は defaultKeymap を入れているが保存はアプリ層の責務なので別途 Ctrl+S→onSave を結ぶ必要がある。Nielsen #7。",
+      "location": "src/main.ts:92-97 / src/editor/index.ts:18-24"
+    },
+    {
+      "severity": "low",
+      "area": "エラー文言(可読性)",
+      "message": "フォルダを開く失敗時の通知が二重の否定/接頭辞で読みにくい。main.ts が『フォルダを開けませんでした: 』を前置し、commands.rs が『フォルダではありません: <path>』を返すため、最終文言は『フォルダを開けませんでした: フォルダではありません: <path>』のように『開けません/ではありません』が二段重なる。意味は通るが冗長で、ux 観点の『最小限の設計(Nielsen #8)』として一段で『指定パスはフォルダではありません: <path>』に揃えると明快。低優先。",
+      "location": "src/main.ts:72 / src-tauri/src/commands.rs:25"
+    },
+    {
+      "severity": "low",
+      "area": "エラー回復(導入案内)",
+      "message": "WebView2 不在ダイアログ(webview2.rs)は『何が無いか/なぜ起動できないか/どこから入れるか(URL)』を日本語で明示でき、ux 観点の error-recovery として良好。改善余地として、Win32 MessageBox(MB_OK)内の導入 URL はクリック不可でユーザーが手入力する必要がある。MessageBox の制約上やむを得ないが、将来は TaskDialog のハイパーリンクで『ダウンロードページを開く』ボタンにすると回復導線が一段短くなる。design doc 18章の本フェーズ範囲では現実装で十分なため low(改善メモ)。",
+      "location": "src-tauri/src/webview2.rs:32-47,118-130"
+    }
+  ],
+  "has_critical": false,
+  "summary": "ux 観点で sprint 1(旧ツリー退避→Tauri scaffold→最薄ループ+CLI スタブ+WebView2 不在案内+canon 改訂着手)をレビューした。critical は無し。主要タスク導線(フォルダを開く→ツリー→タブ→CM6 編集→保存)は通知バー/ステータスのフィードバック付きで完了でき、CLI は help/version/-g エラーで終了コードを正しく分け(成功0/引数エラー2/WebView2不在1)、ux critical の三類型『導線破綻・誤操作データ喪失・失敗時 exit 0』のいずれにも該当しない。save_file の非アトミック上書き・未保存タブ閉じ確認の不在は data 喪失リスクだが、本スプリントはタブ閉じ UI 自体が未実装で喪失経路がまだ無く、退避/アトミック書込は spec が s3/s6 へ明示的に繰り延べているため sprint 1 の ux critical ではない。WebView2 不在ダイアログは原因+次の一手+導入 URL を日本語で示せており error-recovery として良好。指摘は medium 3件(invoke 失敗時の生 OS エラー文言で次の一手欠落・CLI が未知フラグを無言受理し exit 0・空状態オンボーディングが右下一行のみ)と low 3件(Ctrl+S 不在・エラー文言の接頭辞二重化・MessageBox 内 URL 非クリック)で、いずれも high 以下=次ターン以降の generator が feedback_structured 経由で対応可能な範囲。"
+}

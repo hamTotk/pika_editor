@@ -1,0 +1,21 @@
+{
+  "reviewer": "performance",
+  "sprint_id": 1,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "IPC 転送方式",
+      "message": "save_file は編集バッファ全量を String として text invoke で渡している（serde の JSON エンコード+デコードを往復で経由）。design doc 3章 の IPC 予算では保存は Channel API（バイナリ）を想定。ただし本スプリント criteria（commands.rs の doc コメントと acceptance must）が『最薄ループでは text invoke で暫定配線し、IPC コスト実測（系統C・15章-1）で転送方式を確定する』と明示しており、転送方式の構造的確定（custom protocol/Channel の置き場所）は docs/acceptance-findings.md T-001 に記録済み。要件2.1（更新300ms/初回2.0秒）を構造的に外す経路ではなく、計測は実機（系統C）に正しく送られている。critical/high ではない。sprint4/6 で本配線する際、巨大ファイルの全量 String 化（read_file も同様に read_to_string で全量メモリロード）が要件2.2 第1段階 10MB を text invoke で扱えるかを T-001 実測で必ず確認すること。",
+      "location": "src-tauri/src/commands.rs:47-58, src/ipc.ts:18-25"
+    },
+    {
+      "severity": "low",
+      "area": "フロント再描画",
+      "message": "renderTree / renderTabs が毎回 replaceChildren で全 DOM を破棄・再生成し、各ノードに addEventListener を張り直す差分なし全置換パターン。本スプリントは単一ディレクトリ直下の少数エントリ＋GUI ペース操作のためホットパスでなく実害なし（指摘は将来向けの注記）。ただしツリーは要件4章で多数ファイル・伝播マーク更新・部分更新（未読バッジのみ差し替え）が来るため、sprint2/7 でツリーを肉付けする際は全置換ではなく差分更新（再描画範囲の局所化）へ移行しないと、外部変更反映ごとに全ツリー再構築するとフレーム単位の再レンダリングコストが効いてくる。今スプリントでは過剰最適化を避け現状維持が正しい。",
+      "location": "src/ui/tree.ts:9-30, src/ui/tabs.ts:12-28"
+    }
+  ],
+  "has_critical": false,
+  "summary": "performance 観点で critical はゼロ。sprint 1 は scaffold＋最薄ループ（フォルダ列挙/単一ファイル read/save）で、扱うデータ規模は単一ディレクトリ直下＋一度に1ファイル、いずれも GUI ペースの一度きり経路。pika-core の純粋ロジック（parse_goto_spec=境界ループ最大2回でO(n)、resolve_data_root=O(1)、open_workspace=単一 read_dir）に N+1・O(n²)・全件メモリ問題は無い。性能クリティカルな唯一の sprint1 must である IPC コスト実測（design doc 15章-1／要件2.1）は、転送方式の構造的予算決定（プレビュー=custom protocol 直配信・保存=Channel・小データのみ invoke）を design doc 3章 と docs/acceptance-findings.md T-001 に記録済みで、実測自体は実機が要るため正しく系統C へ送られている。よって要件2.1 のレイテンシ目標を構造的に満たせない実装は存在せず critical 0。残り2件は将来スプリント（4/6 の Channel 本配線時の巨大ファイル text invoke 確認、2/7 のツリー差分更新移行）への low 注記で、本スプリントでの過剰最適化はむしろ避けるべき。"
+}

@@ -1,0 +1,31 @@
+[workspace]
+# pika Tauri フル刷新の cargo workspace（design doc 13章のリポジトリ構成）。
+# - crates/pika-core : UI 非依存コア（Tauri/wry を一切知らない。cargo test の決定論ゲート対象）
+# - crates/pika-cli  : console subsystem の薄い CLI（--help/--version/引数検証/終了コード）
+# - src-tauri        : Tauri アプリ本体（pika-core に依存する唯一の橋渡し層）
+members = ["crates/pika-core", "crates/pika-cli", "src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96"
+license = "MIT"
+authors = ["pika"]
+
+[workspace.lints.rust]
+# design doc 12章「警告をエラー扱い」。コンパイル/型ゲートを最低保証にする。
+warnings = "deny"
+
+[workspace.dependencies]
+# コア層が使う Tauri 非依存クレート（バージョンは workspace で一元管理）。
+# 本スプリントでは最小限のみ宣言し、各機能スプリントで追加する。
+thiserror = "1"
+
+[profile.release]
+# 軽量配布（design doc 1章「軽い」）。LTO とサイズ最適化でバイナリを絞る。
+lto = true
+opt-level = "z"
+codegen-units = 1
+strip = true
+panic = "abort"
