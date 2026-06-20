@@ -1,0 +1,39 @@
+[package]
+name = "pika-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "pika Tauri アプリ本体（GUI・windows subsystem）。pika-core に依存する唯一の橋渡し層"
+
+[lints]
+workspace = true
+
+[[bin]]
+# windows subsystem の GUI 本体。console 側は crates/pika-cli。
+name = "pika"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# コアロジックは pika-core に集約（Tauri 層は薄い境界）。
+pika-core = { path = "../crates/pika-core" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+# WebView2 Runtime 不在検出（レジストリ読取）と最小ネイティブ MessageBox（design doc 18章）に使う。
+# proc-macro 不要の軽量 FFI バインディング。Tauri も同系列を使うため追加コストは小さい。
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Registry",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[features]
+# Tauri の custom-protocol（本番ビルドでアセットを埋め込む）。bundler 有効化は sprint 7。
+custom-protocol = ["tauri/custom-protocol"]

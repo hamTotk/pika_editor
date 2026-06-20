@@ -1,4 +1,16 @@
-# === ビルド出力 ===
+# === Rust / cargo（Tauri フル刷新）===
+target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# === Node / Vite（フロントエンド）===
+node_modules/
+dist/
+
+# === Tauri 生成物 ===
+src-tauri/gen/
+
+# === 旧 C++ ビルド出力（退避ブランチ wip/cpp-core-snapshot に保全）===
 build/
 out/
 cmake-build-*/
@@ -14,7 +26,7 @@ CMakeUserPresets.json
 *.ilk
 *.exp
 
-# === vcpkg（manifest モード）===
+# === vcpkg（旧 manifest モード・退避ブランチに保全）===
 vcpkg_installed/
 vcpkg/
 

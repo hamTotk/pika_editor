@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ja" data-theme="system">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pika</title>
+    <link rel="stylesheet" href="./styles/tokens.css" />
+    <link rel="stylesheet" href="./styles/app.css" />
+  </head>
+  <body>
+    <!-- アプリシェル。中心体験① の最薄ループ（フォルダを開く→ツリー→タブ→編集→保存）を貫通させる骨格。
+         ARIA は design doc 17章で全Web再構築する（本スプリントは role の土台のみ）。 -->
+    <div id="app">
+      <header id="toolbar">
+        <input
+          id="folder-path"
+          type="text"
+          placeholder="フォルダのパスを入力（例 C:\\work\\notes）"
+          aria-label="開くフォルダのパス"
+        />
+        <button id="open-folder" type="button">フォルダを開く</button>
+        <button id="save-file" type="button" disabled>保存</button>
+      </header>
+      <div id="workbench">
+        <nav id="tree-pane" aria-label="ファイルツリー">
+          <ul id="tree" role="tree" aria-label="ファイルツリー"></ul>
+        </nav>
+        <main id="editor-pane">
+          <div id="tabs" role="tablist" aria-label="開いているタブ"></div>
+          <div id="editor-host" aria-label="エディタ"></div>
+        </main>
+      </div>
+      <!-- 通知バー（非モーダル・role=status は a11y スプリントで付与）。 -->
+      <div id="notifications" role="status" aria-live="polite"></div>
+      <!-- ステータスは右下固定・表示専用（ui-design §9）。pointer-events:none は CSS 側。 -->
+      <div id="status" aria-live="off"></div>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
