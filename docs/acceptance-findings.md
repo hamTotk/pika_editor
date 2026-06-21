@@ -1238,3 +1238,21 @@
   デッドな postMessage 受信経路（`parsePreviewFailureMessage`＋main.ts message listener）は削除。`@media (forced-colors)`
   最小対応も追加。**実機未トリガ**（崩れた Mermaid/KaTeX フィクスチャが無く workspace 書込禁止）＝CSS＋cargo test で担保。
 - **状態**: Stage ③ 完了（4ゲート緑＝pika-core 338/pika-app 11・実機でテーマ一致＋左右並置を確認）。
+
+## T-016 プレビュー仕上げ Stage ④（通知バー可視化・外部リソース opt-in／系統C）
+
+- **通知バーのプレビュー手前表示（要件6.3/11.1）**: ネイティブ子WebView（プレビュー）はメインWebView の HTML より
+  物理的に上に描画されるため、`#notifications`（旧 `position:absolute; bottom:28px`＝プレビュー矩形内）が**プレビュー
+  表示中に完全に隠れていた**（z-index 不可）。修正＝`#editor-pane` を grid `auto 1fr auto` にし通知を最下段バンド
+  （`#preview-host` の外）へ flow 配置。通知出現で content(1fr) が縮み `ResizeObserver`＋`syncPreviewBounds()` で
+  子WebView が新矩形へ追従＝バンドは子WebView の外でトーストが見える。空時は 0 高さで従来不変。
+  **実機**: withscript.html プレビュー中に「JS を使うHTMLのため表示が崩れる可能性があります」がプレビュー手前（下バンド）に表示。
+- **外部リソース既定遮断＋opt-in（要件6.2/6.3/2.4・B10）**: `scan_hazards`/`collect_external_hosts` で外部 https
+  ホストを収集し `HtmlHazards.external_hosts` に同梱。`has_external_ref` 時は「許可して再読込」アクション付き通知
+  （`notices.push("external-resource",…)`）を出し、押下で当該タブの `allowExternal = external_hosts` を渡して再描画
+  （CSP img/font-src に https のみ反映・`validate_allow_hosts` で fail-closed）。許可はタブ単位・**切替で既定オフへ
+  リセット**（`activateTab` で undefined 化・永続なし）。
+  **実機**: external-res.md は既定で W3C 外部画像ブロック＋通知→「許可して再読込」で表示→別タブ往復で再び遮断＋通知再表示。
+- **暴走ガード**: 巨大画像/SVG は `pika-core::render::guard`＋`preview.rs::guard_local_resource` で実装済み・cargo test 済み。
+  巨大フィクスチャは workspace 書込禁止のため実機トリガせず（cargo test で担保）。
+- **状態**: Stage ④ 完了（4ゲート緑＝pika-core 338/pika-app 16・実機で通知可視化＋外部 opt-in＋リセットを確認）。

@@ -130,6 +130,12 @@ export interface HtmlHazards {
   has_external_ref: boolean;
   /** `<meta http-equiv="refresh">` を含む（除去済みだが通知）。 */
   has_meta_refresh: boolean;
+  /**
+   * 収集した外部参照ホスト（`https://<host>`・重複排除・http は対象外・要件6.2）。
+   * 「許可して再読込」が allow_external としてそのまま preparePreview へ返す候補。
+   * 最終検証は backend(CSP 組立)が https のみ受理して行う（不正は fail-closed で全破棄）。
+   */
+  external_hosts: string[];
 }
 
 /**

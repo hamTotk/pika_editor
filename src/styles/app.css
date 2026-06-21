@@ -123,7 +123,11 @@ body {
 
 #editor-pane {
   display: grid;
-  grid-template-rows: auto 1fr;
+  /* tabs(auto) / content=editor|diff|preview(1fr) / 通知バンド(auto)。
+     通知バンドはエディタ領域の最下段に置き、プレビュー子WebView（#preview-host=1fr）が覆わない
+     領域に通知を出す（プレビュー表示中でもトーストが手前に見える＝要件6.3・11.1）。
+     通知が無いときバンドは 0 高さで、#preview-host は従来どおりフル高さ（不変）。 */
+  grid-template-rows: auto 1fr auto;
   min-height: 0;
   background: var(--bg-raised);
 }
@@ -348,16 +352,26 @@ body {
   font-family: var(--font-ui);
 }
 
-/* 通知バー（非モーダル・最大3本＋他N件はキュー実装で sprint 7）。 */
+/* 通知バー（非モーダル・最大3本＋他N件・要件11.1）。
+   #editor-pane の最下段バンド（grid-row:3・全カラム）に flow 配置する。プレビュー子WebView は
+   #preview-host（grid-row:2）に重なるため、通知を従来の position:absolute でコンテンツ下部中央に
+   出すと子WebView の矩形内に隠れて見えない（ネイティブ重畳で z-index 不可）。バンドへ移すことで
+   通知領域は #preview-host の外になり、プレビュー表示中でも必ず手前に見える（要件6.3）。
+   通知が無いときは中身が空＝バンドは 0 高さ（プレビューはフル高さのまま・不変）。 */
 #notifications {
-  position: absolute;
-  left: 50%;
-  bottom: 28px;
-  transform: translateX(-50%);
+  grid-row: 3;
+  grid-column: 1 / -1;
   display: flex;
   flex-direction: column;
+  align-items: center; /* 中央寄せは維持（従来の見た目）。 */
   gap: 4px;
+  /* 通知が出ているときだけ上に余白を持たせる（空のときは margin が効かず 0 高さを保つ）。 */
   pointer-events: none;
+}
+
+/* 通知が 1 本でもあるときだけバンドに内側余白を付ける（:empty なら付かない＝0 高さ維持）。 */
+#notifications:not(:empty) {
+  padding: 4px 8px;
 }
 
 #notifications .notice {
