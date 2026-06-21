@@ -21,3 +21,9 @@ unicode-segmentation = { workspace = true }
 twox-hash = { workspace = true }
 # snapshot: object の zstd 圧縮（design doc 11章・要件9.1）。
 zstd = { workspace = true }
+# render: Markdown→HTML（comrak unsafe_=true で raw HTML 透過）→ ammonia 最終段サニタイズ（design doc 6章/7章）。
+# 未信頼文書の <script>/on*/javascript:/<iframe> 除去・DOM clobbering 防止・SVG サブセットは ammonia が担う。
+comrak = { workspace = true }
+ammonia = { workspace = true }
+# render: CSP の script-src 'nonce-<rnd>' 用の暗号品質乱数（design doc 6章）。
+getrandom = { workspace = true }

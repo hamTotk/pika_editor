@@ -1,0 +1,33 @@
+{
+  "reviewer": "security",
+  "sprint_id": 4,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "入力検証 / CSP ヘッダインジェクション",
+      "message": "オプトイン外部許可ホスト allow_external が無検証で CSP ヘッダ文字列へ直結している。frontend invoke → prepare_preview(allow_external) → ExternalResourceAllow.hosts → build_csp の img_font.push_str(host) でそのまま連結される(csp.rs:71)。build_csp と ExternalResourceAllow は『ホスト文字列は呼び出し側で検証済み前提』とコメントするが、唯一の呼び出し側 prepare_preview に検証が一切ない。host に \"x; script-src 'unsafe-inline'\" の様な値を入れると script-src を追記でき、nonce 限定スクリプトポリシーを破ってプレビュー別WebView(最重要XSS面)で文書JSが実行されうる(CSP directive injection)。critical でなく high とした理由: (1)入力源は外部攻撃者でなくアプリ自身のオプトイン設定でユーザー自身が与える値、(2)現状 frontend は buildPreview を allowExternal 無しで呼ぶためこの経路は実コードで未到達(hosts は常に空)、(3)単一ユーザーのローカルツール。ただしオプトイン UI を結線する前に必ず塞ぐべき契約欠陥。修正方向: prepare_preview か pika-core 側に host 検証(scheme=https のみ・[A-Za-z0-9.:-] のホスト名/ポートのみ許可・空白/;/'/改行を含むものは拒否)を allowlist 方式で挟み、cargo test で観測可能にする(『呼び出し側で検証済み前提』を実装で担保する)。",
+      "location": "src-tauri/src/preview.rs:108 / crates/pika-core/src/render/csp.rs:71"
+    },
+    {
+      "severity": "medium",
+      "area": "CSP 多層防御 / style-src",
+      "message": "系統A/B いずれの CSP も style-src に 'unsafe-inline' を付与している(csp.rs:79-82)。コメントは『CSS 表現の必要上許容・script には付けない』と妥当な判断を述べており、script-src は nonce 限定/none を死守できているため XSS リスクは低い。ただし 'unsafe-inline' な CSS は CSS injection 経由の限定的情報漏えい(属性セレクタ + background-image での値抽出等)の余地を残す。現実装は connect-src 'none'・img-src 既定 pika-preview: のみ(外部遮断)のため exfil 経路はほぼ塞がれており実害は薄い。多層防御の観点として: 系統A は同梱 CSS に nonce を既に付与する設計なので、可能なら style-src からも 'unsafe-inline' を外し nonce のみに寄せられないか sprint 7(a11y/forced-colors で style を増やす段)で再評価する余地を記録。spec criteria は style-src を制約していないため必須修正ではない。",
+      "location": "crates/pika-core/src/render/csp.rs:79"
+    },
+    {
+      "severity": "low",
+      "area": "機密情報 / エラー情報漏えい",
+      "message": "scan_html_hazards は素朴な部分文字列一致(to_ascii_lowercase + contains)で has_script/has_external_ref/has_meta_refresh を判定する(preview.rs:300)。これは通知バー文言の根拠(UX 補助)であって防御層ではなく、実際のサニタイズ/CSP は ammonia と CSP ヘッダが担うため、誤検知/見逃しがあってもセキュリティ境界は破れない(多層の最終段が独立して効く)。位置づけは正しい。念のための指摘として、この検知結果に依存して防御判断を将来足さないこと(検知=防御に昇格させない)を設計コメントに残すと安全。現状は実害なし。",
+      "location": "src-tauri/src/preview.rs:300"
+    },
+    {
+      "severity": "low",
+      "area": "情報漏えい / エラーレスポンス",
+      "message": "custom protocol のエラー応答は本文を空にし detail を捨てており(error_response: 本文 Vec::new・CSP default-src 'none')、内部パス/理由をクライアント(未信頼別WebView)へ漏らさない設計で良好。local_resource_response も canonicalize 失敗/読み取り失敗を 404、拒否を 403 に畳んで詳細を出さない。確認のみ(問題なし)。1点、Content-Type の guess_content_type は拡張子ベースだが X-Content-Type-Options: nosniff を全応答に付けており MIME 取り違えによる実行は防げている。指摘ではなく良好点の記録。",
+      "location": "src-tauri/src/preview.rs:285"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 4(プレビュー=全Web化の最重要セキュリティ境界)は多層防御が堅実に実装されており critical なし。comrak(unsafe_)→ammonia 最終段サニタイズ(script/on*/javascript:/scriptable data:/iframe/object/embed/base/meta/id/name/SVG script・foreignObject・xlink:href javascript: を明示 allowlist で除去、決定論テスト済み)、CSP をレスポンスヘッダで強制(文書内 meta 非依存)、CSPRNG nonce(毎回異なる・base64url)、script-src は系統A=nonce限定/系統B=none で 'unsafe-inline' を付けない、ローカル参照の封じ込め(percent-decode 後に絶対/../UNC/ドライブ/機密を拒否 → join → canonicalize → prefix 検証でシンボリックリンク脱出を弾き、解決後実体名でも機密再判定)まで一貫している。権限ゼロ別WebView(capabilities/main.json は windows=[main] のみ・preview ラベル未宣言)による invoke/__TAURI_INTERNALS__ 到達不能の実機実証は系統C(Windows実機 Release)へ正しく委譲され acceptance-findings T-007 に記録済み。信頼 JS 注入(buildTrustedJsInit)も Mermaid securityLevel:strict・KaTeX trust:false/strict:true/maxExpand、注入文字列へ未信頼内容を連結せず nonce のみ補間(sanitize 済み)で安全。唯一の要修正は high 1件: オプトイン外部許可ホスト allow_external が無検証で CSP ヘッダへ直結する契約欠陥(CSP directive injection の余地)。現状 frontend が allowExternal を渡さず実経路未到達かつ入力源がユーザー自身のオプトインのため critical ではないが、オプトイン UI 結線前に host の allowlist 検証(scheme/文字種/空白・;・改行拒否)を pika-core に追加し cargo test で固めるべき。残りは多層防御強化(style-src の unsafe-inline 見直し)と良好点の記録。"
+}

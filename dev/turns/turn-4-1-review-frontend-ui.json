@@ -1,0 +1,51 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 4,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "状態網羅/エラーフィードバック",
+      "message": "信頼JS(Mermaid/KaTeX/highlight)の失敗件数通知が片側配線。buildTrustedJsInit は別WebView から window.parent.postMessage({type:'pika-preview-failures', count}) を送る実装だが(src/preview/index.ts:138)、メインWebView 側に message リスナ(addEventListener('message', ...))が存在せず notify() へ繋がっていない。must『各ブロック失敗件数を通知バーで知らせる』(sprint4 must 5番目)が受信側欠落で実現していない。grep で frontend に message ハンドラ無しを確認(src/main.ts/ipc.ts/preview.ts いずれにも無し)。プレビュー実描画は系統C だが、通知バーへの集計表示はフロント側で完結すべき配線で、現状ユーザーは図/数式描画の失敗をまったく認知できない。",
+      "location": "src/preview/index.ts:138, src/main.ts (message リスナ欠落)"
+    },
+    {
+      "severity": "high",
+      "area": "二重送信防止",
+      "message": "非同期操作中のボタン無効化が無く二重送信し得る。confirm-file/confirm-all/rollback/save/toggle-preview は click から async 処理だが、in-flight 中にボタンを再度押せる(disabled 化は active 有無のみで処理中の抑止なし=src/main.ts refreshTabs)。特に onConfirmAll/onRollback は退避・ベースライン更新を伴う重い操作で、連打で confirm_all/rollback_file が並行発火し得る。プレビューは PreviewSerializer の世代カウンタで stale 結果を破棄するため表示残留は防げるが、確認系/巻き戻し系には同等のガードが無い。チェックリスト『非同期操作中の二重送信防止』に該当。",
+      "location": "src/main.ts:68-76 (refreshTabs), src/main.ts:246-327 (onConfirm/onConfirmAll/onRollback)"
+    },
+    {
+      "severity": "medium",
+      "area": "状態網羅(loading/empty/error)",
+      "message": "プレビューペイン(#preview-host)に loading/empty/error の可視状態が無い。renderActivePreview は成功時 data-preview-url/data-preview-flavor を属性に置くだけ・失敗時は notify のみで、ペイン自体は常に空(src/main.ts:215-243)。準備中インジケータも『プレビューできません』表示も無い。実描画は別WebView(系統C)に委ねる設計コメントはあるが、メインWebView 側の占有領域はユーザーに何の手がかりも出さないため、切替直後の無表示が『壊れている』ように見え得る。",
+      "location": "src/main.ts:215-243, src/styles/app.css (#preview-host 定義なし)"
+    },
+    {
+      "severity": "medium",
+      "area": "ビジュアル一貫性/レイアウト",
+      "message": "#preview-host に CSS が一切無く、hidden 解除後の寸法・グリッド配置が未定義。#editor-host/#diff-host は grid-row:2 と min-height:0 を持つが(app.css:125-143)、#preview-host は同等の占有スタイルが無い(grep で preview 関連 CSS 0 件)。applyOccupancy で hidden=false にしても、グリッドセル占有・高さが定まらずレイアウトが安定しない懸念。差分面と同じセル占有規則(grid-row:2)へ揃えるべき。",
+      "location": "src/styles/app.css:125-143 (preview-host 欠落), src/main.ts:206-212 (applyOccupancy)"
+    },
+    {
+      "severity": "medium",
+      "area": "状態の可視化(色非依存)",
+      "message": "Mermaid/KaTeX 失敗ブロックのエラーマーク(markError が付与する .pika-block-error クラス)に対応するスタイル定義が確認できない。app.css にも frontend のどこにも .pika-block-error/.pika-mermaid のスタイルが無い(grep で src/preview/index.ts のみヒット)。これらは別WebView 側で描画され、その WebView の CSS は custom protocol 経由で backend(render/*.rs/preview.rs)が配信するため frontend からは検証不能だが、もし配信 CSS にこのクラスが無ければ失敗ブロックが視覚的に弁別されず、色非依存どころか『何も変わらない』。backend 配信 CSS に .pika-block-error の弁別スタイル(色＋記号/枠)が含まれるかの確認が必要。",
+      "location": "src/preview/index.ts:188-191 (markError), 配信 CSS は backend(検証範囲外)"
+    },
+    {
+      "severity": "low",
+      "area": "a11y(キーボード操作)",
+      "message": "プレビュー表示トグルにキーボードショートカットが無い(差分は Ctrl+バックスラッシュ、ソース復帰は Ctrl+E があるがプレビューは button クリックのみ=src/main.ts:382-409 の keydown)。toggle-preview ボタン自体はフォーカス可能で Enter/Space で発火するためキーボード到達不能ではない(critical ではない)。ui-design のショートカット表(Ctrl+Enter 系)整備は sprint7 must だが、プレビュー切替の代替割当の有無を sprint7 で確認されたい。",
+      "location": "src/main.ts:382-409"
+    },
+    {
+      "severity": "low",
+      "area": "a11y(セマンティクス)",
+      "message": "#preview-host は aria-label=\"プレビュー\" を持つが role 未指定(src/index.html:43)。中身が別WebView/子ウィンドウのプレースホルダのため影響は小さいが、占有時に role=document 等を付けると差分面(diff renderer は role=document/aria-readonly を付与=src/diff/index.ts:40-42)と整合する。",
+      "location": "src/index.html:43"
+    }
+  ],
+  "has_critical": false,
+  "summary": "プレビュー切替・3モード×差分トグル直交・系統A/B 直列化(PreviewSerializer)・信頼JS 危険オプション封じ(securityLevel:strict/trust:false/strict:true/maxExpand)の組立は実装され、差分レンダラの色非依存・aria 化は良好。主要操作(プレビュートグル・確認系ボタン)はキーボード到達可能で critical な操作不能/不可視・致命的 a11y 違反は無し(d_review ブロックなし)。ただし frontend-ui の欠陥が複数: (1)信頼JS 失敗件数の通知が postMessage 送信のみで受信リスナ欠落=must『失敗件数を通知バーで知らせる』未達(high)、(2)確認/巻き戻し/保存の非同期中ボタン無効化が無く二重送信し得る(high)、(3)プレビューペインの loading/empty/error 状態と CSS 占有スタイルが未整備で切替直後が無表示(medium×2)、(4)失敗ブロックの .pika-block-error 弁別スタイルが frontend に無く backend 配信 CSS 依存(要確認・medium)。実描画は系統C だが上記(1)(2)はフロント側で完結すべき配線/ガードの欠落。"
+}

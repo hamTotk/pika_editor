@@ -1,0 +1,33 @@
+{
+  "reviewer": "performance",
+  "sprint_id": 4,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "暴走ガード未結線（デコード爆発で固まる）",
+      "message": "暴走ガード(check_image_pixels/check_svg)は guard.rs に純粋関数＋cargo test として存在するが、実配信経路 preview.rs::local_resource_response は std::fs::read で画像/SVG をそのまま別WebView へ返しており、配信前にピクセル数/要素数ガードを一切呼んでいない（grep でも preview.rs に check_image_pixels/check_svg/GuardDecision の参照ゼロ）。結果、6000万px超の画像や5万要素超の SVG が無防備に WebView へ流れデコード爆発→UI が 200ms 超ブロックしうる（設計原則『固まらない』違反・要件2.2『超過は配信せず通知バー誘導／WebView 任せにしない』の実効が serve 経路で成立していない）。must の検証句『cargo test で観測できる』は純粋関数で満たされ、配信時実効は系統C なので critical ではなく high。次ターンで document/local 配信前にヘッダ寸法・SVG 要素数を計測し GuardDecision::Block 時は 413/通知導線へ落とす結線が要る。",
+      "location": "src-tauri/src/preview.rs:220-259 (local_resource_response)・crates/pika-core/src/render/guard.rs:54-86"
+    },
+    {
+      "severity": "medium",
+      "area": "HTML プレビューで content を IPC 二重転送＋全文 lowercase コピー",
+      "message": "系統B(HTML)プレビューは renderActivePreview で detectHtmlHazards(scanHtmlHazards) と buildPreview(prepare_preview) を別々に invoke しており、同じ content（文書全文）を IPC 境界で 2 回転送する（src/main.ts:223-232・ipc.ts scanHtmlHazards/preparePreview）。spec は IPC ラウンドトリップを性能予算に計上しており（spec 行34/87/91）、大きめ HTML では二重転送が初回プレビュー2.0秒予算を圧迫する。さらに scan_html_hazards は content.to_ascii_lowercase() で全文コピーを 1 回確保してから 5 回 contains する（preview.rs:301-306）。手動トグル経路で頻度は低いため medium。hazards 走査は prepare_preview の戻りに同梱して 1 invoke に畳むか、prepare 段で既に持っている content を再利用すれば二重転送・二重走査とも解消できる。",
+      "location": "src/main.ts:222-232・src/preview/index.ts:100-111・src-tauri/src/preview.rs:299-307"
+    },
+    {
+      "severity": "low",
+      "area": "配信ごとの本体フルコピー",
+      "message": "document_response は /doc/<gen> 要求のたび doc.response.body.clone().into_bytes() で本体を丸ごとコピーする（preview.rs:212）。custom protocol が tauri::http::Response<Vec<u8>> の所有権を要求するため避けにくく、かつ 1 ナビゲートにつき 1 回（per-keystroke ではない）なので実害は小さい。指摘は記録のみで、現段階での最適化は YAGNI。Arc<[u8]> 化等はライブ編集プレビュー(将来の A5)で更新頻度が上がった時に再評価で十分。",
+      "location": "src-tauri/src/preview.rs:203-214"
+    },
+    {
+      "severity": "low",
+      "area": "markdown→ammonia フル再変換（現状は許容・将来の注意点）",
+      "message": "prepare_markdown_preview は毎回 content 全文を comrak→ammonia でフル変換する（差分/インクリメンタルなし）。ただし main.ts ではプレビュー再構築は onTogglePreview の手動トグル時のみで per-keystroke のライブ更新経路は未実装（live 更新は memory 上 A5 として未着手）。したがって現スプリントでは 2.0秒初回/300ms更新 を構造的に破る経路は無く、過剰最適化は YAGNI 違反になるため指摘は据え置き。将来ライブ編集プレビュー(A5)を入れる際はデバウンス＋（可能なら）変更ブロックのみ再サニタイズの検討が必要、という記録。",
+      "location": "crates/pika-core/src/render/mod.rs:49-60・src/main.ts:196-243"
+    }
+  ],
+  "has_critical": false,
+  "summary": "Sprint 4 の構造（権限ゼロ別WebView＋custom protocol 直配信・プレビュー本体を invoke 戻りに乗せない・世代直列化で stale render を破棄）は IPC 予算と『固まらない』原則に概ね沿っており、要件2.1 の初回2.0秒/更新300ms を構造的に破る経路（O(n^2)・N+1・per-keystroke フル再変換）は存在しないため critical=0。最も実害があるのは暴走ガードの『純粋関数は実装・テスト済みだが実配信経路 local_resource_response に未結線』で、巨大画像/SVG のデコード爆発で UI ブロックしうる(high)。次点は HTML プレビューでの content 二重 IPC 転送＋全文 lowercase 走査(medium)。本体フルコピーと markdown フル再変換は現頻度では許容で記録のみ(low)。"
+}

@@ -1,0 +1,96 @@
+{
+  "score": 88,
+  "plan_implementation": {
+    "overall": 88,
+    "notes": "must 8件は各 criterion の検証アンカー(cargo test/npm typecheck/系統C記録)では全て充足。多層サニタイズ(comrak unsafe_→ammonia・script/on*/javascript:/scriptable data:/iframe/object/embed/base/meta除去・id/name制限・SVGサブセット)、CSPレスポンスヘッダ強制(系統A nonce限定/系統B none・オプトイン緩和img/fontのみ・既定遮断復帰)、権限ゼロ別WebView+custom protocol直配信(prepare_previewはURLのみ・canonicalize+prefix+解決後機密再判定)、系統A/B直列化(PreviewSerializer/世代カウンタ)、信頼JS危険オプション封じ(Mermaid strict/KaTeX trust:false strict:true maxExpand/highlight・nonceのみ・per-block+1秒timeout+元コード復帰+errorマーク)、暴走ガード(pika-core render段・cargo test済)、capabilities/main.json windows=[main]のみで preview権限ゼロ=系統C(T-007/TE2)へ正記録。テスト改竄(緩和/skip/犠牲的期待値)なし。should 5件のうち直交占有のみ完了、双方向スクロール同期/プレビュー内検索/リンク規則/テーマCSS変数は土台・部分実装で系統Cや後続sprintへ繰延(~0.45)。"
+  },
+  "quality": {
+    "overall": 88,
+    "breakdown": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 83
+    },
+    "dimension_thresholds": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 80
+    }
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[GATE] d_verify=100(cargo test/build/npm typecheck 全 exit 0)・d_accept=100(must 8件は各 criterion の検証アンカーで充足)・d_quality=83・d_review=100(security/performance/data/frontend-ui/ux 5観点とも has_critical=false)。全足切りはクリアだが score=88<90 のため passed=false=修正ターンへ。複数観点が収束した high 欠陥が score を押し下げている。[HIGH] (1)暴走ガード未結線: guard は cargo test 済だが preview.rs::local_resource_response が guard を一切呼ばず巨大画像/SVG をそのまま配信(performance+ux 収束)。(2)CSP ディレクティブインジェクション余地: build_csp が allow.hosts を無検証連結・prepare_preview に host 検証なし(未到達ゆえ high)。(3)信頼JS失敗件数通知が片側配線: postMessage 送信のみで受信リスナ無し=must#5 受信→notify 欠落(別WebViewは window.parent 不達・系統C結線で Tauri event 経路へ・T-007/TE6 追跡)。(4)確認/巻き戻し/保存の非同期中二重送信防止が無い。[MEDIUM] has_meta_refresh 通知握り潰し/preview-host の状態+CSS占有未整備/HTML プレビューの content 二重 invoke 転送/onConfirmAll スキップ時の F5 案内欠落/style-src unsafe-inline の sprint7 再評価/.pika-block-error 配信CSS確認。[LOW] document_response 本体フルコピー(YAGNI)/markdown フル再変換(live未実装で許容)/PreviewService 世代束縛(揮発・404自己回復)/is_sensitive 単一源維持/preview-host role未指定/プレビュートグルのキーボード代替割当(sprint7)/scan_html_hazards は防御でなくUX補助。",
+  "feedback_structured": {
+    "high": [
+      {
+        "area": "暴走ガード未結線(performance+ux 収束・must#6)",
+        "message": "pika-core::render::guard の check_image_pixels/check_svg は cargo test 済だが、実配信経路 src-tauri preview.rs::local_resource_response が std::fs::read で画像/SVG をそのまま別WebView へ返し guard を呼ばない(grep で preview.rs の guard 参照ゼロ=dead code)。criterion 超過は配信せず通知バー誘導(WebView任せにしない) が serve 経路で未実効。6000万px超画像/5万要素超SVG でデコード爆発→UI 200ms超ブロック(設計原則 固まらない 違反)。local/document 配信前にヘッダ寸法・SVG要素数を計測し GuardDecision::Block 時は 413/通知導線へ落とす結線を入れ、可能なら src-tauri 配線テストで観測する。"
+      },
+      {
+        "area": "CSP ディレクティブインジェクション(security・csp.rs:71)",
+        "message": "build_csp がオプトイン外部許可ホスト allow.hosts を無検証で img-src/font-src へ文字列連結し、唯一の呼出 prepare_preview にも host 検証が無い。host に セミコロン+script-src 上書き 相当を入れると script-src を追記でき nonce 限定ポリシーを破る余地(最重要XSS面)。現状 frontend が allowExternal を渡さず未到達・入力源はユーザー自身のオプトインのため critical でなく high。オプトインUI 結線前に pika-core 側へ host allowlist 検証(scheme=https のみ・ホスト名/ポート文字種限定・空白/セミコロン/クォート/改行拒否)を挟み cargo test で 呼出側で検証済み前提 を実装担保する。"
+      },
+      {
+        "area": "信頼JS失敗件数の通知が片側配線(frontend-ui+ux 収束・must#5)",
+        "message": "buildTrustedJsInit は window.parent.postMessage(type=pika-preview-failures) を送る(src/preview/index.ts:138)が、メインWebView 側に message リスナ(addEventListener message)が無く notify() へ繋がらない。criterion 失敗件数を通知バーで知らせる の受信→通知バー集計が欠落。さらに別WebViewは iframe でなく独立WebViewのため window.parent では本体に届かず、系統C結線(別WebView実アタッチ)時に Tauri event/IPC 経路へ置換が必要(T-007/TE6 で追跡済み)。受信導線と経路置換を次ターン or 系統C結線で対応する。"
+      },
+      {
+        "area": "非同期中の二重送信防止欠落(frontend-ui)",
+        "message": "confirm-file/confirm-all/rollback/save の非同期処理中にボタンを再度押せる(disabled は active有無のみで in-flight 抑止なし)。onConfirmAll/onRollback は退避+ベースライン更新を伴う重い操作で、連打で confirm_all/rollback_file が並行発火しデータ操作が重複しうる。プレビュー系は PreviewSerializer 世代で stale 破棄できるが確認/巻き戻し系に同等ガードが無い。処理中フラグ or 即時 disabled で抑止する。"
+      }
+    ],
+    "medium": [
+      {
+        "area": "has_meta_refresh 通知握り潰し(ux・main.ts:222)",
+        "message": "scan_html_hazards が has_meta_refresh を返すのに renderActivePreview は hasScript/hasExternalRef だけ通知し has_meta_refresh を捨てる。meta refresh は ammonia で除去され挙動が変わるのにユーザーへ伝わらない(ipc.ts/preview.rs のコメントは 除去済みだが通知する と明記)。受信側で通知導線を追加する。"
+      },
+      {
+        "area": "プレビューペインの状態網羅+CSS占有未整備(frontend-ui)",
+        "message": "#preview-host に loading/empty/error の可視状態が無く(renderActivePreview は属性設定+失敗時 notify のみ)、app.css に preview 関連 CSS が 0 件で #editor-host/#diff-host の grid-row:2/min-height:0 相当の占有スタイルも無い。hidden 解除後の寸法/グリッド配置が未定義で切替直後が無表示=壊れているように見える。差分面と同じセル占有規則へ揃え 5状態(ui-design15章)の Loading/Error を提示する(系統C結線とセット)。"
+      },
+      {
+        "area": "HTML プレビューの IPC 二重転送+全文lowercase(performance)",
+        "message": "系統B は detectHtmlHazards(scan_html_hazards)と buildPreview(prepare_preview)を別々に invoke し同じ content を IPC で 2 回転送(main.ts:222-232)。scan_html_hazards は to_ascii_lowercase で全文コピーしてから contains×5。hazards 走査を prepare_preview の戻りに同梱し 1 invoke に畳めば二重転送・二重走査とも解消できる(初回2.0秒予算の圧迫回避)。"
+      },
+      {
+        "area": "すべて確認済みスキップ時の次の一手欠落(ux・main.ts:289)",
+        "message": "result.skipped>0 分岐はコメント F5 を案内する とあるが実 notify が無く、最終 notify はサマリだけ。スキップされたファイルは未読のまま残るのに なぜスキップ(処理中変化)+次にどうするか(F5再同期して再確認) が伝わらず行き止まり感。退避は取れデータ喪失は無いが回復導線を出す。"
+      },
+      {
+        "area": "style-src unsafe-inline の見直し余地(security・csp.rs:79)",
+        "message": "系統A/B とも style-src に unsafe-inline。script-src は nonce限定/none を死守でき XSS リスクは低いが CSS injection 経由の限定的情報漏えい余地は残る。系統A は同梱CSS に nonce 付与の設計なので sprint7(forced-colors で style 増)で style-src からも unsafe-inline を外し nonce 寄せできないか再評価(criterion は style-src を制約せず必須でない)。"
+      },
+      {
+        "area": ".pika-block-error 弁別スタイルの配信CSS確認(frontend-ui)",
+        "message": "markError が付与する .pika-block-error/.pika-mermaid のスタイルが frontend に無く、別WebView の CSS は backend(render/preview.rs)が配信する。配信 CSS に色非依存(色+記号/枠)の弁別スタイルが含まれるか系統C結線時に確認する。無ければ失敗ブロックが視覚的に弁別されない。"
+      }
+    ],
+    "low": [
+      {
+        "area": "document_response 本体フルコピー(performance)",
+        "message": "/doc/<gen> 要求のたび body.clone().into_bytes() で本体丸ごとコピー。custom protocol が所有権を要求し 1 ナビゲートにつき 1 回なので実害小・現段階の最適化は YAGNI。将来ライブ編集プレビュー(A5)で更新頻度が上がった時 Arc 化等を再評価。"
+      },
+      {
+        "area": "markdown フル再変換(performance)",
+        "message": "prepare_markdown_preview は毎回 content 全文を comrak→ammonia でフル変換。プレビュー再構築は手動トグル時のみで per-keystroke ライブ更新は未実装(A5)。現スプリントで 2.0秒/300ms を構造的に破る経路は無く据え置き。A5 導入時にデバウンス+変更ブロックのみ再サニタイズを検討。"
+      },
+      {
+        "area": "PreviewService 世代束縛(data)",
+        "message": "documents.clear() で直近1世代のみ保持。タブ/モード高速切替で世代が進むと前世代画像フェッチ中に 404 になりうるが、揮発 in-memory で 404 はプレースホルダへ自己回復しデータ破損ではない(前モード残留防止優先の意図的トレードオフ)。実害が出るなら local リソースを最新世代 base_dir で解決する緩和余地。"
+      },
+      {
+        "area": "is_sensitive 単一源維持(data)",
+        "message": "is_sensitive が snapshot::policy に単一定義され render::path と preview.rs canonicalize 後の実体名再判定の両方から参照=DRY で良好。今後 settings で機密パターン調整可能にする際もこの単一源を保ち二重定義へ分岐させないこと。"
+      },
+      {
+        "area": "#preview-host role未指定+トグル代替割当(frontend-ui)",
+        "message": "#preview-host は aria-label はあるが role 未指定。占有時に role=document を付けると差分面(role=document/aria-readonly)と整合。プレビュートグルはボタンで Enter/Space 到達可だがショートカット代替割当が無い=sprint7 のショートカット表整備で確認。"
+      },
+      {
+        "area": "scan_html_hazards は防御層でなく UX補助(security)",
+        "message": "scan_html_hazards は素朴な部分文字列一致で防御層ではなく(実防御は ammonia+CSP)、検知=防御に昇格させない旨を設計コメントに残すと安全。custom protocol の error_response は本文空+default-src none で内部パス/理由を漏らさず良好(指摘でなく良好点記録)。"
+      }
+    ]
+  },
+  "passed": false,
+  "evaluator_skill": "assign-dev-evaluator"
+}

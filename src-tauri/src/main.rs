@@ -13,6 +13,7 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod commands;
+mod preview;
 mod snapshot;
 mod watcher;
 mod webview2;
@@ -37,6 +38,10 @@ fn main() {
 ///   `invoke`/`__TAURI_INTERNALS__` 経由の任意 command が到達不能になる（design doc 6章/15章-3）。
 fn run() {
     tauri::Builder::default()
+        // プレビュー custom protocol（pika-preview://）= Rust から別WebView へサニタイズ済み HTML を
+        // 直配信する（HTML を JS のメインワールドに通さない＝design doc 6章）。CSP はレスポンスヘッダで強制。
+        // この protocol が読むのは PreviewService（サニタイズ済み素材）のみで、Tauri command には到達しない。
+        .register_uri_scheme_protocol(preview::PREVIEW_SCHEME, preview::handle_preview_request)
         .invoke_handler(tauri::generate_handler![
             commands::open_workspace,
             commands::read_file,
@@ -46,6 +51,8 @@ fn run() {
             snapshot::confirm_file,
             snapshot::confirm_all,
             snapshot::rollback_file,
+            preview::prepare_preview,
+            preview::scan_html_hazards,
         ])
         .setup(|app| {
             // 起動時にメインウィンドウを表示（visible:false で生成し、初期化後に出す）。
@@ -56,6 +63,8 @@ fn run() {
             app.manage(watcher::WatcherService::new(app.handle().clone()));
             // スナップショット/差分/確認済みサービス（ベースライン索引＋内容 object）を登録する。
             app.manage(snapshot::SnapshotService::new());
+            // プレビューサービス（サニタイズ済みレスポンスを世代キーで保持・custom protocol が引く）。
+            app.manage(preview::PreviewService::new());
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
             }

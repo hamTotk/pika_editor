@@ -1,0 +1,21 @@
+{
+  "reviewer": "data",
+  "sprint_id": 4,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "状態整合 (揮発)",
+      "message": "PreviewService の世代ストアは prepare_preview のたびに documents.clear() で直近1世代のみ保持する設計 (preview.rs:133-137)。/local/<gen>/ のローカル参照配信 (画像/CSS) は同じ世代に紐づくため、タブ/モードを高速切替して世代が進むと、まだ別WebView が前世代の画像をフェッチ中だった場合に NOT_FOUND(404) になりうる。これは永続データではなく揮発 in-memory 状態で、404 はプレースホルダ表示へ自己回復し data 破損ではない (design doc 6章の『前モード残留防止』を優先した意図的なトレードオフ)。data 観点としては『参照解決の世代束縛が doc 本体と local リソースで同一カウンタに依存する』点のみ指摘に留める。実害が出るなら local リソース配信を最新世代の base_dir で解決する等の緩和余地がある。",
+      "location": "src-tauri/src/preview.rs:133"
+    },
+    {
+      "severity": "low",
+      "area": "データ最小化の一貫性 (良好)",
+      "message": "機密ファイル判定 is_sensitive が snapshot::policy に単一定義され、render::path (resolve_local_ref のファイル名判定) と preview.rs の canonicalize 後の実体名再判定 (preview.rs:245) の両方から同じ関数を参照している (DRY・単一の正)。これにより『退避/ベースラインに平文を残さない』データ最小化 (要件9.1) と『custom protocol からも配信拒否』が同一基準で担保され、片方だけ緩む不整合が構造的に起きない。data 観点では欠陥ではなく整合性の強み。注意点として今後 settings で機密パターンを調整可能にする際 (policy.rs:32 コメント) は、この単一源を保ったまま両経路へ反映させること (二重定義に分岐させない) を維持すべき。",
+      "location": "crates/pika-core/src/snapshot/policy.rs:38"
+    }
+  ],
+  "has_critical": false,
+  "summary": "data 観点では critical / high なし。sprint 4 は preview レンダリング+セキュリティ境界 (render モジュール新設+custom protocol 配線) が主体で、永続化スキーマ・マイグレーション・トランザクション境界・インデックスの変更はゼロ。実際の永続層 (snapshot の content-addressed object・ベースライン索引・容量GC=sprint3) は無改変で、lib.rs の差分も render モジュール追加の1行のみ。preview パイプラインは FS に対し読み取り専用 (std::fs::read / canonicalize) で揮発 in-memory 状態 (PreviewService) しか持たず、データ破損・不可逆損失・不整合を招くスキーマ/トランザクション欠陥は無い。data 最小化 (機密の非保持/非配信) は is_sensitive を単一源に snapshot 側と preview 側で一貫しており整合性は良好。残る指摘は揮発状態の世代束縛 (low) と機密判定の単一源維持 (low) の 2 件のみで、いずれも passed をブロックしない。"
+}

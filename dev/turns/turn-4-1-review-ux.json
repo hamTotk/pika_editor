@@ -1,0 +1,45 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 4,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "エラー回復／次の一手",
+      "message": "暴走ガード(guard.rs の check_image_pixels/check_svg/BlockReason)はプレビュー配信経路(prepare_preview)から一切呼ばれておらず、超過時の『配信せず通知バーで〈既定のブラウザ/アプリで開く〉へ誘導』という次の一手がユーザーに届かない。prepare_preview はガード判定なしで常に配信し、巨大SVG/巨大画像参照を含む文書もそのまま別WebViewへ流す設計になっている(src-tauri/src/preview.rs:101 の prepare_preview に GuardDecision 参照なし。grep でも src-tauri 側に guard 呼び出しゼロ)。guard モジュールは cargo test では緑だが、ユーザー導線(UX)としては『なぜ表示されないか＋次にどうするか』の提示が成立していない。acceptance.md TE7 は系統C 未実施扱いだが、これは『別WebView 実アタッチ』ではなく command 層の判定そのものの欠落で、GUI 配線を待たずに prepare_preview 内で決められる。ただしプレビューは読み取り専用の補助ビューで本体タスク(開く→編集→保存→差分→確認)は完了でき、画像/バイナリ単体ビューの I2/I9(寸法プリチェック→既定アプリ誘導)は別経路で実機検証済みのため critical ではなく high。",
+      "location": "src-tauri/src/preview.rs:101"
+    },
+    {
+      "severity": "medium",
+      "area": "フィードバック欠如",
+      "message": "系統B(HTML)プレビューで scanHtmlHazards が has_meta_refresh を返すのに、renderActivePreview は hasScript と hasExternalRef だけを通知し has_meta_refresh を捨てている(src/main.ts:222-231)。<meta refresh> は ammonia で除去される(=元文書と挙動が変わる)のに、ユーザーには『なぜ自動遷移しなくなったか』が一切伝わらない。検知済みのハザード種別のうち1つだけ通知導線が欠けており、フィードバックの一貫性を欠く。ipc.ts/preview.rs のコメントも『除去済みだが通知する』と意図を明記しているのに受け側で握り潰している。",
+      "location": "src/main.ts:222"
+    },
+    {
+      "severity": "medium",
+      "area": "エラー回復／次の一手",
+      "message": "『すべて確認済み』でスキップが発生したとき(result.skipped>0)、次の一手が提示されない。onConfirmAll の skipped>0 分岐はコメント『確定済みだけでも UI を進めるため、差分を取り直す F5 を案内する。』とあるのに実際の notify 呼び出しが無く(src/main.ts:295-298)、最終 notify は『N件確定 / M件スキップ（更新前は一括退避済み）』というサマリだけ。スキップされたファイルは未読のまま残るのに、ユーザーは『なぜスキップされたか(処理中に変化)＋次にどうすればよいか(F5で再同期して再確認)』を知らされず、行き止まり感が出る。Nielsen #9(エラーからの回復支援)の不足。退避は取れておりデータ喪失は無いため medium。",
+      "location": "src/main.ts:289"
+    },
+    {
+      "severity": "medium",
+      "area": "フィードバック欠如",
+      "message": "信頼JS(Mermaid/KaTeX/highlight)のブロック単位失敗件数を別WebViewから window.parent.postMessage({type:'pika-preview-failures'}) で送る生成側(buildTrustedJsInit・src/preview/index.ts:138)は実装済みだが、メインWebView 側に message リスナーが存在しない(grep で addEventListener('message')/onmessage ゼロ)。spec sprint4 must は『失敗件数を通知バーで知らせる』を要求しており、受信→通知バー集計の導線が欠けている。acceptance.md TE6 と findings T-007 は別WebView 実アタッチを系統C へ明示的に繰り延べており、failure受信は別WebView 結線とセットで系統C 扱いとして追跡されているため(導線破綻の隠れた欠落ではない)medium。なお別WebView は iframe でなく独立WebViewのため window.parent では本体に届かない設計上の課題があり、系統C 結線時に Tauri event/IPC 経路への置換が要る点も申し送るべき。",
+      "location": "src/preview/index.ts:138"
+    },
+    {
+      "severity": "low",
+      "area": "操作の一貫性",
+      "message": "『すべて確認済み』ボタンだけ refreshTabs の disable 制御対象から外れており(src/main.ts:68-76 で confirm-all を disabled にしない)、フォルダ未オープン/未読ゼロでも常時クリック可能。押すと『確認すべき未読はありません』が出るためフィードバック自体は成立しているが、他の操作ボタン(保存/プレビュー/差分/確認/巻き戻し)が hasActive で一括 disable される一貫性から外れている。誤操作で害は無いため low。",
+      "location": "src/main.ts:68"
+    },
+    {
+      "severity": "low",
+      "area": "状態の可視化／空状態",
+      "message": "プレビュー領域(preview-host)の空状態・準備中(loading)・失敗時の表示が現状の最薄結線では占有 hidden の切替のみで、別WebView 未アタッチ段階では占有領域が空のまま。renderActivePreview は data-preview-url を属性に置くだけで、ユーザー視点の『プレビュー準備中…』のような中間フィードバックが無い。本スプリントは別WebView 実アタッチを系統C へ繰り延べている設計のため現時点では妥当だが、系統C 結線時に Loading/Error 状態(ui-design 15章の5状態)の提示を忘れないよう申し送る。low。",
+      "location": "src/main.ts:215"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint4(プレビュー)の UX 観点レビュー。critical ゼロ。中心体験(開く→編集→保存→差分→確認済み)は本スプリントの結線で完了でき、破壊的操作(巻き戻し/すべて確認済み)は退避が先行しデータ喪失導線は無い。気になるのはプレビューの『失敗・ブロック時の次の一手』フィードバックの未結線が複数あること: (1)暴走ガードがプレビュー配信経路から呼ばれず超過時の誘導が出ない[high]、(2)has_meta_refresh 検知の通知握り潰し[medium]、(3)すべて確認済みのスキップ時に次の一手(F5再同期)の案内が無い[medium]、(4)信頼JS 失敗件数の受信→通知バー導線欠落[medium]。ただし(1)以外の多くは spec の verify 二系統に沿って別WebView 実アタッチごと系統C(acceptance.md TE6/TE7・findings T-007)へ明示的に繰り延べられており、隠れた導線破綻ではなく追跡済みのギャップ。(1)は GUI 配線を待たず prepare_preview 内で判定でき、ユーザー向け『なぜ表示されないか＋次の一手』の欠落として next-turn で対応推奨。低位は確認済みボタンの disable 一貫性とプレビュー Loading/Error 状態の系統C 申し送り。"
+}

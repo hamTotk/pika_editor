@@ -241,6 +241,23 @@ CLI パース・役割決定の判断は系統A（core/ipc・controller/app_cont
 | TD8 | index 破損からの退避復元 | snapshots の index.json を破損させても、object の自己記述メタから「復元待ちの退避一覧」を提示できる（退避＝最後の砦） | 要件9.1・design doc 11章・最上位原則1（T-006） | [ ] 未実施（要実機・永続化実装後。recover_stashes_from_meta は cargo test 済み。本スプリントは object メモリ保持で結線・永続化は後続） |
 | TD9 | 容量管理 | 退避がファイルごと最新10件 LRU・全体500MB＋90日GC で削除され、未復元かつ14日以内は保護される。共有 object は全参照不在を確認後にのみ物理削除される | 要件9.2/9.3・design doc 11章 | [ ] 未実施（要実機・永続化実装後。plan_gc/evict_lru/is_object_referenced は cargo test 済み） |
 
+## TE. sprint 4 プレビュー（権限ゼロ別WebView・最重要セキュリティ境界・所見は acceptance-findings.md T-007）
+
+> サニタイズ（comrak→ammonia）・CSP 組立・パス封じ込め・暴走ガードの**決定論ロジックは系統A（cargo test）で
+> 検証済み**（pika-core::render・40 件の新規テスト）。本節は実 GUI（Windows 実機 Release）での別WebView 隔離・
+> 系統A/B 実描画・信頼 JS 注入・CSP の実効を確認する。**TE2 は必達（design doc 15章-3）**＝1つでも到達したら設計やり直し。
+
+| # | 項目 | 受け入れ基準 | 根拠（requirements / design doc） | 結果 |
+|---|------|-------------|------|------|
+| TE1 | custom protocol 直配信 | プレビュー HTML が `invoke` で返らず `pika-preview://`（`http://pika-preview.localhost/doc/<gen>`）で別WebView へ直配信される。メインWebView の DOM/JS に HTML 本体が載らない | 要件6.2・design doc 3章/6章（T-007） | [ ] 未実施（要基準機。protocol/コマンド配線は cargo build 成立・prepare_preview は URL のみ返す） |
+| TE2 | 別WebView 権限ゼロ隔離（本番経路・**必達**） | 本番プレビュー別WebView から `invoke`/`__TAURI_INTERNALS__` 経由の任意 command が**到達不能**（capability ファイルが preview ラベルを含まない＝権限ゼロ）。1つでも到達したら設計やり直し | design doc 6章/15章-3（T-007） | [ ] 未実施（Windows 実機 Release で実証。capabilities/main.json は windows=["main"] のみ＝preview は未宣言で権限ゼロ） |
+| TE3 | サニタイズ多層の実効 | `<script>`/`on*`/`javascript:`/scriptable `data:`/`<iframe>`/`<object>`/`<embed>`/`<base>`/`<meta>` を含む AI 出力 Markdown/HTML を開いても実行/描画されない（最終段 ammonia が必ず除去） | 要件6.2・design doc 6章/7章 | [ ] 未実施（要実機。sanitize の除去は cargo test 済み 40 件） |
+| TE4 | CSP レスポンスヘッダ強制 | 系統A=`script-src 'nonce-<rnd>'`・系統B=`script-src 'none'`。文書内 `<meta http-equiv>` 由来 CSP/refresh が無効（ammonia 除去＋ヘッダ強制）。外部リソースは既定遮断・許可は img/font のみ | 要件6.2/6.3・design doc 6章 | [ ] 未実施（要実機。build_csp は cargo test 済み） |
+| TE5 | 系統A/B 切替の直列化 | タブ/モードを素早く切替えても前モードが残留しない（世代カウンタで最新 load のみ採用）。Markdown/差分=JS有効・HTML=JS無効が別WebView 設定で切替わる | 要件6.3・design doc 6章・ui-design 8章 | [ ] 未実施（要実機。PreviewSerializer の世代採用は frontend 実装済み・型成立） |
+| TE6 | 信頼 JS の危険オプション封じ | Mermaid=`securityLevel:'strict'`・KaTeX=`trust:false`/`strict:true`/`maxExpand` 制限・highlight.js 同梱遅延注入。各ブロック個別描画で構文エラー/タイムアウト（約1秒）は元コード表示へ戻しエラーマーク・失敗件数を通知バー | 要件6.2・design doc 6章 | [ ] 未実施（要実機。注入スクリプト生成 buildTrustedJsInit は frontend 実装済み・型成立） |
+| TE7 | 暴走ガード（入力段計測） | 画像6000万px・SVG8000万px/5万要素・HTML10秒を超える入力は配信せず通知バーで「既定のアプリ/ブラウザで開く」へ誘導（WebView 任せにしない） | 要件2.2・design doc 6章/7章 | [ ] 未実施（要実機。check_image_pixels/check_svg は cargo test 済み） |
+| TE8 | パス封じ込め | ローカル相対参照（画像/CSS）が基準ディレクトリ配下に封じ込められ、`../`/絶対パス/シンボリックリンク脱出/機密ファイル（`.env` 等）は配信拒否（壊れた参照はプレースホルダ） | 要件6.2/6.3/9.1・design doc 6章 | [ ] 未実施（要実機。resolve_local_ref/confine_under は cargo test 済み・local_resource_response は canonicalize+prefix 配線済み） |
+
 ## TB. 各スプリント末の性能計測（要件2.1・design doc 12章）
 
 | # | 指標 | 上限 | 結果 |

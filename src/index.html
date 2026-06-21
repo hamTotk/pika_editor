@@ -20,6 +20,8 @@
         />
         <button id="open-folder" type="button">フォルダを開く</button>
         <button id="save-file" type="button" disabled>保存</button>
+        <!-- 表示モード切替（ソース/分割/プレビュー＝要件6.1）。プレビューは権限ゼロ別WebView。 -->
+        <button id="toggle-preview" type="button" disabled aria-pressed="false">プレビュー</button>
         <!-- 差分トグル（Ctrl+\）・確認済み（要件8.2/8.3）。差分面は読み取り専用。 -->
         <button id="toggle-diff" type="button" disabled aria-pressed="false">差分</button>
         <button id="confirm-file" type="button" disabled>確認済みにする</button>
@@ -35,6 +37,10 @@
           <!-- 差分トグル ON 時に表示する read-only unified 差分面（要件8.2）。既定は非表示。 -->
           <div id="editor-host" aria-label="エディタ"></div>
           <div id="diff-host" aria-label="差分" hidden></div>
+          <!-- プレビュー別WebView の占有領域（要件6.1）。実体は権限ゼロの別WebView/子ウィンドウで、
+               ここはその配置先プレースホルダ。HTML 本体は custom protocol が別WebView へ直配信し、
+               メインWebView（このページ）の DOM/JS には一切載らない（design doc 6章）。 -->
+          <div id="preview-host" aria-label="プレビュー" hidden></div>
         </main>
       </div>
       <!-- 通知バー（非モーダル・role=status は a11y スプリントで付与）。 -->
