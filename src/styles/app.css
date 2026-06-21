@@ -89,11 +89,22 @@ body {
   height: var(--row-h);
   display: flex;
   align-items: center;
+  gap: 4px;
   padding: 0 6px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   color: var(--text-1);
   user-select: none;
+}
+
+/* アイコンと状態記号は装飾の対象外（F-028: 取り消し線はファイル名 span のみに限定する）。 */
+#tree [role="treeitem"] .tree-icon {
+  flex: none;
+}
+
+/* 削除済みの取り消し線はファイル名（とその状態記号サフィックス）だけに掛ける（ui-design 5章）。 */
+#tree [role="treeitem"] .tree-name.removed {
+  text-decoration: line-through;
 }
 
 #tree [role="treeitem"]:hover {
@@ -127,6 +138,9 @@ body {
 
 #tabs [role="tab"] {
   font: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 4px 10px;
   border: 1px solid var(--border-1);
   border-bottom: none;
@@ -134,6 +148,11 @@ body {
   background: var(--bg-sunken);
   color: var(--text-2);
   cursor: pointer;
+}
+
+/* 削除済みの取り消し線はタイトル span のみに掛け、未保存印 ● や削除記号 × には掛けない（F-028）。 */
+#tabs [role="tab"] .tab-title.removed {
+  text-decoration: line-through;
 }
 
 #tabs [role="tab"][aria-selected="true"] {

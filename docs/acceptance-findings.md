@@ -1081,3 +1081,54 @@
 - **状態（sprint 7・iteration2）**: cargo test（pika-core 317・pika-cli 11・pika-app 5）PASS・cargo build（警告エラー扱い・
   exit 0）・cargo fmt --check clean・npm typecheck 成立。上記の実 GUI 反映（キーボードのみ中心体験完走・ショートカット発火・
   読み上げ・三択確認）は系統C（TG1/TG2/TG8）で確認する。
+
+---
+
+## Tauri 刷新後 実機検証（系統C・2026-06-21）
+
+> 検証環境（旧 wx 版から更新）: Tauri 版 debug ビルド `target/debug/pika.exe` ＋ Vite 開発サーバ
+> （`npm run dev`・devUrl `http://localhost:5173`）。フィクスチャ `C:\Users\devuser\pika-accept`。
+> 画面取得は Python(ctypes) の `PrintWindow(PW_RENDERFULLCONTENT)`（遮蔽非依存・PowerShell 不使用）。
+> 起動の落とし穴: **debug ビルドは埋め込み dist でなく devUrl を見にいく**（Vite 未起動だと
+> `ERR_CONNECTION_REFUSED`）。出荷資産そのままで見るには release ビルド。
+
+## F-027 保存失敗トーストの文言が二重化（「保存に失敗しました: 保存に失敗: …」）
+
+- **重大度**: 低（軽微・体感。機能は正常で文言のみ冗長）
+- **対応章**: 保存導線（要件5・通知）
+- **現象**: readonly.md（R 属性）への保存失敗時、トーストが
+  `保存に失敗しました: 保存に失敗: アクセスが拒否されました。(os error 5)` と「保存に失敗」が二重で出る。
+- **根本原因**: backend が既に接頭辞付きのエラー文字列を返すのに、frontend がさらに接頭辞を前置する二重ラップ。
+  - `src-tauri/src/commands.rs:94` … `std::fs::write(...).map_err(|e| format!("保存に失敗: {e}"))`
+  - `src-tauri/src/document.rs:244` … `format!("保存に失敗: {e}")`
+  - `src/main.ts:448` … `notify(\`保存に失敗しました: ${String(e)}\`, "error")`
+- **対応**: 接頭辞をどちらか一方に統一する（frontend は素のエラーをそのまま表示する／または backend は素の OS
+  エラーを返し frontend が文脈を付ける、のいずれか）。日本語として自然な 1 文にする。
+- **状態**: 発見（コードで確定・保存失敗時は必ず再現）
+
+## F-028 削除済みファイルの取り消し線がアイコン（📄/📁）も横切る
+
+- **重大度**: 低（軽微・体感。ui-design 5章の状態記号表現の精度）
+- **対応章**: ツリー/タブの状態記号（ui-design 5章・要件7.2/11.5）
+- **現象**: 削除済みタブをツリー/タブに残すとき、取り消し線が**行全体**に掛かり、ファイルタイプアイコンや
+  タブの × 閉じボタンまで横切る。取り消し線はファイル名テキストのみに掛けるのが自然。
+- **根本原因**: アイコンと名前を同一テキストノードに入れ、行要素全体へ line-through を適用している。
+  - `src/ui/tree.ts:48-54` … `li.textContent = \`${icon} ${entry.name}${suffix}\`` とした `<li>` 全体に
+    `li.style.textDecoration = "line-through"`。
+  - `src/ui/tabs.ts:39` … タブボタン全体に line-through（× 閉じボタンも対象）。
+- **対応**: ファイル名（とサフィックス）を専用 `<span>` に分離し、その span にのみ line-through を適用。
+  アイコン/× は装飾対象外にする。aria-label による読み上げ表現（要件11.5）は現状維持。
+- **状態**: 発見（コードで確定・削除済み表示時に必ず再現）
+
+## 非再現として close した所見（2026-06-21 トリアージ）
+
+実機初回キャプチャで観測した以下 2 件は、退避→クリーン起動→state.json 再注入の切り分けで**バグでないと確定**。
+記録のみ残す（再オープン／起動時復元のいずれでも再現せず）。
+
+- **ambiguous.txt の削除済み（取り消し線）表示**: 新規オープン=通常表示／起動時復元=`±`（差分あり＝保存時
+  ハッシュとディスク内容が異なるための**正しい**未読判定）／CLI 再オープン=無印。一度だけ見えた取り消し線は
+  過去セッションの残存/過渡状態。コアの復元3分岐（Missing→Deleted／Changed→Unread／Same→Restore・
+  `pika-core::state::restore_tab`）はロジック上正しい。
+- **起動/復元時の保存失敗トースト**: 起動時復元（`restoreOnStartup` は `saveOnce` を呼ばない）でも CLI 再オープン
+  でも未再現。readonly.md（R 属性）への保存が `os error 5` で失敗するのは**正しい挙動**。残る問題は文言のみで
+  F-027 に集約。
