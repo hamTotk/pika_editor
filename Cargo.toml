@@ -34,6 +34,12 @@ similar = "2"
 unicode-segmentation = "1"
 # スナップショット object の圧縮（design doc 11章・要件9.1「圧縮して保存」）。
 zstd = "0.13"
+# プレビュー: Markdown→HTML（GFM・raw HTML 透過 unsafe_=true）。最終段は必ず ammonia に通す（design doc 6章/7章）。
+comrak = "0.29"
+# プレビュー: 最終段サニタイズ（タグ/属性/URLスキームのホワイトリスト・DOM clobbering 防止・SVG サブセット）。
+ammonia = "4"
+# プレビュー CSP の nonce 生成（暗号品質乱数。script-src 'nonce-<rnd>'・design doc 6章）。
+getrandom = "0.2"
 
 [profile.release]
 # 軽量配布（design doc 1章「軽い」）。LTO とサイズ最適化でバイナリを絞る。

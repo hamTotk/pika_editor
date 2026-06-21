@@ -9,6 +9,7 @@ pub mod cli;
 pub mod data_root;
 pub mod diff;
 pub mod error;
+pub mod render;
 pub mod review;
 pub mod snapshot;
 pub mod watcher;

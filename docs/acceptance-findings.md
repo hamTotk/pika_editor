@@ -767,3 +767,47 @@
     したがって TD8（index 破損復元）・TD9（容量GC）の**実機検証は永続化実装後**。決定論ロジックは cargo test 済み。
 - **状態**: 決定論ゲート（cargo test 92 件）PASS・cargo build／npm typecheck／vite build 成立。
   **基準機での差分実描画・確認済み/巻き戻し実操作・実 FS のベースライン/退避・退避不能ガード実挙動は未実施（要実機）**。
+
+## T-007 プレビュー（権限ゼロ別WebView・最重要セキュリティ境界／sprint 4・系統C）
+
+- **重大度**: 最上位（補助原則「未信頼コンテンツはアプリシェルから物理隔離」＝全Web化の最重要設計。
+  XSS→invoke→実質RCE を構造的に排除する境界。design doc 6章/15章-3）。
+- **対応章**: 要件6.1/6.2/6.3/6.4・2.2（暴走ガード）・9.1（機密配信拒否）・design doc 3章/6章/7章/15章-3。
+  acceptance.md TE1〜TE8。
+- **決定論側（cargo test 済み・40 件・pika-core::render）**:
+  - **sanitize** — `pika-core::render::sanitize`。comrak(`unsafe_=true`)→ammonia 最終段サニタイズ。
+    `<script>`・`on*` 属性・`javascript:`/scriptable `data:` URL・`<iframe>/<object>/<embed>/<base>/<meta>`
+    （`<meta http-equiv refresh/CSP>` 含む）除去・**`id`/`name` 制限（DOM clobbering 防止）**・
+    **SVG サブセット**（`script`/`foreignObject`/`on*`/`xlink:href javascript:` を明示禁止）を観測。
+    系統A=Markdown/差分/SVG・系統B=HTML（インライン CSS 尊重・JS 無効）。**comrak の raw HTML 内 script も
+    最終段で必ず除去**（多層の要）を観測。
+  - **csp** — `pika-core::render::csp`。レスポンスヘッダ用 CSP 組立。系統A=`script-src 'nonce-<rnd>'`／
+    系統B=`script-src 'none'`。`default-src 'none'`・`connect-src 'none'`・`object-src 'none'`・`base-uri 'none'`・
+    `frame-ancestors 'none'`。**オプトイン緩和は img-src/font-src への許可ホスト追加に限定**し
+    script/connect/object は緩めず、**緩和を空にすると既定の外部遮断に戻る**ことを観測。nonce は CSPRNG・毎回異なる。
+    script-src に `'unsafe-inline'` を付けないことを観測。
+  - **path** — `pika-core::render::path`。ローカル相対参照の封じ込め判定（FS 非依存）。`../`/絶対パス/
+    ドライブ指定/UNC/**パーセントエンコード経由の脱出**（`%2e%2e%2f`）・機密ファイル（`.env`/`*.key`/`*.pem`/
+    `*secret*`）・空参照を拒否。canonicalize 済みパスの prefix 検証（`confine_under`）でシンボリックリンク脱出を弾く
+    （実 canonicalize は src-tauri の `local_resource_response` が実行）。
+  - **guard** — `pika-core::render::guard`。暴走ガードを入力段で計測。画像6000万px・SVG8000万px/5万要素を
+    超過でブロック（寸法乗算は saturating でオーバーフロー回避）・HTML10秒タイムアウト値供給・長行ガード（10万字）を観測。
+- **配線（cargo build＋npm typecheck＋vite build 成立）**:
+  - protocol: `register_uri_scheme_protocol("pika-preview", handle_preview_request)`（src-tauri/src/preview.rs）。
+    `/doc/<gen>` がサニタイズ済み HTML を CSP ヘッダ付きで配信・`/local/<gen>/<相対>` が封じ込め検証してローカル
+    参照を配信。**prepare_preview は URL のみ返し HTML 本体を invoke に乗せない**（IPC 予算＋オリジン分離）。
+  - command: `prepare_preview`（系統 A/B 分岐＋ pika-core::render 委譲）・`scan_html_hazards`（要件6.3 危険検知）。
+  - frontend: `src/preview/index.ts`（3モード×差分トグル直交占有・系統A/B 切替の世代直列化 PreviewSerializer・
+    信頼 JS 注入スクリプト生成 buildTrustedJsInit〔Mermaid securityLevel:strict／KaTeX trust:false strict:true
+    maxExpand／per-block 描画＋約1秒タイムアウト＋失敗件数集計〕）。`src/main.ts`（プレビュー切替ボタン・占有適用）。
+  - capability: `capabilities/main.json` は `windows=["main"]` のみ＝**preview ラベルは未宣言で権限ゼロ**（design doc 6章）。
+- **本スプリントの限定（系統C で確認）**:
+  - 別WebView の実生成/ナビゲート（`ready.url` を別WebView src へ設定）と権限ゼロ隔離の実証（TE2・必達）は
+    **Windows 実機 Release**（design doc 15章-3）。本スプリントは protocol/コマンド/サニタイズ/CSP/封じ込めの
+    決定論側と配線まで（HTML は非経由の設計）。frontend は占有領域へ `data-preview-url` を保持し、別WebView の
+    実アタッチは系統C で結線する。
+  - 双方向スクロール同期（should・要件6.1）・プレビュー内検索（should・要件5.4）は注入土台（sourcepos data-line・
+    nonce 注入経路）まで。実描画/実検索は系統C（design doc 15章-7）。
+- **状態**: 決定論ゲート（cargo test 132 件・うち render 40 件＋preview 配線 3 件）PASS・cargo build／
+  npm typecheck／vite build 成立。**別WebView の権限ゼロ到達不能（TE2 必達）・系統A/B 実描画・信頼 JS 注入の
+  実挙動・CSP の実効・暴走ガード実挙動は未実施（要 Windows 実機 Release）**。

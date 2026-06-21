@@ -22,6 +22,14 @@ import { setStatus } from "./ui/status";
 import { UnreadStore } from "./ui/unread";
 import { createEditor, type EditorHandle } from "./editor";
 import { renderDiff, type DiffHandle } from "./diff";
+import {
+  buildPreview,
+  detectHtmlHazards,
+  previewModeForPath,
+  resolveOccupancy,
+  PreviewSerializer,
+  type ViewMode,
+} from "./preview";
 
 interface OpenTab extends TabModel {
   dirty: boolean;
@@ -41,11 +49,17 @@ const state = {
   diffOn: false,
   // 現在描画中の差分ハンドル（F8/Shift+F8 ジャンプ・破棄用）。
   diff: null as DiffHandle | null,
+  // 表示モード（ソース/分割/プレビュー＝要件6.1）。本スプリントはソース⇔プレビューを切替える。
+  viewMode: "source" as ViewMode,
+  // 系統A/B 切替の直列化（最新世代の load のみ採用し前モード残留を防ぐ＝design doc 6章）。
+  previewSerializer: new PreviewSerializer(),
 };
 
 const saveBtn = () => document.getElementById("save-file") as HTMLButtonElement;
 const editorHost = () => document.getElementById("editor-host") as HTMLElement;
 const diffHost = () => document.getElementById("diff-host") as HTMLElement;
+const previewHost = () => document.getElementById("preview-host") as HTMLElement;
+const togglePreviewBtn = () => document.getElementById("toggle-preview") as HTMLButtonElement;
 const toggleDiffBtn = () => document.getElementById("toggle-diff") as HTMLButtonElement;
 const confirmBtn = () => document.getElementById("confirm-file") as HTMLButtonElement;
 const confirmAllBtn = () => document.getElementById("confirm-all") as HTMLButtonElement;
@@ -55,6 +69,7 @@ function refreshTabs(): void {
   renderTabs(state.tabs, state.active, activateTab, state.unread);
   const hasActive = !!state.active;
   saveBtn().disabled = !hasActive;
+  togglePreviewBtn().disabled = !hasActive;
   toggleDiffBtn().disabled = !hasActive;
   confirmBtn().disabled = !hasActive;
   rollbackBtn().disabled = !hasActive;
@@ -153,23 +168,78 @@ async function renderActiveDiff(): Promise<void> {
     const diff = await computeFileDiff(state.active, current);
     state.diff?.destroy();
     state.diff = renderDiff(diffHost(), diff);
-    // エディタを隠し差分面を表示（占有はトグルで直交＝ui-design 8章）。
-    editorHost().hidden = true;
-    diffHost().hidden = false;
+    // 占有はモード×差分トグルの直交で解決する（プレビュー+差分は左右並置＝ui-design 8章）。
+    applyOccupancy();
     setStatus(`差分: 変更 ${diff.change_count} 件`);
   } catch (e) {
     notify(`差分の計算に失敗: ${String(e)}`, "error");
   }
 }
 
-/** 差分面を閉じてエディタへ戻す（Ctrl+E 相当＝差分は読み取り専用なので編集はソースで）。 */
+/** 差分面を閉じてソース/プレビューへ戻す（Ctrl+E 相当＝差分は読み取り専用なので編集はソースで）。 */
 function hideDiff(): void {
   state.diff?.destroy();
   state.diff = null;
-  diffHost().hidden = true;
-  editorHost().hidden = false;
   state.diffOn = false;
   toggleDiffBtn().setAttribute("aria-pressed", "false");
+  // 差分 OFF 後はモードに応じてエディタ/プレビューへ占有を戻す（直交）。
+  applyOccupancy();
+}
+
+/**
+ * プレビュー表示の切替（要件6.1）。ソース ⇔ プレビューを切替える。
+ *
+ * 権限ゼロ別WebView へ custom protocol(pika-preview://)直配信する URL を backend から得て占有を更新する
+ * （HTML 本体はメインWebView を一切経由しない＝design doc 6章）。系統A/B 切替は世代カウンタで直列化し、
+ * 古い prepare_preview 結果が後から来ても破棄して前モード残留を防ぐ。
+ */
+async function onTogglePreview(): Promise<void> {
+  if (!state.active) return;
+  state.viewMode = state.viewMode === "preview" ? "source" : "preview";
+  togglePreviewBtn().setAttribute("aria-pressed", String(state.viewMode === "preview"));
+  applyOccupancy();
+  if (state.viewMode === "preview") {
+    await renderActivePreview();
+  }
+}
+
+/** 3モード×差分トグルの直交占有を DOM へ適用する（要件6.1・ui-design 8章）。 */
+function applyOccupancy(): void {
+  const occ = resolveOccupancy(state.viewMode, state.diffOn);
+  editorHost().hidden = !occ.showEditor;
+  diffHost().hidden = !occ.showDiff;
+  previewHost().hidden = !occ.showPreview;
+}
+
+/** アクティブタブのプレビューを準備し別WebView へ流す URL を得る（要件6・design doc 6章）。 */
+async function renderActivePreview(): Promise<void> {
+  if (!state.active) return;
+  const path = state.active;
+  const content = state.editor ? state.editor.getContent() : await readFile(path);
+  // 占有世代を発番（最新世代の load のみ採用＝前モード残留防止）。
+  const gen = state.previewSerializer.next();
+  try {
+    // 系統B（HTML）は危険検知して通知バー導線を出す（要件6.3）。
+    if (previewModeForPath(path) === "html") {
+      const hz = await detectHtmlHazards(content);
+      if (hz.hasScript) {
+        notify("JS を使うHTMLのため表示が崩れる可能性があります（既定のブラウザで開けます）", "warn");
+      }
+      if (hz.hasExternalRef) {
+        notify("この文書は外部リソースを参照しています（既定で遮断・許可は設定）", "info");
+      }
+    }
+    const ready = await buildPreview(path, content);
+    // 古い世代（素早い切替で後着）なら破棄して前モード残留を防ぐ（design doc 6章 直列化）。
+    if (!state.previewSerializer.isCurrent(gen)) return;
+    // 別WebView の src を ready.url へ設定するのは系統C（GUI 実機）の配線。ここでは占有領域へ
+    // URL を data 属性で保持し、別WebView 生成/ナビゲートは backend 側で行う（HTML は非経由）。
+    previewHost().setAttribute("data-preview-url", ready.url);
+    previewHost().setAttribute("data-preview-flavor", ready.flavor);
+    setStatus(`プレビュー: ${path}`);
+  } catch (e) {
+    notify(`プレビューの準備に失敗: ${String(e)}`, "error");
+  }
 }
 
 /** 「確認済みにする」（要件8.3）。確定直前のディスク再照合は backend(pika-core)が担う。 */
@@ -304,6 +374,7 @@ async function main(): Promise<void> {
   initTheme();
   document.getElementById("open-folder")?.addEventListener("click", () => void onOpenFolder());
   saveBtn().addEventListener("click", () => void onSave());
+  togglePreviewBtn().addEventListener("click", () => void onTogglePreview());
   toggleDiffBtn().addEventListener("click", () => void onToggleDiff());
   confirmBtn().addEventListener("click", () => void onConfirm());
   confirmAllBtn().addEventListener("click", () => void onConfirmAll());
