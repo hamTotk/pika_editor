@@ -1,0 +1,33 @@
+{
+  "reviewer": "data",
+  "sprint_id": 5,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "復元整合性 (永続化スキーマ)",
+      "message": "active_tab の往復が壊れている。save_app_state は AppState.active_tab を直列化するが、復元経路 (state_store::restore → RestoreOutcome → RestoreOutcomeDto → フロント) は active_tab を一切運ばず、フロントの restoreOnStartup もアクティブタブを復元しない。結果として『どのタブを最前面で開いていたか』が再起動で必ず失われる。さらに復元時に Deleted タブは開かず continue でスキップする (main.ts:524) ため、復元後の開タブ集合は保存時より縮む。仮に将来 active_tab を素朴に転用すると保存時インデックスが縮小後の配列に対し範囲外になりうる。データ破損ではなく復元忠実度の欠落だが、要件10.1 が AppState に active_tab を含めている以上、往復が成立していない。RestoreOutcomeDto に active_tab を載せる/フロントが復元する、または載せないなら『現状アクティブタブは復元対象外』と spec/コメントに明記して食い違いを解消すべき。",
+      "location": "src-tauri/src/commands.rs:139-174 / src/main.ts:501-541 / crates/pika-core/src/state.rs:88-90"
+    },
+    {
+      "severity": "medium",
+      "area": "復元3分岐の駆動データ欠落",
+      "message": "復元3分岐 (消失/別物/正常) の core ロジック (restore_tab / probe_path) は正しいが、それを駆動する content_hash がフロントから常に空文字で保存されている (collectAppState の content_hash:\"\" 固定。cursor_line/cursor_column/scroll_top/view_mode も実値でなく 1/0/固定)。probe_path は content_hash が空なら無条件で PathProbe::Same を返す (state_store.rs:130-132) ため、Changed=未読復元の分岐が production では決して発火しない。要件10.1 の『別物=未読復元』が配線上は死に枝になっている。core テストは正しいので d_verify は通るが、データとしての復元忠実度 (カーソル/スクロール/未読判定の根拠データ) が記録されていない。content_hash と位置情報を実値で collectAppState に詰めるべき。",
+      "location": "src/main.ts:463-481 / src-tauri/src/state_store.rs:124-145"
+    },
+    {
+      "severity": "low",
+      "area": "アトミック書込の耐久性",
+      "message": "state.json のアトミック書込は temp→rename で実装され、Rust の std::fs::rename は Windows で MOVEFILE_REPLACE_EXISTING 相当のため既存上書きは原子的で問題ない。ただし temp ファイル書込後 rename 前に fsync (File::sync_all 相当) を行っていないため、OS クラッシュ/電源断のタイミングでは『rename は完了したが temp の内容がまだディスクに到達していない』ゼロ長/部分書込の state.json が残る理論リスクがある。本ファイルは UI 状態 (失っても再構築可能・破損時は load_state が Corrupt として空起動) なので最上位原則『データを失わない』への影響は軽微で、ローカルツールとしては許容範囲。重要データ (snapshot/baseline) と違いここまでの堅牢化は不要だが、低コストで入れるなら write 後 sync_all してから rename すると完全になる。",
+      "location": "src-tauri/src/state_store.rs:52-65"
+    },
+    {
+      "severity": "low",
+      "area": "固定一時ファイル名による競合余地",
+      "message": "save は固定名 state.json.tmp を使う。単一インスタンス (named pipe) で第2プロセスは起動しない設計なので実害は出にくいが、SID 取得失敗時など acquire_or_forward が Server 縮退する経路 (single_instance.rs:121-124) では複数プロセスが同居しうる。その場合 2 プロセスが同一 tmp に同時書込→相互上書きで部分破損 tmp を rename する競合余地がある。プロセス/スレッド固有サフィックス (pid 等) を tmp 名に付ければ構造的に排除できる。発生条件が縁辺ケースのため low。",
+      "location": "src-tauri/src/state_store.rs:57 / src-tauri/src/single_instance.rs:117-129"
+    }
+  ],
+  "has_critical": false,
+  "summary": "本スプリントの永続化層は『DB ではなく state.json ファイル + content-addressed なし』のため、データ観点の主眼はスキーマ直列化の正しさ・アトミック書込・version 安全側・復元忠実度。version 安全側 (未知 version は読まず/書かず/再生成せず、破損は Corrupt で空起動して既存を上書きしない safe_empty ガード) は最上位原則『データを失わない』に沿って正しく設計され core テストで観測可能。アトミック書込 (temp→rename) も Windows で原子的に成立しており critical/high は無し。データ破損・不可逆損失を招く欠陥は検出されなかった。一方、復元の忠実度に 2 件の medium がある: (1) active_tab の往復が復元経路で運ばれず成立していない、(2) content_hash/カーソル/スクロールがフロントで実値保存されておらず『別物=未読復元』分岐が production で死に枝になっている。いずれも core ロジックではなくフロント/DTO の駆動データ欠落で、データ破損ではないが要件10.1 が定める復元データの往復が一部成立していない。low 2 件は fsync 省略と固定 tmp 名の縁辺競合で、ローカル UI 状態としては許容範囲。"
+}

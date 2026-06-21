@@ -6,8 +6,10 @@
 //! pika-core（workspace/document/watcher）へ移す（design doc 4章）。
 
 use crate::snapshot::SnapshotService;
+use crate::state_store;
 use crate::watcher::WatcherService;
-use serde::Serialize;
+use pika_core::state::{AppState, TabRestore, WorkspaceRestore};
+use serde::{Deserialize, Serialize};
 use std::hash::Hasher;
 use std::path::Path;
 use tauri::State;
@@ -97,6 +99,78 @@ pub fn save_file(
 #[tauri::command]
 pub fn f5_resync(watcher: State<'_, WatcherService>) -> Result<usize, String> {
     watcher.resync_now()
+}
+
+/// アプリ状態（state.json）をアトミックに保存する（要件10.1・design doc 9章）。
+///
+/// 直列化・version はすべて pika-core::state（cargo test 済み）。ここはデータルート解決と
+/// アトミック書込（一時ファイル→置換）の FS 配線のみ（state_store）。
+#[tauri::command]
+pub fn save_app_state(state: AppState) -> Result<(), String> {
+    let root = state_store::resolve()?;
+    state_store::save(&root, &state)
+}
+
+/// 復元したタブ 1 件の DTO（フロントが復元3分岐を区別できるよう種別を付ける）。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RestoredTabDto {
+    /// "restore"（正常）| "deleted"（消失=削除済み表示）| "unread"（別物=未読復元）
+    pub status: String,
+    pub tab: pika_core::state::TabState,
+}
+
+/// 復元結果の DTO（ワークスペース判定＋タブ群＋安全空起動フラグ）。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RestoreOutcomeDto {
+    /// "restore" | "empty-state"（ワークスペース消失）| "no-workspace"（単体ファイルのみ）
+    pub workspace_status: String,
+    /// 復元するワークスペースの絶対パス（restore のときのみ）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
+    pub tabs: Vec<RestoredTabDto>,
+    /// 未知バージョン/破損で空起動した（このセッションは上書き保存を控える＝読めない状態を保全）。
+    pub safe_empty: bool,
+}
+
+/// アプリ状態（state.json）を復元する（要件10.1/13・design doc 9章/19章 状態復元3分岐）。
+///
+/// version 安全側・復元3分岐の判定はすべて pika-core::state。ここは FS 確認と DTO 変換のみ。
+#[tauri::command]
+pub fn restore_app_state() -> Result<RestoreOutcomeDto, String> {
+    let root = state_store::resolve()?;
+    let outcome = state_store::restore(&root);
+
+    let (workspace_status, workspace_path) = match outcome.workspace {
+        WorkspaceRestore::Restore(p) => ("restore".to_string(), Some(p)),
+        WorkspaceRestore::EmptyState => ("empty-state".to_string(), None),
+        WorkspaceRestore::NoWorkspace => ("no-workspace".to_string(), None),
+    };
+
+    let tabs = outcome
+        .tabs
+        .into_iter()
+        .map(|t| match t {
+            TabRestore::Restore(tab) => RestoredTabDto {
+                status: "restore".into(),
+                tab,
+            },
+            TabRestore::Deleted(tab) => RestoredTabDto {
+                status: "deleted".into(),
+                tab,
+            },
+            TabRestore::Unread(tab) => RestoredTabDto {
+                status: "unread".into(),
+                tab,
+            },
+        })
+        .collect();
+
+    Ok(RestoreOutcomeDto {
+        workspace_status,
+        workspace_path,
+        tabs,
+        safe_empty: outcome.safe_empty,
+    })
 }
 
 /// 内容（バイト列）を LF 正規化してハッシュ化する（自己保存抑制の保存後ハッシュ）。

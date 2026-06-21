@@ -1,0 +1,33 @@
+{
+  "reviewer": "performance",
+  "sprint_id": 5,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "起動レイテンシ / 同期FS I/O",
+      "message": "起動時の復元経路 restore_app_state -> state_store::restore -> probe_path が、復元する各タブごとにファイル全量を同期読込(std::fs::read)し LF 正規化バッファ確保 + XxHash64 ハッシュ照合を直列実行する。これは起動 0.5 秒ゲート(spec『起動0.5秒』『IPCラウンドトリップもコスト』)に効くホットパス。さらに spec の確定方針『10MB以上はハッシュのみ・差分非対象』に反し、probe_path にサイズ上限ガードが無く、10MB級テキストを複数タブで開いた状態で前回終了していると復元時にそれら全量を読み直す。tab.content_hash が保存時に LF 正規化済みハッシュである前提だが、collectAppState(src/main.ts) は現状 content_hash を空文字で書いており(別観点だが)、空ハッシュ時は probe_path が Same 即返しで読込を回避する救済が今は効いている。content_hash 充填が実装され次第このパスが本番化するため、その時点で巨大ファイル境界(メタの len で先に弾く)・並列化(独立タブの probe は rayon/スレッドで並行可)を入れる必要がある。critical にしないのは復元タブ数が通常少なく現状 content_hash 空でパスが未活性なため(構造的破綻ではない)。",
+      "location": "src-tauri/src/state_store.rs:124"
+    },
+    {
+      "severity": "medium",
+      "area": "確認済み一括 / 直列 IPC ラウンドトリップ N+1",
+      "message": "onConfirmAll(src/main.ts) が未読 targets ごとに readFile -> compute_file_diff を直列 await でループする。未読件数 N に対し 2N 回の invoke ラウンドトリップが直列化し、spec『IPCラウンドトリップもコスト』『外部変更反映500ms』に照らすと未読が多いと体感が線形劣化する。各 target の readFile+diff は独立なので Promise.all で並行化(またはバッチ command で 1 ラウンドトリップ化)できる。ユーザー明示操作で件数も通常限定的なため high ではないが、フォルダ一括確認(should の機能)が乗ると件数が増えやすい。",
+      "location": "src/main.ts:345"
+    },
+    {
+      "severity": "medium",
+      "area": "state.json 保存頻度 / 未デバウンスのアトミック書込",
+      "message": "persistAppState が openFile・onOpenFolder のたびに毎回呼ばれ、save_app_state -> state_store::save が一時ファイル write + rename のアトミック書込(同期FS I/O 2回)を都度発火する。連続でタブを開く操作で state.json 書込が積み重なる。状態保存はベストエフォートなので、UI 操作ごとの即時書込ではなく短時間デバウンス(例 300〜500ms 合体)で十分。データ喪失リスクは無い(beforeunload でも保存する)ので medium。",
+      "location": "src/main.ts:487"
+    },
+    {
+      "severity": "low",
+      "area": "受信パス正規化 / 微小割当",
+      "message": "path_verify::apply_long_path_prefix が長パス時に raw.replace('/', \\\"\\\\\\\") で全文字列をコピーするが、これは単一インスタンス転送パス(高々数 KB・1 起動あたり数件)のみを通る冷たい経路で、頻度・規模とも小さい。最適化は不要(過剰最適化を避ける)。指摘は『ここはホットパスでないので現状の素直な実装で正しい』という確認であり、変更を求めるものではない。",
+      "location": "crates/pika-core/src/path_verify.rs:135"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 5(CLI二段構成・named pipe単一インスタンス・state.json復元)の performance 観点。critical は無し: 起動0.5秒/IPCラウンドトリップ性能予算を構造的に破綻させる実装は見当たらない。コアの -g パース・ipc プロトコル・path_verify・state 復元判定は I/O を持たない純粋関数で軽量。注意点は (1) 復元時 probe_path が各タブ全量を同期読込+ハッシュ照合し巨大ファイル境界ガードが無い(content_hash が空の現状は未活性だが充填後は起動レイテンシのホットパス化する=high)、(2) onConfirmAll が未読件数ぶん readFile+diff を直列 await する N+1 的 IPC、(3) persistAppState が UI 操作ごとにアトミック書込を即時発火しデバウンスが無い。いずれも修正で起動・反映の予算余裕を確保できるが、現規模では構造的破綻に至らないため high/medium 止まり。"
+}

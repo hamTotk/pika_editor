@@ -1,0 +1,27 @@
+{
+  "reviewer": "security",
+  "sprint_id": 5,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "入力検証 / パストラバーサル",
+      "message": "受信パスの再検証 verify_received_path は文字列レベルの健全性検査(絶対パス・NUL/制御文字・ADS 拒否・長パス接頭辞)に留まり、canonicalize による '..' 畳み込みやシンボリックリンク脱出の検査は行わない(設計上、実 FS 確認/canonicalize は呼び出し側の責務とコメント明記)。frontend の onOpenRequestEvent はこの正規化済みパスを readFile/openFile へそのまま渡して開く。本タスクは同一ユーザー・ユーザー限定 DACL の named pipe 経由で『同一ユーザーが元々開けるファイルを開く』操作に閉じており、権限境界を跨がないため critical/high ではない。ただし sprint 4 のプレビュー custom protocol が要求する prefix 検証+canonicalize と『どこで traversal を最終的に封じるか』の責務分界を spec/コメントで一本化しておくと、将来 -g 転送パスがワークスペース封じ込め対象の sink(プレビュー素材配信)へ流れた場合の取りこぼしを防げる。",
+      "location": "crates/pika-core/src/path_verify.rs:51"
+    },
+    {
+      "severity": "low",
+      "area": "情報漏洩 / エラーメッセージ",
+      "message": "path_verify / ipc のエラーメッセージが受信パス全体や SID 文字列を埋め込む(例 '絶対パスでない転送パスを拒否: {raw}'、'SID にパイプ名へ使えない文字が含まれる: {user_sid}')。これらは Result として返るのみで、現状ログや UI へ無条件出力する経路は本スプリントには無く、ユーザー自身のファイルパスなので実害は薄い。sprint 7 で診断ログ(要件12.3『ユーザーのファイル内容を書かない』)へ繋ぐ際に、パス文字列・SID をログ平文に流さないか(あるいは長さ/種別のみに丸めるか)を確認する前提として記録する。",
+      "location": "crates/pika-core/src/path_verify.rs:96"
+    },
+    {
+      "severity": "low",
+      "area": "DoS / 可用性",
+      "message": "named pipe リスナーは同時接続 1・短命接続モデルで、ReadFile は READ_BUF を 1 回読むのみ。同一ユーザーの悪意プロセスが接続だけして書き込まない/巨大書き込みを試みる場合、ConnectNamedPipe/ReadFile が PIPE_WAIT でブロックし得るが、(a) 同一ユーザー権限内であり外部攻撃面ではない、(b) リスナーは専用スレッドで UI を塞がない、(c) MAX_MESSAGE_BYTES 打切りで巨大入力は弾く、ため可用性影響は局所的。タイムアウト無しのブロッキング ReadFile は、将来 PIPE 接続のリトライ/タイムアウトを足す余地として記録(ローカル単一ユーザーツールにつき critical/high ではない)。",
+      "location": "src-tauri/src/single_instance.rs:210"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 5(CLI 二段構成・自前 named pipe 単一インスタンス・受信引数再検証・state.json 復元)は本フェーズで最もセキュリティ感度の高い面だが、信頼境界の設計は堅牢で critical はゼロ。named pipe は per-SID パイプ名(注入検査付き)+ユーザー限定 DACL(OW/SY のみ)+PIPE_REJECT_REMOTE_CLIENTS+FIRST_PIPE_INSTANCE 原子ロック+8KB 打切り+JSON スキーマ検証+version ゲート+受信パス再検証という多層防御を備える。受理操作が OpenRequest 型(paths/goto のみ)に物理的に閉じており、command/exec 等の余分フィールドは serde が落とす(マスアサインメント/任意コマンド注入を型で遮断、テスト『余分なフィールドを無視する』で立証)。CLI は pika.exe を args 配列で spawn しシェル文字列連結を経由しない(コマンド注入なし)。state 復元は version 安全側で未知/破損時に既存 state.json を上書きせず(データ喪失防止)。機密のハードコード・未検証外部入力の injection/RCE 到達・認可バイパスはいずれも無し。残課題は high 未満の多層防御強化のみ(traversal 最終封じ込め責務の文書化・将来の診断ログでのパス/SID 平文回避・named pipe ReadFile タイムアウト)で、いずれもローカル単一ユーザー Windows ツールという性質上 d_review をブロックしない。"
+}

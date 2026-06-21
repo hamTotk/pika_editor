@@ -27,3 +27,7 @@ comrak = { workspace = true }
 ammonia = { workspace = true }
 # render: CSP の script-src 'nonce-<rnd>' 用の暗号品質乱数（design doc 6章）。
 getrandom = { workspace = true }
+# ipc/state: 単一インスタンス転送 JSON の組立/スキーマ検証と state.json の直列化（design doc 9章・要件3.2/10.1）。
+# 自前 named pipe で受け渡す JSON とアプリ状態の永続表現を型で固め、決定論ゲートに乗せる。
+serde = { workspace = true }
+serde_json = { workspace = true }

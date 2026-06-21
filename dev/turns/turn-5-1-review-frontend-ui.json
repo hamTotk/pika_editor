@@ -1,0 +1,45 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 5,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "状態復元の網羅",
+      "message": "restoreOnStartup() は state.json から復元したタブを順に開くだけで、永続化済みの active_tab(復元結果のアクティブタブ)を尊重していない。タブをループで開くと最後に開いたタブが必ずアクティブになり、ユーザーが終了時に見ていたタブが復元されない(要件10.1『カーソル/スクロール/表示モード』の表示モード=どのタブが前面か、の復元欠落)。outcome.tabs の中で active_tab に対応するパスを最後に activateTab するか、開いた後に明示的に activateTab(active のパス) を呼ぶべき。",
+      "location": "src/main.ts:501-541"
+    },
+    {
+      "severity": "high",
+      "area": "状態の網羅 (カーソル/スクロール復元)",
+      "message": "collectAppState() が cursor_line/cursor_column/scroll_top を 1/1/0、content_hash を空文字でハードコードしており、実際の編集カーソル位置・スクロール位置を一切収集していない。spec sprint5 must『AppState(...カーソル/スクロール...)をアトミック書込』に対し永続化される値が常に初期値で、復元してもカーソル/スクロールが戻らない。EditorHandle に getCursor()/getScrollTop() が無いため取得経路自体が未実装。少なくとも実装できない旨を turn report に明記すべき(現状はサイレントにダミー値を書いていて、復元できているように見えて実際は無効)。",
+      "location": "src/main.ts:463-481"
+    },
+    {
+      "severity": "medium",
+      "area": "ウィンドウ前面化 (操作完了の可視性)",
+      "message": "onOpenRequestEvent() は単一インスタンス転送でファイルを開くが、ウィンドウの前面化/フォーカス取得を一切行わない。spec sprint5 must『既存ウィンドウに foo.md が開かれ前面化する』に対し、フロント側ハンドラからは window フォーカスの誘発が無い(背面のまま foo.md が開いて気づけない懸念)。前面化は Tauri 側(set_focus)が本筋だが、フロントは少なくともアクティブタブへフォーカスを移すなど、開いた結果がユーザーに見える保証が欲しい。系統C(実機)検証項目だが、コード上の責務分担を turn report で明示すべき。",
+      "location": "src/main.ts:451-460"
+    },
+    {
+      "severity": "medium",
+      "area": "Loading 状態の欠如",
+      "message": "restoreOnStartup() は restore_app_state→open_workspace→各タブを順次 await で開く間、何の進捗/ローディング表示も出さない。タブ数が多い・ワークスペース列挙が重い場合、起動直後に空画面のまま無反応に見える。最低でも setStatus('復元中…') 等の loading 表示を入れ、完了後に通常ステータスへ戻すと、状態の網羅(loading 状態)とユーザー体感が改善する。",
+      "location": "src/main.ts:501-541"
+    },
+    {
+      "severity": "low",
+      "area": "goto 適用先の曖昧さ",
+      "message": "onOpenRequestEvent() で複数パスが転送された場合、goto は最後に開いたタブの state.editor にのみ適用される(ループ後に 1 回だけ呼ぶため)。-g は通常単一ファイル想定なので実害は小さいが、複数パス時にどのファイルへ goto するかが暗黙(最後)になっている。単一インスタンス転送の受理は単一パス+goto を想定する旨をコメント化しておくと意図が明確。",
+      "location": "src/main.ts:451-460"
+    },
+    {
+      "severity": "low",
+      "area": "復元タブのキーボード到達性 (既存・sprint7 委譲領域)",
+      "message": "restoreOnStartup()/onOpenRequestEvent() が renderTabs/renderTree を再描画するが、タブ(role=tab)はクリックハンドラのみ・ツリー(role=treeitem)は tabIndex=-1 でキーボード操作不能なまま。これは sprint2 由来の既存実装で、spec が F6 ペイン間フォーカス・ARIA 全Web再構築を明示的に sprint7 へ委譲しているため本スプリントの欠陥ではない。復元/転送で開いたタブもキーボードのみでは選択できない点を sprint7 の a11y 再構築でカバーする前提を確認するための記録(critical ではない=計画上の段階委譲)。",
+      "location": "src/ui/tabs.ts:22-36"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint5 はCLI二段構成・単一インスタンス・状態復元というbackend(Rust)中心のスプリントで、frontend差分は main.ts(restoreOnStartup/persistAppState/onOpenRequestEvent)と editor/index.ts(gotoPosition)に限られる。frontend-ui観点でのcriticalは無し(主要操作の不能/不可視・致命的a11y違反は無く、開く/保存/復元/転送は機能する。キーボード操作不能なツリー/タブは sprint2 由来かつ spec が ARIA/F6 を sprint7 へ明示委譲した段階的計画によるもの)。high は状態復元の実質的不全2件=(1)復元時に active_tab を尊重せず最後に開いたタブがアクティブになる、(2)collectAppState がカーソル/スクロール/content_hash をハードコードのダミー値で永続化しており spec の『カーソル/スクロール保存』が実体として機能していない(EditorHandle に取得経路が未実装)。前者はユーザーが見ていたタブが戻らない、後者は復元してもカーソル/スクロールが初期化される。medium は単一インスタンス転送時のウィンドウ前面化欠如(系統C項目だが責務明示が必要)と復元中のloading表示欠如。これらは次ターンで feedback_structured 経由の対応が望ましい。"
+}

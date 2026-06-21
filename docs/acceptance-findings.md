@@ -833,3 +833,54 @@
 - **状態（iteration2）**: 決定論ゲート（cargo test pika-core 149 件・うち render 57 件〔csp/guard 強化〕＋preview 配線
   5 件）PASS・cargo build／npm typecheck／vite build 成立。**別WebView の権限ゼロ到達不能（TE2 必達）・系統A/B 実描画・
   信頼 JS 注入の実挙動・CSP の実効・暴走ガード実挙動・失敗件数の Tauri event 経路は未実施（要 Windows 実機 Release）**。
+
+## T-008 CLI 二段構成・単一インスタンス（自前 named pipe）・状態復元（sprint 5・design doc 15章-9／系統C）
+
+- **重大度**: 高（信頼境界＝named pipe の DACL/`PIPE_REJECT_REMOTE_CLIENTS`/受信引数の core 再検証・受理操作=パスオープン限定。
+  最上位原則「データを失わない」＝state.json アトミック書込＋version 安全側＋復元3分岐）。
+- **対応章**: 要件3.1/3.2/3.4・10.1・13・design doc 9章/15章-9/19章（状態復元3分岐）。acceptance.md H1〜H7。
+- **決定論側（cargo test 済み・pika-core）**:
+  - **cli** — `pika-core::cli`。`-g <file>:<行>[:<桁>]` の**ドライブレターのコロン非分割**（`C:\dir\a.md:12:3` の先頭
+    `:` を保護し末尾から行・桁を剥がす）・桁省略=行頭・非整数=位置無視・空引数エラー。`normalize_to_absolute`
+    （絶対パスはそのまま・相対は cwd 前置・**ドライブ相対 `X:rel` は決定論で絶対化不能のため安全側で拒否**）。
+  - **ipc** — `pika-core::ipc`。`decide_role`（CreateNamedPipe の成否＝原子的ロックでサーバー/クライアント決定）・
+    `build_pipe_name`（`\\.\pipe\pika-<SID>`・SID にパイプ名注入文字が混ざれば拒否）・`build_forward_message`／
+    `parse_incoming_message`（**受信 ≤ 8KB 打切り・JSON スキーマ検証・version 不一致は安全側で拒否・各パスを
+    path_verify で再検証・余分フィールド（command 等）は OpenRequest に吸われない＝受理操作=パスオープン限定**）。
+  - **path_verify** — `pika-core::path_verify`。受信パスの再正規化・再検証（**相対パス拒否・NUL/制御文字拒否・
+    ADS（`file:stream`）拒否・UNC/ドライブ絶対/拡張長パス分類・長パスへ `\\?\`/`\\?\UNC\` 接頭辞付与**）。
+    転送パスを信頼せず core 検証層で必ず再検査する（要件3.2）。
+  - **state** — `pika-core::state`。AppState の serde 往復・`load_state`（**version を先に覗いて未知=UnknownVersion
+    〔読まず/書かず/再生成せず〕・破損=Corrupt〔空起動・既存保全〕・既知=Ok**）・`restore_tab`（**復元3分岐**＝
+    消失=削除済み表示／別物=未読復元／一致=正常復元）・`restore_workspace`（消失=空状態へ安全遷移／存在=復元／無=単体）。
+- **配線（cargo build＋npm typecheck 成立）**:
+  - CLI 二段構成: `crates/pika-cli`（console subsystem）が `--help`/`--version`/引数検証/終了コード（0=受理・2=引数
+    エラー・3=GUI 起動失敗）を同期処理し、`-g`/パスを core で絶対パス正規化してから `pika.exe` を spawn（GUI 起動が
+    必要なときのみ）。`pika --version` はリダイレクト取得でも素の文字列のみ（文字化け回避）。
+  - 単一インスタンス: `src-tauri/src/single_instance.rs`。`CreateNamedPipeW`（`FILE_FLAG_FIRST_PIPE_INSTANCE` の成否＝
+    原子的ロック）・**SDDL `D:(A;;GA;;;OW)(A;;GA;;;SY)` で owner/System 限定 DACL**・`PIPE_REJECT_REMOTE_CLIENTS`・
+    `PIPE_TYPE_MESSAGE`・受信は `parse_incoming_message`（core 検証）。サーバーは**ウィンドウ表示前に**パイプ公開し、
+    クライアントは絶対パス正規化済み JSON を転送→`app.handle().exit(0)`（終了コード0）。受信時は `emit('open-request')`
+    ＋既存ウィンドウ前面化（`unminimize`/`show`/`set_focus`）。SID/パイプ名取得不能時は単一インスタンスを諦め
+    サーバー扱いで起動継続（縮退）。
+  - 状態復元: `src-tauri/src/state_store.rs`。データルート解決（`pika-core::data_root`）→ state.json の**アトミック
+    書込（一時ファイル→rename）**→FS を見て PathProbe（消失/別物=ハッシュ照合/一致）を作り core の復元判定を呼ぶ。
+    **未知バージョン/破損は `safe_empty=true` で空起動しつつ既存 state.json を上書きしない**（読めない状態を保全）。
+  - command: `save_app_state`/`restore_app_state`（src-tauri/src/commands.rs。直列化・version・3分岐は core 委譲）。
+  - frontend: `src/main.ts`（起動時 `restoreOnStartup`〔ワークスペース復元/タブ3分岐〔削除済み通知・未読復元・正常開く〕・
+    `safe_empty` 中は保存抑止〕・`beforeunload`/フォルダ開く/タブ開くで `persistAppState`・`onOpenRequest` で転送パスを開く）。
+    `src/editor/index.ts`（`gotoPosition`＝`-g` 行・桁へカーソル移動・行超過は最終行・桁超過は行末クランプ）。
+  - capability: `capabilities/main.json` のメイン最小権限のみ（preview ラベルは未宣言で権限ゼロを維持）。
+    pika 独自 command（save/restore_app_state 等）は `generate_handler!` で main webview に許可（外部公開なし）。
+- **本スプリントで系統C（Windows 実機）に残す確認**（acceptance.md H1〜H7 を新スタックで再検証扱い）:
+  - H1: 起動済みで `pika foo.md`→呼出プロセス即終了・既存ウィンドウに foo.md が開き前面化。
+  - H2: `pika -g doc.md:120`→転送先で120行目へカーソル・表示範囲。
+  - H4: 転送時に未保存タブ切替確認をキャンセルしても呼出プロセスは終了コード0（受理）。
+  - H5: `pika --version`/`--help` のパイプ/リダイレクトで出力欠落・文字化けなし・シェルへ制御が戻る。
+  - H6: 異常終了後もロック残留せず正常起動（パイプはプロセス死で OS が解放）。
+  - H7: SID 取得失敗時は owner-less パイプを作らずスタンドアロン縮退（制限トークン等は実機で強制困難）。
+  - DACL/`PIPE_REJECT_REMOTE_CLIENTS` の実効（別ユーザー/リモートからの接続拒否）は実機で確認。
+- **状態（sprint 5・iteration1）**: 決定論ゲート（cargo test pika-core 193 件〔うち本スプリント新規=cli 6・ipc 14・
+  path_verify 12・state 14〕＋pika-cli 11・pika-app 5）PASS・cargo build（crates＋src-tauri・警告エラー扱い）／
+  npm typecheck 成立。**単一インスタンス転送の実機挙動（H1/H2/H4・即終了/前面化/終了コード0）・named pipe の
+  DACL/リモート拒否の実効・state.json 復元の実 GUI 反映は未実施（要 Windows 実機）**。

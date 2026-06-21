@@ -1,0 +1,33 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 5,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "状態復元/エラー回復導線",
+      "message": "復元時の『削除済みタブ』が導線として復元されない。core/state は消失タブを TabRestore::Deleted(tab) として返し、DTO コメント・spec 意図・design doc 19章は『消失=削除済み表示で開く（タブは残す・ベースライン保持）』だが、frontend の restoreOnStartup は status==='deleted' のとき notify(info) を出して continue するだけで、タブを開かない（src/main.ts 524-527）。結果、前回開いていて外部削除されたファイルは再起動後にタブごと消え、一過性の info 通知しか残らない。退避/ベースラインは snapshot store に残っているのに、ユーザーは『削除済み表示タブ → 確認済み時点に戻す(rollback)』という回復導線へ到達できず行き止まりになる（Nielsen #3 制御と自由・#9 回復支援）。旧 wx 版の F-017 と同質の導線欠落。削除済みタブとして残し取消線表示＋rollback 導線を残すべき。",
+      "location": "src/main.ts:523"
+    },
+    {
+      "severity": "medium",
+      "area": "状態の可視化/エラー回復",
+      "message": "state.json が未知バージョン/破損で空起動した場合（safe_empty=true）、ユーザーへの説明が一切ない。restoreOnStartup は state.safeEmpty にフラグを立てるだけで通知を出さず、以後 persistAppState を黙って抑止する（src/main.ts 509・487-489）。ユーザー視点では『前回のフォルダ/タブが復元されず、なぜか空』かつ『今回の状態が保存されない』理由が不可視（Nielsen #1 可視化・#9 回復支援）。最低限『前回の状態を読めなかったため空で起動した／元の state は保全し上書きしない』旨を通知バーで提示し、回復の手掛かり（破損時の手動リセット手段）に触れるべき。データ保全方針自体（既存を壊さない）は正しい。",
+      "location": "src/main.ts:501"
+    },
+    {
+      "severity": "medium",
+      "area": "CLI/-g 導線の一貫性",
+      "message": "単一インスタンス転送で複数パス＋-g を同時に投げると、goto 位置が意図と異なるエディタに適用される。onOpenRequestEvent は payload.paths をループで順に openFile し（最後に開いたファイルが active editor になる）、その後 if (payload.goto && state.editor) で『現在の editor』に gotoPosition する（src/main.ts 451-460）。-g のカーソル位置は本来 paths の先頭ファイルに対応する規約（ipc.rs OpenRequest コメント・single_instance.rs split_forward_args は -g の file を paths.push）だが、複数パスがあると先頭でなく最後のタブへカーソルが飛ぶ。pika -g a.md:50 b.md のような併用時に -g 位置が b.md に適用される導線不整合。goto を paths[0] に開いたタブへ結びつけるべき。",
+      "location": "src/main.ts:456"
+    },
+    {
+      "severity": "low",
+      "area": "CLI フィードバック/DX",
+      "message": "クライアント転送が無言で失敗してもユーザーへフィードバックが無い。forward_to_server は CreateFileW 失敗（ERROR_PIPE_BUSY 等）や build_forward_message 失敗で何も通知せず return し（src-tauri/src/single_instance.rs 232-257）、CLI 側は spawn 成功で既に exit 0 を返している。契約上『終了コード0=受理（ファイルが開かれた保証ではない）』なので仕様内だが、稀な競合でファイルが開かない場合に診断手掛かりが残らない。診断ログ（sprint7 要件12.3）への転送失敗記録か、最小限のリトライ（短命接続の BUSY は再試行余地あり）を将来検討する余地がある。pika-cli の help/version/エラーの stderr/stdout 分離・終了コード規約（0/2/3）・未知オプション拒否は良好で、この点のみ磨き込み。",
+      "location": "src-tauri/src/single_instance.rs:252"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 5（CLI 二段構成・単一インスタンス・状態復元）の UX/DX を確認。CLI の DX は良好：--help/--version/usage が実行例付きで充実し、エラーは stderr・本来出力は stdout に分離、終了コード規約（0=受理/2=引数/3=GUI起動失敗）が明文化され未知オプションも明確に拒否する。単一インスタンス転送は client→exit(0)＋既存ウィンドウ前面化で旧 F-019（終了コード255）を解消し、起動時の空状態ガイド（『フォルダを開いてください』）もある。critical（主要タスク完了不能な導線破綻・誤操作でのデータ喪失）は無し（state.json は version 安全側＋アトミック書込で既存を壊さず、退避/ベースラインも保全されるため回復可能）。一方で回復導線に穴がある：(1)復元時の削除済みタブが導線として残らず rollback への到達ができない[high]、(2)state.json 破損/未知バージョンで空起動した理由が不可視[medium]、(3)複数パス＋-g 併用時に goto が先頭でなく最後のタブへ飛ぶ[medium]、(4)転送無言失敗時の診断手掛かり欠如[low]。critical=0。"
+}

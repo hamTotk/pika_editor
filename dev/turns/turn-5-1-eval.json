@@ -1,0 +1,92 @@
+{
+  "score": 84,
+  "plan_implementation": {
+    "overall": 84,
+    "notes": "must 7件は全充足。pika-core(cli/ipc/path_verify/state)で-gパース・named pipe信頼境界・受信引数再検証・state復元3分岐の決定論ロジックを実装し cargo test 46件新規(計193)で観測。CLI二段構成(終了コード0/2/3)・自前named pipe(SDDL DACL/FIRST_PIPE_INSTANCE/PIPE_REJECT_REMOTE_CLIENTS/8KB打切り/受理操作=パスオープン限定)・ウィンドウ表示前公開・転送終了コード0を src-tauri 薄層で配線。系統C(H1/H2/H4/H6/H7・DACL/リモート拒否実効)は acceptance-findings.md T-008 に節番号併記で記録。should 3件(最近使った項目+ジャンプリストCOM/フォルダ切替/存在しないパス=新規タブ)は未実装(0/3)で score を押し下げ。frontend の状態収集が実体不全(カーソル/スクロール/content_hash ダミー値固定・active_tab 往復欠落)で復元忠実度の一部が死に枝。"
+  },
+  "quality": {
+    "overall": 84,
+    "breakdown": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 84
+    },
+    "dimension_thresholds": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 80
+    }
+  },
+  "all_dimensions_passed": true,
+  "feedback": "sprint 5(CLI二段構成・自前named pipe単一インスタンス・受信引数再検証・state.json復元3分岐)はコアの設計品質が極めて高く、全must充足・全レビュワーcritical=0・テスト改竄なし。純粋ロジックを pika-core(cli/ipc/path_verify/state)へ集約し src-tauri は薄い橋渡し層に徹する design doc 3章パターンに完全準拠。named pipe は per-SID パイプ名(注入検査)+owner限定DACL+PIPE_REJECT_REMOTE_CLIENTS+原子ロック+8KB打切り+JSONスキーマ検証+version安全側+受信パス再検証の多層防御で、受理操作が OpenRequest型(paths/goto のみ)に物理的に閉じ余分フィールドは serde が落とす(任意command注入を型で遮断)。state は version安全側(未知=読まず/書かず/再生成せず・破損=空起動して既存保全)で最上位原則 データを失わない に沿う。全次元足切り以上(d_verify=100/d_accept=100/d_quality=84>=80/d_review=100)だが、should未実装(0/3)で score=84<90 のため passed=false。修正ターン優先=[high](1)frontend collectAppState のカーソル/スクロール/content_hash ダミー値固定の解消(EditorHandle に getCursor/getScrollTop を実装し実値を詰める。現状 別物=未読復元 分岐が content_hash 空で probe が無条件 Same を返し production で死に枝・spec must カーソル/スクロール保存 が実体不全)、(2)active_tab 往復の成立(RestoreOutcomeDto に active_tab を載せ復元後に activateTab)、(3)復元時の削除済みタブを取消線タブ+rollback到達可能に残す、(4)起動復元 probe_path に巨大ファイルガード。[medium]破損空起動の理由を通知バー提示・複数パス+-g 併用の goto を paths[0] へ・onConfirmAll の N+1 IPC を Promise.all 化・persistAppState デバウンス。should 加点は最近使った項目+ジャンプリスト/フォルダ切替/存在しないパス=新規タブ の実装で確保。",
+  "feedback_structured": {
+    "high": [
+      {
+        "area": "状態復元の実体不全 (frontend-ui/data)",
+        "message": "collectAppState(src/main.ts:463-481)が cursor_line/cursor_column/scroll_top を 1/1/0、content_hash を空文字でハードコードしており実値を一切収集しない。probe_path(state_store.rs:130-132)は content_hash が空なら無条件で PathProbe Same を返すため、core の復元3分岐 Changed=未読復元が production で決して発火しない死に枝になる。spec must AppState(カーソル/スクロール)をアトミック書込 が実体として機能していない。EditorHandle に getCursor/getScrollTop 取得経路が未実装。実値を詰めるか実装不能なら turn report に明記すべき(現状はサイレントにダミー値を書いていて復元できているように見える)。core ロジックとテストは正しいため d_verify/d_accept は通るが品質欠陥。"
+      },
+      {
+        "area": "active_tab 往復欠落 (data/frontend-ui)",
+        "message": "save_app_state は AppState.active_tab を直列化するが復元経路(RestoreOutcomeDto)が active_tab を運ばず restoreOnStartup もアクティブタブを復元しない(src/main.ts:501-541)。タブをループで開くと最後に開いたタブが必ずアクティブになり終了時に見ていたタブが復元されない。RestoreOutcomeDto に active_tab を載せ復元後に明示 activateTab するか、載せないならアクティブタブは復元対象外と spec/コメントに明記して食い違いを解消する。"
+      },
+      {
+        "area": "削除済みタブの回復導線欠落 (ux)",
+        "message": "復元時の削除済みタブが導線として残らない。core は消失タブを TabRestore Deleted(tab) として返すが restoreOnStartup は status=deleted で info通知して continue するだけでタブを開かない(src/main.ts:523)。前回開いていて外部削除されたファイルは再起動後タブごと消え、退避/ベースラインは snapshot に残るのに削除済み表示タブから確認済み時点に戻す(rollback)回復導線へ到達できず行き止まりになる(旧 wx 版 F-017 と同質)。削除済みタブとして取消線で残し rollback 導線を残すべき。"
+      },
+      {
+        "area": "起動復元の同期FS I/O ホットパス (performance)",
+        "message": "復元経路 restore_app_state state_store restore probe_path が復元する各タブごとにファイル全量を同期読込(std fs read)+LF正規化+XxHash64照合を直列実行する(state_store.rs:124)。起動0.5秒ゲートに効くホットパスで probe_path にサイズ上限ガードが無く10MB級テキストを複数タブで開いた状態だと全量を読み直す(spec の10MB以上はハッシュのみに反する)。現状 content_hash 空で未活性だが上記 high(1)で充填され次第本番化するためメタの len で先に弾く巨大ファイル境界ガードと独立タブ probe の並列化が必要。"
+      }
+    ],
+    "medium": [
+      {
+        "area": "破損空起動の可視化 (ux)",
+        "message": "state.json が未知バージョン/破損で空起動した場合(safe_empty=true)ユーザーへ説明が一切ない。restoreOnStartup は state.safeEmpty にフラグを立てるだけで通知を出さず以後 persistAppState を黙って抑止する(src/main.ts:501・487-489)。前回の状態を読めなかったため空で起動した／元の state は保全し上書きしない旨を通知バーで提示し回復の手掛かり(手動リセット手段)に触れるべき。データ保全方針(既存を壊さない)自体は正しい。"
+      },
+      {
+        "area": "複数パス+-g 併用時の goto 適用先 (ux/frontend-ui)",
+        "message": "onOpenRequestEvent は payload.paths をループで順に openFile し(最後に開いたファイルが active editor になる)その後 payload.goto と state.editor がある時 現在の editor に gotoPosition する(src/main.ts:451-460)。-g のカーソル位置は本来 paths 先頭ファイルに対応する規約(ipc.rs OpenRequest コメント・split_forward_args は -g の file を paths へ push)だが複数パス時は先頭でなく最後のタブへカーソルが飛ぶ。goto を paths[0] に開いたタブへ結びつけるべき。"
+      },
+      {
+        "area": "確認一括の N+1 IPC (performance)",
+        "message": "onConfirmAll(src/main.ts:345)が未読 targets ごとに readFile と compute_file_diff を直列 await でループし未読 N に対し 2N 回の invoke ラウンドトリップが直列化する(spec の IPCラウンドトリップもコスト・外部変更反映500ms に照らし未読が多いと線形劣化)。各 target は独立なので Promise.all で並行化(またはバッチ command で 1 ラウンドトリップ化)できる。フォルダ一括確認(should)が乗ると件数が増えやすい。"
+      },
+      {
+        "area": "state.json 保存頻度のデバウンス欠如 (performance)",
+        "message": "persistAppState が openFile・onOpenFolder のたびに save_app_state とアトミック書込(同期FS I/O 2回)を都度発火する(src/main.ts:487)。連続でタブを開く操作で書込が積み重なる。状態保存はベストエフォートなので UI操作ごとの即時書込でなく短時間デバウンス(300〜500ms合体)で十分(beforeunload でも保存するためデータ喪失リスクなし)。"
+      },
+      {
+        "area": "ウィンドウ前面化の責務 (frontend-ui)",
+        "message": "onOpenRequestEvent はファイルを開くがフロント側でウィンドウ前面化/フォーカス取得を行わない(src/main.ts:451-460)。前面化は backend(single_instance bring_to_front の set_focus)が本筋で実装済みだが開いた結果がユーザーに見える保証(アクティブタブへフォーカス移動など)とフロント/backend の責務分担を turn report で明示すべき。系統C(実機)検証項目。"
+      }
+    ],
+    "low": [
+      {
+        "area": "traversal 最終封じ込めの責務文書化 (security)",
+        "message": "verify_received_path は文字列レベルの健全性検査に留まり canonicalize による親ディレクトリ畳み込み/シンボリックリンク脱出検査は呼び出し側責務(コメント明記)。同一ユーザー・ユーザー限定DACL の named pipe 経由で同一ユーザーが元々開けるファイルを開く操作に閉じ権限境界を跨がないため critical/high ではないが将来 -g 転送パスがワークスペース封じ込め対象の sink(プレビュー素材配信)へ流れる場合に備え sprint4 プレビュー custom protocol の prefix検証+canonicalize とどこで traversal を最終的に封じるかの責務分界を spec/コメントで一本化すると取りこぼしを防げる。"
+      },
+      {
+        "area": "エラーメッセージのパス/SID 平文 (security)",
+        "message": "path_verify/ipc のエラーメッセージが受信パス全体や SID 文字列を埋め込む(path_verify.rs:96 等)。Result として返るのみで現状ログ/UIへ無条件出力する経路は本スプリントに無くユーザー自身のファイルパスなので実害は薄いが sprint7 で診断ログ(要件12.3 ユーザーのファイル内容を書かない)へ繋ぐ際にパス文字列/SID をログ平文に流さないか(長さ/種別のみに丸めるか)を確認する前提として記録。"
+      },
+      {
+        "area": "named pipe ReadFile のタイムアウト無し (security)",
+        "message": "named pipe リスナーは同時接続1・短命接続で ReadFile は PIPE_WAIT のブロッキング(single_instance.rs:210)。同一ユーザーの悪意プロセスが接続だけして書き込まない場合ブロックし得るが(a)同一ユーザー権限内で外部攻撃面でない(b)専用スレッドで UI を塞がない(c)MAX_MESSAGE_BYTES 打切りで巨大入力を弾く ため可用性影響は局所的。将来 PIPE接続のリトライ/タイムアウトを足す余地として記録(ローカル単一ユーザーツールにつき critical/high ではない)。"
+      },
+      {
+        "area": "アトミック書込の fsync 省略 (data)",
+        "message": "state.json のアトミック書込は temp と rename で実装され Windows で原子的上書きは成立するが temp 書込後 rename 前に sync_all(fsync) を行っていないため OS クラッシュ/電源断のタイミングでゼロ長/部分書込の state.json が残る理論リスクがある(state_store.rs:52-65)。本ファイルは UI状態(失っても再構築可能・破損時 Corrupt で空起動)なので最上位原則への影響は軽微で許容範囲。低コストで完全化するなら write後 sync_all してから rename する。"
+      },
+      {
+        "area": "固定 tmp 名の競合余地 (data)",
+        "message": "save は固定名 state.json.tmp を使う(state_store.rs:57)。単一インスタンスで第2プロセスは起動しない設計だが SID取得失敗時など acquire_or_forward が Server 縮退する経路(single_instance.rs:121-124)では複数プロセス同居しうる。その場合 2プロセスが同一 tmp に同時書込で相互上書きし部分破損 tmp を rename する競合余地がある。pid 等のプロセス固有サフィックスを tmp 名に付ければ構造的に排除できる。縁辺ケースのため low。"
+      },
+      {
+        "area": "転送無言失敗時の診断手掛かり (ux)",
+        "message": "forward_to_server は CreateFileW 失敗(ERROR_PIPE_BUSY 等)や build_forward_message 失敗で何も通知せず return し(single_instance.rs:232-257)CLI 側は spawn 成功で既に exit 0 を返す。契約上 終了コード0=受理(開かれた保証ではない)なので仕様内だが稀な競合でファイルが開かない場合に診断手掛かりが残らない。sprint7 診断ログ(要件12.3)への転送失敗記録か最小限のリトライ(短命接続の BUSY は再試行余地)を将来検討。pika-cli の help/version/エラーの stderr/stdout 分離・終了コード規約・未知オプション拒否は良好。"
+      }
+    ]
+  },
+  "passed": false,
+  "evaluator_skill": "assign-dev-evaluator"
+}

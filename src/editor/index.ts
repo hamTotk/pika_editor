@@ -19,6 +19,11 @@ export interface EditorHandle {
    * リロード 1 回を 1 つの取り消し単位として Ctrl+Z で直前の自分の状態へ戻せる（要件5.1）。
    */
   reloadExternal(text: string): void;
+  /**
+   * 指定位置へカーソルを置く（`-g <file>:<行>[:<桁>]` の goto・要件3.1）。
+   * 行・桁は 1 始まり。行数超過は最終行、桁省略/超過は行頭/行末へクランプする。
+   */
+  gotoPosition(line: number, column: number): void;
   /** 破棄する。 */
   destroy(): void;
 }
@@ -84,6 +89,17 @@ export function createEditor(
         scrollIntoView: false,
       });
       view.scrollDOM.scrollTop = scrollTop;
+    },
+    gotoPosition: (line: number, column: number) => {
+      // 行数超過は最終行へクランプ（要件3.1: 行数超過は最終行）。1 始まり→CM6 の 1 始まり行。
+      const lineCount = view.state.doc.lines;
+      const targetLine = Math.max(1, Math.min(line, lineCount));
+      const lineInfo = view.state.doc.line(targetLine);
+      // 桁省略/超過は行頭/行末へクランプ（要件3.1: 桁省略は行頭）。
+      const col = Math.max(1, column);
+      const pos = Math.min(lineInfo.from + (col - 1), lineInfo.to);
+      view.dispatch({ selection: { anchor: pos, head: pos }, scrollIntoView: true });
+      view.focus();
     },
     destroy: () => view.destroy(),
   };
