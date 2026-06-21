@@ -84,6 +84,22 @@ export function initLandmarks(): void {
   }
 }
 
+/**
+ * スクリーンリーダー専用ライブ領域へ短いメッセージを announce する（要件11.5・eval medium）。
+ * 表示専用ステータス（aria-live=off・pointer-events:none）では読み上げ到達が弱い情報
+ * （差分あり件数など）を、視覚的に隠した polite ライブ領域から確実に読ませる。
+ * 同一テキストの連続更新でも再読み上げされるよう一旦クリアしてから入れる。
+ */
+export function announce(message: string): void {
+  const region = document.getElementById("sr-live");
+  if (!region) return;
+  region.textContent = "";
+  // 次のフレームで入れて aria-live の変化を確実に検知させる。
+  requestAnimationFrame(() => {
+    region.textContent = message;
+  });
+}
+
 /** a11y 全体の初期化（main.ts から1回呼ぶ）。 */
 export function initA11y(): void {
   initLandmarks();

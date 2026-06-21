@@ -1040,3 +1040,44 @@
 - **状態（sprint 7・iteration1）**: 決定論ゲート（cargo test pika-core **317 件**〔T-009 比 +49＝notify_queue 11・
   diagnostic 7・nontext 10・view_state 9・shortcuts 11・他+1〕＋pika-cli 11・pika-app 5）PASS・cargo build（crates＋
   src-tauri・警告エラー扱い・exit 0）／npm typecheck 成立。上記 TG1〜TG10 の実 GUI 反映は系統C（Windows 実機）で確認する。
+
+## T-011 — sprint 7 iteration 2: a11y キーボード操作性／ショートカット配線／保存エンコーディング維持の是正
+
+前ターン eval（turn-7-1）の feedback を high → medium の順に是正した。決定論ゲート（cargo test 317 件）は据え置き
+（本是正は frontend 配線とデータ整合の結線が中心で pika-core ロジックは非回帰）、cargo build／npm typecheck は exit 0。
+
+- **[HIGH] ファイルツリーのキーボード操作性（要件11.4/11.5・design doc 17章 must）** — `src/ui/tree.ts` を本実装。
+  - **roving tabindex**: ツリー内で常に 1 つの treeitem だけ `tabIndex=0`（残り -1）。Tab 一発でツリーへ入れる。
+  - **↑/↓/Home/End** で treeitem 間移動・**Enter/Space でファイルを開く**（openFile 起動）。これでマウスなしで
+    「開く→プレビュー→差分→確認済み」の**起点に到達できる**（前ターンは treeitem=tabIndex-1＋click のみで到達不能だった）。
+  - **ディレクトリ treeitem に `aria-expanded`** を付与（sprint 7 must の明示要求。現状ツリーは 1 段表示のため折りたたみ
+    `false` として表現）。状態マーク（±/◆/取消線）を `aria-label` にテキスト化（色/記号に依存しない読み上げ）。
+  - フォーカス可視化を `app.css` の `:focus-visible` で追加（キーボードで入った位置が分かる）。実読み上げは系統C（TG1/TG2）。
+- **[HIGH] 主要ショートカット表の frontend 配線（要件11.2）** — `pika-core::shortcuts::resolve`（cargo test 済み）の
+  写し `src/shortcuts.ts`（`resolveShortcut`・パリティ契約をヘッダに明記）を新設し、`main.ts` の独自インライン keydown を
+  **resolve ベースのディスパッチ**（`currentFocus`→`resolveShortcut`→`dispatchAction`）へ置換。これで前ターン dead code 化
+  していた Ctrl+O/Ctrl+Shift+O/Ctrl+S/Ctrl+W/Ctrl+F/Ctrl+H/Ctrl+\\/Ctrl+Shift+E/Ctrl+Shift+D/F8系/Ctrl+Enter 系が
+  **キーボードから発火**する。Ctrl+Enter の誤爆防止（差分/プレビューフォーカス時のみ確認済み）も currentFocus で結線。
+  検索/置換バー UI 実体は系統C（TG8 で表どおりの発火を実機確認）。
+- **[MEDIUM] 保存のエンコーディング維持（要件5.2/5.6・最上位原則）** — `main.ts` の保存導線を旧 `save_file`（UTF-8 直書き）
+  から **`save_document`** へ寄せた。開くときも `read_file` ではなく `open_document` を使い**検出エンコーディング/BOM を
+  タブに保持**して保存時へ渡す。これで Shift_JIS 等が暗黙 UTF-8 化されず、表現不能文字があれば**保存を中断**して
+  ［UTF-8で保存/キャンセル］を提示する（save_document は退避が先＝incoming 退避→失敗なら中断も担保）。
+- **[MEDIUM] 診断ログの並行書込直列化（要件12.3）** — `src-tauri/src/diagnostic.rs` の `log_with_min` 全体を
+  プロセス内 `OnceLock<Mutex<()>>` で囲み、「サイズ確認→ローテーション→追記」を不可分区間にした。複数スレッド
+  （watcher/command/search）が同時に record() しても世代ずれ/行取りこぼし/5MB超過 append が起きない。毒ロックは
+  into_inner で続行しアプリを止めない（診断は副次）。`plan_rotation` の純粋ロジック自体は pika-core で既にテスト済み。
+- **[MEDIUM] フォルダ切替の未保存確認を三択化（要件5.3）** — `main.ts` `switchFolder` の二択 window.confirm を、
+  **対象ファイル名を列挙**したうえで「保存して切替／破棄して切替／キャンセル」の三択へ（window.confirm 2段で表現）。
+  「保存して切替」は save_document 経由で全 dirty タブを保存し、保存中断/失敗が残れば切替を中止する（無確認の喪失をしない）。
+- **[MEDIUM] ARIA 到達性の補強** — (1) ディレクトリ treeitem に aria-expanded（上記）。(2) 表示専用ステータスとは別に、
+  視覚的に隠した polite ライブ領域 `#sr-live`（`.sr-only`）を追加し**差分あり件数を announce**（aria-live=off の div への
+  aria-label 依存より読み上げ到達が確実）。(3) `src/ui/tabs.ts` に **tablist の roving tabindex＋←/→/Home/End 移動**を実装し
+  バッジ状態を aria-label テキスト化。実読み上げは系統C（TG1）。
+- **[LOW] 環境制約の記録** — `cargo audit` は本環境に cargo-audit 未導入で未実行（sprint 7 verify 配列は cargo test/cargo build
+  のみ・テスト緩和ではない）。comrak(unsafe_HTML)/ammonia/Mermaid/KaTeX/highlight の攻撃面依存があるためリリース前（系統C）に
+  advisory DB 照合結果をここへ記録する。SnapshotService のインメモリ永続化はリリース前に index.json+content-addressed object
+  復元が要る（sprint 3 からの繰り越し・本スプリント非回帰）。
+- **状態（sprint 7・iteration2）**: cargo test（pika-core 317・pika-cli 11・pika-app 5）PASS・cargo build（警告エラー扱い・
+  exit 0）・cargo fmt --check clean・npm typecheck 成立。上記の実 GUI 反映（キーボードのみ中心体験完走・ショートカット発火・
+  読み上げ・三択確認）は系統C（TG1/TG2/TG8）で確認する。

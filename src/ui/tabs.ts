@@ -1,6 +1,8 @@
 // タブ（要件5.3・ui-design 5章）。role=tablist/tab の土台＋未読/未保存/削除済みの重畳バッジ。
 // 表示優先順位は 削除済み ＞ 未保存 ＞ 未読（要件5.3）とし、色だけに依存せず記号でも区別する。
-// 全タブ一覧ドロップダウン・端のバッジは sprint 7（design doc 17章）で本実装する。
+// sprint 7（design doc 17章）で **キーボード操作性**を本実装する: roving tabindex（tablist 内で常に
+// 1 つだけ tabIndex=0）＋ ←/→ でタブ移動・Home/End で先頭/末尾（WAI-ARIA tablist パターン）。
+// バッジの状態は aria-label にテキスト化して読み上げ到達を確実にする（要件11.5）。
 import { UNREAD_MARK, type UnreadStore } from "./unread";
 
 const host = () => document.getElementById("tabs") as HTMLElement;
@@ -23,17 +25,70 @@ export function renderTabs(
     const btn = document.createElement("button");
     btn.type = "button";
     btn.setAttribute("role", "tab");
-    btn.setAttribute("aria-selected", String(tab.path === activePath));
+    const selected = tab.path === activePath;
+    btn.setAttribute("aria-selected", String(selected));
+    // roving tabindex: 選択中タブのみ Tab 到達可能（0）・残りは -1（WAI-ARIA tablist）。
+    btn.tabIndex = selected ? 0 : -1;
     btn.dataset.path = tab.path;
 
     const badge = tabBadge(tab.path, tab.dirty ?? false, unread);
     btn.textContent = `${badge.prefix}${stripPrefix(tab.title)}${badge.suffix}`;
+    // 状態（未保存/未読/削除済み）を aria-label にテキスト化して読み上げ到達を確実にする（要件11.5）。
+    btn.setAttribute("aria-label", tabAriaLabel(stripPrefix(tab.title), tab.dirty ?? false, badge));
     if (badge.removed) {
       btn.style.textDecoration = "line-through"; // 削除済みは取り消し線（要件7.2）。
     }
     btn.addEventListener("click", () => onActivate(tab.path));
+    btn.addEventListener("keydown", (e) => onTabKeydown(e, btn, onActivate));
     el.appendChild(btn);
   }
+}
+
+/** タブ間のキーボード移動（←/→・Home/End＝WAI-ARIA tablist パターン・要件11.5）。 */
+function onTabKeydown(
+  e: KeyboardEvent,
+  btn: HTMLButtonElement,
+  onActivate: (path: string) => void,
+): void {
+  const tabs = Array.from(host().querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+  const idx = tabs.indexOf(btn);
+  let target: HTMLButtonElement | undefined;
+  switch (e.key) {
+    case "ArrowRight":
+      target = tabs[(idx + 1) % tabs.length];
+      break;
+    case "ArrowLeft":
+      target = tabs[(idx - 1 + tabs.length) % tabs.length];
+      break;
+    case "Home":
+      target = tabs[0];
+      break;
+    case "End":
+      target = tabs[tabs.length - 1];
+      break;
+    default:
+      return;
+  }
+  if (!target) return;
+  e.preventDefault();
+  // 移動先のタブへフォーカス＋アクティブ化（tablist は自動アクティベーション）。
+  target.focus();
+  const path = target.dataset.path;
+  if (path) onActivate(path);
+}
+
+/** タブの状態を読み上げ用テキストに集約する（色/記号に依存しない・要件11.5）。 */
+function tabAriaLabel(
+  title: string,
+  dirty: boolean,
+  badge: { removed: boolean; suffix: string },
+): string {
+  const states: string[] = [];
+  if (dirty) states.push("未保存");
+  if (badge.removed) states.push("削除済み");
+  else if (badge.suffix.includes(UNREAD_MARK.created)) states.push("新規");
+  else if (badge.suffix.includes(UNREAD_MARK.modified)) states.push("差分あり");
+  return states.length > 0 ? `${title}（${states.join("・")}）` : title;
 }
 
 /** タイトル先頭に付けた旧来の未保存印（● ）を一旦取り除く（重畳を一元計算するため）。 */

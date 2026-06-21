@@ -27,6 +27,19 @@ body {
   position: relative;
 }
 
+/* スクリーンリーダー専用（視覚的に隠すが読み上げには残す）。差分あり件数の announce 領域に使う。 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 #toolbar {
   display: flex;
   gap: 8px;
@@ -91,6 +104,12 @@ body {
   background: var(--bg-active);
 }
 
+/* キーボードフォーカスを明示する（roving tabindex でツリーへ入ったとき位置が分かる＝要件11.5）。 */
+#tree [role="treeitem"]:focus-visible {
+  outline: 2px solid var(--accent, Highlight);
+  outline-offset: -2px;
+}
+
 #editor-pane {
   display: grid;
   grid-template-rows: auto 1fr;
@@ -120,6 +139,12 @@ body {
 #tabs [role="tab"][aria-selected="true"] {
   background: var(--bg-raised);
   color: var(--text-1);
+}
+
+/* タブのキーボードフォーカス可視化（←/→ 移動時に位置が分かる＝要件11.5）。 */
+#tabs [role="tab"]:focus-visible {
+  outline: 2px solid var(--accent, Highlight);
+  outline-offset: -2px;
 }
 
 #editor-host {

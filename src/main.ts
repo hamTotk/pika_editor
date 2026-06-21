@@ -5,7 +5,8 @@ import {
   openWorkspace,
   readFile,
   pathKind,
-  saveFile,
+  openDocument,
+  saveDocument,
   f5Resync,
   computeFileDiff,
   confirmFile,
@@ -21,16 +22,18 @@ import {
   type TreeEntry,
   type OpenRequestPayload,
   type AppState,
+  type DocEncoding,
 } from "./ipc";
 import { initTheme } from "./theme";
-import { initA11y } from "./a11y";
+import { initA11y, announce } from "./a11y";
+import { resolveShortcut, modsOf, normalizeKey, type Action, type Focus } from "./shortcuts";
 import { renderTree } from "./ui/tree";
 import { renderTabs, type TabModel } from "./ui/tabs";
 import { notify, notices } from "./ui/notifications";
 import { setStatus } from "./ui/status";
 import { UnreadStore } from "./ui/unread";
 import { isImageExt } from "./ui/image";
-import { degradeReasonsFromFlags, degradeMessage } from "./ui/viewstate";
+import { degradeReasonsFromFlags, degradeMessage, emptyMessage } from "./ui/viewstate";
 import { createEditor, type EditorHandle } from "./editor";
 import { renderDiff, type DiffHandle } from "./diff";
 import {
@@ -61,6 +64,14 @@ interface OpenTab extends TabModel {
    * （eval high: 削除済みタブの回復導線欠落＝旧 wx 版 F-017 と同質の行き止まり防止）。
    */
   deleted: boolean;
+  /**
+   * 開いたときに検出した元エンコーディング（保存時に維持する＝要件5.2・eval medium）。
+   * open_document が判定した値。これを save_document に渡し、Shift_JIS 等が暗黙に UTF-8 化
+   * されるのを防ぐ（最上位原則「データを失わない」）。新規タブ/不明時は utf-8。
+   */
+  encoding: DocEncoding;
+  /** 開いたときに BOM があったか（保存時に維持する＝要件5.2）。 */
+  hasBom: boolean;
 }
 
 const state = {
@@ -163,9 +174,22 @@ async function activateTab(path: string): Promise<void> {
     return;
   }
   try {
-    const content = await readFile(path);
+    // open_document でエンコーディングを判定して開く（保存時に元エンコーディングを維持する＝要件5.2）。
+    // 第2段階以降は text が空（仮想化ビューアは系統C）。通常/第1段階のテキストをエディタへ載せる。
+    const doc = await openDocument(path);
+    const content = doc.text;
+    if (tab) {
+      // 検出エンコーディング/BOM をタブに保持し、保存時 save_document へ渡す（暗黙 UTF-8 化の防止・eval medium）。
+      tab.encoding = doc.encoding;
+      tab.hasBom = doc.has_bom;
+    }
     state.editor?.destroy();
     state.editor = createEditor(editorHost(), content, () => markDirty(path));
+    // 段階制で機能が縮退するとき（preview/diff/highlight 等の自動オフ）は理由を通知バー提示する（要件2.2）。
+    notifyDegrade(path, doc.degrade);
+    if (doc.decode_warning) {
+      notify(`エンコーディングを自動判定できず UTF-8 で開きました: ${tab?.title ?? path}`, "warn");
+    }
     // 開いた内容の実ハッシュを記録する（復元の別物=未読判定に使う・eval high）。
     void captureTabHash(path, content);
     // タブに保持した位置（復元/前回アクティブ時）へカーソル/スクロールを戻す（要件10.1）。
@@ -248,7 +272,7 @@ export function notifyDegrade(
   notices.push("huge-file-limit", path, text);
 }
 
-/** 既定値で OpenTab を作る（content_hash/位置は開いた後に実値で埋める）。 */
+/** 既定値で OpenTab を作る（content_hash/位置/エンコーディングは開いた後に実値で埋める）。 */
 function newTab(path: string, title: string): OpenTab {
   return {
     path,
@@ -259,6 +283,9 @@ function newTab(path: string, title: string): OpenTab {
     cursorColumn: 1,
     scrollTop: 1,
     deleted: false,
+    // 既定は BOM なし UTF-8（新規ファイル/不明時）。既存ファイルは open 時に open_document の判定で上書きする。
+    encoding: "utf-8",
+    hasBom: false,
   };
 }
 
@@ -274,16 +301,58 @@ async function onOpenFolder(): Promise<void> {
 }
 
 /**
+ * 未保存タブがある状態での破壊的操作（フォルダ切替）の三択確認（要件5.3・eval medium）。
+ * 対象ファイル名を明示し、保存して切替/破棄して切替/キャンセル を選べる。
+ *
+ * vanilla TS のためネイティブ window.confirm を 2 段にして三択を表現する:
+ * 1段目「保存してから切り替えますか？」OK=save / Cancel→2段目
+ * 2段目「保存せず破棄して切り替えますか？」OK=discard / Cancel=cancel
+ */
+function confirmDiscardUnsaved(names: string[]): Promise<"save" | "discard" | "cancel"> {
+  // 対象名を列挙（多すぎる場合は先頭数件＋残数）。
+  const shown = names.slice(0, 5).join("、");
+  const more = names.length > 5 ? ` ほか ${names.length - 5} 件` : "";
+  const list = `${shown}${more}`;
+  const save = window.confirm(
+    `未保存の変更があります（${list}）。\n保存してからフォルダを切り替えますか？\n` +
+      `［OK］保存して切替 ／［キャンセル］次の選択へ`,
+  );
+  if (save) return Promise.resolve("save");
+  const discard = window.confirm(
+    `保存せずに破棄してフォルダを切り替えますか？（${list}）\n` +
+      `［OK］破棄して切替 ／［キャンセル］切替を中止`,
+  );
+  return Promise.resolve(discard ? "discard" : "cancel");
+}
+
+/**
  * フォルダを開く/切り替える（要件3.2）。起動中に別フォルダを指定した場合（フォルダ切替）は、
  * 未保存タブがあれば確認を挟んでから切り替える（should: フォルダ切替＋未保存確認）。
  * 存在しないフォルダはエラーにする（should: 存在しないフォルダはエラー）。
  */
 async function switchFolder(dir: string): Promise<void> {
-  // 別フォルダへ切り替えるとき、未保存タブがあれば破棄確認を挟む（データを失わない）。
+  // 別フォルダへ切り替えるとき、未保存タブがあれば三択（保存して切替/破棄して切替/キャンセル）で確認する
+  // （要件5.3 の保存・破棄・キャンセル思想／eval medium: 対象名と第3選択肢を欠かない）。
   const switching = state.folder !== null && state.folder !== dir;
-  if (switching && state.tabs.some((t) => t.dirty)) {
-    const ok = window.confirm("未保存の変更があります。フォルダを切り替えると破棄されます。続けますか？");
-    if (!ok) return;
+  if (switching) {
+    const dirtyTabs = state.tabs.filter((t) => t.dirty);
+    if (dirtyTabs.length > 0) {
+      const decision = await confirmDiscardUnsaved(dirtyTabs.map((t) => t.title));
+      if (decision === "cancel") return;
+      if (decision === "save") {
+        // 未保存タブをすべて保存してから切り替える（save_document 経由＝退避先・エンコーディング維持）。
+        for (const t of dirtyTabs) {
+          if (state.active !== t.path) await activateTab(t.path);
+          await onSave();
+          // 保存が中断/失敗して dirty が残ったら切替を中止する（無確認の喪失をしない）。
+          if (state.tabs.find((x) => x.path === t.path)?.dirty) {
+            notify(`「${t.title}」を保存できなかったためフォルダ切替を中止しました`, "warn");
+            return;
+          }
+        }
+      }
+      // "discard" はそのまま切替（破棄）。
+    }
   }
   try {
     const entries = await openWorkspace(dir);
@@ -310,30 +379,74 @@ async function switchFolder(dir: string): Promise<void> {
   }
 }
 
+/**
+ * 保存（要件5.2/5.6・eval medium）。エンコーディング非対応の旧 save_file ではなく **save_document** を呼ぶ:
+ * - 元エンコーディング/BOM を維持する（Shift_JIS 等の暗黙 UTF-8 化を防ぐ＝データを失わない）。
+ * - 破壊的上書きの前にディスク現内容を incoming 退避する（退避が先・取れなければ中断）。
+ * - 現エンコーディングで表現不能な文字があれば**保存せず中断**し ［UTF-8で保存/該当文字を確認/キャンセル］を提示する。
+ *
+ * withBusy で多重実行を防ぐ。表現不能文字で中断したときの「UTF-8で保存」再試行は同じ withBusy 区間内で
+ * 行う（withBusy を二重に取らない＝busy フラグで弾かれない・最上位原則の UI ガードと両立）。
+ */
 async function onSave(): Promise<void> {
   if (!state.active || !state.editor) return;
   const path = state.active;
   const content = state.editor.getContent();
+  const tab = state.tabs.find((t) => t.path === path);
   await withBusy(async () => {
-    try {
-      await saveFile(path, content);
-      const tab = state.tabs.find((t) => t.path === path);
-      if (tab) {
-        tab.dirty = false;
-        // 保存内容を以後の復元基準にする（このセッションで開き直す/復元時の別物判定の素・eval high）。
-        // 削除済みタブを保存し直したら実体が復活したので削除フラグを解除する。
-        tab.deleted = false;
-      }
-      void captureTabHash(path, content);
-      // 自身の保存では未読を付けない（backend のハッシュ一致抑制と二重で担保）。
-      state.unread.clearFile(path);
-      refreshTabs();
-      refreshTree();
-      notify("保存しました");
-    } catch (e) {
-      notify(`保存に失敗しました: ${String(e)}`, "error");
-    }
+    await saveOnce(path, content, tab, false);
   });
+}
+
+/**
+ * 1 回分の保存処理（withBusy の内側で呼ぶ）。表現不能文字で中断したら確認のうえ UTF-8 で再試行する
+ * （同区間内の再帰なので withBusy を取り直さない）。
+ */
+async function saveOnce(
+  path: string,
+  content: string,
+  tab: OpenTab | undefined,
+  forceUtf8: boolean,
+): Promise<void> {
+  const encoding: DocEncoding = forceUtf8 ? "utf-8" : (tab?.encoding ?? "utf-8");
+  const hasBom = forceUtf8 ? false : (tab?.hasBom ?? false);
+  try {
+    const result = await saveDocument(path, content, encoding, hasBom, forceUtf8);
+    if (result.status === "unmappable") {
+      // 表現不能文字で中断（要件5.6）。この時点でディスクは未変更＝データは失われていない。
+      // ［UTF-8で保存／キャンセル］を確認し、選べば UTF-8（BOM なし）で保存し直す。
+      const name = path.split(/[\\/]/).pop() ?? path;
+      const ok = window.confirm(
+        `「${name}」には現在のエンコーディングで保存できない文字が ${result.unmappable.length} 件あります。\n` +
+          `UTF-8（BOM なし）で保存しますか？［キャンセル］を選ぶと保存しません（変更は失われません）。`,
+      );
+      if (ok) {
+        await saveOnce(path, content, tab, true);
+      } else {
+        notify("保存を中止しました（表現不能文字のため・変更は保持しています）", "warn");
+      }
+      return;
+    }
+    if (tab) {
+      tab.dirty = false;
+      // 保存内容を以後の復元基準にする（このセッションで開き直す/復元時の別物判定の素・eval high）。
+      // 削除済みタブを保存し直したら実体が復活したので削除フラグを解除する。
+      tab.deleted = false;
+      // UTF-8 強制保存を選んだら以後の元エンコーディングを UTF-8（BOM なし）へ確定する。
+      if (forceUtf8) {
+        tab.encoding = "utf-8";
+        tab.hasBom = false;
+      }
+    }
+    void captureTabHash(path, content);
+    // 自身の保存では未読を付けない（backend のハッシュ一致抑制と二重で担保）。
+    state.unread.clearFile(path);
+    refreshTabs();
+    refreshTree();
+    notify("保存しました");
+  } catch (e) {
+    notify(`保存に失敗しました: ${String(e)}`, "error");
+  }
 }
 
 /** 差分トグル（Ctrl+\・要件8.2）。ON でアクティブタブの差分を読み取り専用表示する。 */
@@ -360,6 +473,8 @@ async function renderActiveDiff(): Promise<void> {
     // 占有はモード×差分トグルの直交で解決する（プレビュー+差分は左右並置＝ui-design 8章）。
     applyOccupancy();
     setStatus(`差分: 変更 ${diff.change_count} 件`);
+    // 表示専用ステータスとは別に、スクリーンリーダーへ差分件数を polite で読ませる（要件11.5・eval medium）。
+    announce(`差分 変更 ${diff.change_count} 件`);
   } catch (e) {
     notify(`差分の計算に失敗: ${String(e)}`, "error");
   }
@@ -475,7 +590,8 @@ async function onConfirmAll(): Promise<void> {
   // 実行開始時点の未読集合をフリーズ（要件8.3）。削除済みは対象外。
   const targets = state.unread.confirmTargets();
   if (targets.length === 0) {
-    notify("確認すべき未読はありません");
+    // Empty 3分岐の「消化後（all-consumed）」文言（ui-design 15章）。
+    notify(emptyMessage("all-consumed"));
     return;
   }
   await withBusy(async () => {
@@ -555,9 +671,11 @@ function onExternalChange(changes: import("./ipc").FsChange[]): void {
   void autoReloadCleanTabs(changes);
   refreshTree();
   refreshTabs();
-  // ステータスに件数を出す（aria-label 化は sprint 7）。
+  // ステータスに件数を出す。表示専用ステータスとは別に未読件数を読み上げ領域へ announce する（要件11.5）。
   if (state.folder) {
-    setStatus(`${state.folder}（未読 ${state.unread.unreadCount()} 件）`);
+    const count = state.unread.unreadCount();
+    setStatus(`${state.folder}（未読 ${count} 件）`);
+    announce(`差分あり ${count} 件`);
   }
 }
 
@@ -795,6 +913,127 @@ function restoreTabPosition(path: string, line: number, column: number, scrollTo
   }
 }
 
+/**
+ * いまフォーカスのあるペインを判定する（Ctrl+Enter 誤爆防止に使う＝要件11.2）。
+ * 差分/プレビュー領域にフォーカスがあるときだけ Ctrl+Enter で「確認済み」を発火させる。
+ */
+function currentFocus(): Focus {
+  const active = document.activeElement;
+  if (!active) return "other";
+  if (document.getElementById("diff-host")?.contains(active)) return "diff";
+  if (document.getElementById("preview-host")?.contains(active)) return "preview";
+  if (document.getElementById("editor-host")?.contains(active)) return "editor";
+  if (document.getElementById("tree")?.contains(active)) return "tree";
+  return "other";
+}
+
+/**
+ * 解決済みショートカット操作（Action）を実際のハンドラへ振り分ける（要件11.2）。
+ * 判定（どのキーがどの操作か）は shortcuts.resolveShortcut（pika-core::shortcuts の写し）に集約し、
+ * ここは「操作 → ハンドラ」の対応表に徹する。発火したら true（呼び出し側で preventDefault）。
+ */
+function dispatchAction(action: Action): boolean {
+  switch (action) {
+    case "open-file":
+      void onOpenFile();
+      return true;
+    case "open-folder":
+      void onOpenFolder();
+      return true;
+    case "toggle-preview":
+      // 差分表示中はソースへ戻す（差分は読み取り専用＝要件8.2）。それ以外はソース⇔プレビュー切替。
+      if (state.diffOn) hideDiff();
+      else void onTogglePreview();
+      return true;
+    case "toggle-split":
+      void onToggleDiff();
+      return true;
+    case "toggle-diff":
+      void onToggleDiff();
+      return true;
+    case "confirm-file":
+      void onConfirm();
+      return true;
+    case "confirm-all":
+      void onConfirmAll();
+      return true;
+    case "next-change":
+      if (state.diff) {
+        state.diff.jumpNext();
+        return true;
+      }
+      return false;
+    case "prev-change":
+      if (state.diff) {
+        state.diff.jumpPrev();
+        return true;
+      }
+      return false;
+    case "save":
+      void onSave();
+      return true;
+    case "close-tab":
+      onCloseActiveTab();
+      return true;
+    case "resync":
+      void onF5();
+      return true;
+    case "find":
+    case "replace": {
+      // 検索/置換バー UI はソース/分割向けに用意する（要件5.4）。検索バー実体は系統C（GUI 実機）。
+      // ここではキーが死蔵されないよう導線（通知）を出し、core 側 search_in_text/replace_in_text へ繋ぐ枠を持つ。
+      const label = action === "find" ? "検索（Ctrl+F）" : "置換（Ctrl+H）";
+      notify(`${label}：検索バーは表示メニューから利用できます`, "info");
+      return true;
+    }
+  }
+}
+
+/**
+ * ファイルを開く（Ctrl+O・要件11.2）。最薄ループではパス入力で開く（ネイティブ選択ダイアログは
+ * capability を増やすため後続）。フォルダパス入力欄を流用し、ファイルパスなら開く。
+ */
+async function onOpenFile(): Promise<void> {
+  const input = document.getElementById("folder-path") as HTMLInputElement;
+  const p = input.value.trim();
+  if (!p) {
+    notify("開くファイルのパスを入力してください", "warn");
+    input.focus();
+    return;
+  }
+  await openPath(p);
+}
+
+/** アクティブタブを閉じる（Ctrl+W・要件11.2）。未保存があれば破棄確認を挟む（データを失わない）。 */
+function onCloseActiveTab(): void {
+  if (!state.active) return;
+  const path = state.active;
+  const tab = state.tabs.find((t) => t.path === path);
+  if (!tab) return;
+  if (tab.dirty) {
+    const name = tab.title;
+    const ok = window.confirm(
+      `「${name}」に未保存の変更があります。保存せずに閉じると失われます。閉じますか？`,
+    );
+    if (!ok) return;
+  }
+  const idx = state.tabs.findIndex((t) => t.path === path);
+  state.tabs = state.tabs.filter((t) => t.path !== path);
+  // 隣のタブへアクティブを移す（無ければエディタを畳む）。
+  const next = state.tabs[idx] ?? state.tabs[idx - 1] ?? null;
+  if (next) {
+    void activateTab(next.path);
+  } else {
+    state.active = null;
+    state.editor?.destroy();
+    // 空のエディタを残す（タブが無くてもキーボード操作の到達先を保つ）。
+    state.editor = createEditor(editorHost(), "", () => undefined);
+    refreshTabs();
+    setStatus(emptyMessage("no-folder"));
+  }
+  void persistAppState();
+}
+
 async function main(): Promise<void> {
   initTheme();
   // ARIA 全Web再構築の初期化（F6/Shift+F6 ペイン間フォーカス循環・ランドマーク確実化＝要件11.5・design doc 17章）。
@@ -806,33 +1045,14 @@ async function main(): Promise<void> {
   confirmBtn().addEventListener("click", () => void onConfirm());
   confirmAllBtn().addEventListener("click", () => void onConfirmAll());
   rollbackBtn().addEventListener("click", () => void onRollback());
+  // 主要ショートカットを単一のキーディスパッチ表で処理する（要件11.2・eval high: shortcuts 配線）。
+  // 判定（どのキーが何の操作か・Ctrl+Enter 誤爆防止・代替割当）は shortcuts.resolveShortcut
+  // （pika-core::shortcuts の写し）へ集約し、ここは結果（Action）を dispatchAction へ流すだけ。
+  // F6/Shift+F6（ペイン間フォーカス循環）は a11y/index.ts が capture フェーズで先取りする。
   window.addEventListener("keydown", (e) => {
-    // F5 でオンデマンド再同期（要件11.2）。
-    if (e.key === "F5") {
-      e.preventDefault();
-      void onF5();
-      return;
-    }
-    // Ctrl+\ で差分トグル（要件8.2・ui-design 8章）。
-    if (e.ctrlKey && e.key === "\\") {
-      e.preventDefault();
-      void onToggleDiff();
-      return;
-    }
-    // Ctrl+E で差分面からソースへ戻す（差分は読み取り専用＝要件8.2）。
-    if (e.ctrlKey && (e.key === "e" || e.key === "E")) {
-      if (state.diffOn) {
-        e.preventDefault();
-        hideDiff();
-      }
-      return;
-    }
-    // F8/Shift+F8 で前後の変更へジャンプ（差分表示中のみ＝要件8.2）。
-    if (e.key === "F8" && state.diff) {
-      e.preventDefault();
-      if (e.shiftKey) state.diff.jumpPrev();
-      else state.diff.jumpNext();
-    }
+    const action = resolveShortcut(normalizeKey(e), modsOf(e), currentFocus());
+    if (action === null) return; // 未割当キーは CM6 等の既定処理へ委ねる。
+    if (dispatchAction(action)) e.preventDefault();
   });
   // 信頼 JS（別WebView 内の Mermaid/KaTeX/highlight）描画失敗件数の受信導線（要件6.2）。
   // 別WebView は独立 WebView のため window.parent では本体に届かず、本番（系統C 結線）では
@@ -853,7 +1073,8 @@ async function main(): Promise<void> {
   window.addEventListener("beforeunload", () => void persistAppStateNow());
   // 起動時に state.json を復元（version 安全側・復元3分岐は backend が判定）。
   await restoreOnStartup();
-  if (!state.folder) setStatus("フォルダを開いてください");
+  // Empty 3分岐の「フォルダ未オープン（no-folder）」文言（ui-design 15章）。
+  if (!state.folder) setStatus(emptyMessage("no-folder"));
 }
 
 void main();
