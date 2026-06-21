@@ -13,9 +13,9 @@
 use include_dir::{include_dir, Dir};
 use pika_core::render::{
     check_image_bytes, check_svg_bytes, confine_under, join_under, prepare_html_preview,
-    prepare_markdown_preview, resolve_local_ref, wrap_preview_document, ExternalResourceAllow,
-    GuardDecision, LocalRefDecision, PreviewFlavor, PreviewResponse, DEFAULT_IMAGE_MAX_PIXELS,
-    DEFAULT_SVG_MAX_ELEMENTS, DEFAULT_SVG_MAX_PIXELS,
+    prepare_markdown_preview, resolve_local_ref, rewrite_local_image_refs, wrap_preview_document,
+    ExternalResourceAllow, GuardDecision, LocalRefDecision, PreviewFlavor, PreviewResponse,
+    DEFAULT_IMAGE_MAX_PIXELS, DEFAULT_SVG_MAX_ELEMENTS, DEFAULT_SVG_MAX_PIXELS,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -132,7 +132,7 @@ pub fn prepare_preview(
 
     // サニタイズ＋CSP（pika-core::render）。HTML 本体は以後ストアにのみ置き、invoke で返さない。
     // 系統B の危険検知（要件6.3）も同じ content からこの 1 回で済ませる（IPC 二重転送回避）。
-    let response = match mode {
+    let mut response = match mode {
         PreviewMode::Markdown => prepare_markdown_preview(&content, &allow),
         PreviewMode::Html => prepare_html_preview(&content, &allow),
     };
@@ -151,6 +151,18 @@ pub fn prepare_preview(
     let mut inner = preview.inner.lock().map_err(|_| "preview ロック失敗")?;
     inner.generation += 1;
     let generation = inner.generation;
+
+    // 文書本文（サニタイズ済み body）の相対 <img src> を配信ルート `/local/<gen>/` へ書き換える。
+    // 背景: 別WebView の文書 URL は `…/doc/<gen>` のため、相対 `img/x.png` はブラウザにより
+    // `/doc/img/x.png` に解決され、ローカル配信ルート `/local/<gen>/<相対パス>` に届かず 404 になる。
+    // ここで配信ルートへ前置する（前置のみ・`..`/絶対化はしない）。封じ込め検証は配信時の
+    // local_resource_response（resolve_local_ref＋canonicalize+prefix）が従来どおり担う。
+    // 系統A（Markdown）/系統B（HTML）双方に適用する（両系統とも相対画像を持ち得る）。書き換えは
+    // wrap_preview_document でラップする前の素の body に対して行う（/assets/・/local/ は絶対ルートで
+    // 相対解決の影響を受けない）。
+    let local_prefix = format!("/local/{generation}/");
+    response.body = rewrite_local_image_refs(&response.body, &local_prefix);
+
     let nonce = response.nonce.clone();
     let flavor = match response.flavor {
         PreviewFlavor::MarkdownTrustedJs => "markdown",

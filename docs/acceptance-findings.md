@@ -1191,9 +1191,11 @@
     katex.css の `.katex-mathml` 隠蔽が効いた）。
   - ✅ highlight: Python コードが github-dark テーマで配色（`def`/`return`/文字列/関数名）。
   - ✅ GFM テーブル罫線・タスクリスト・日本語も正常。
-- **本 Stage 残（次の即対応）**: **ローカル画像が未表示**（破損アイコン）。原因は CSP ではなく、相対
-  `<img src="img/sample.png">` が文書 URL `/doc/<gen>` 基準で `/doc/img/...` に解決され `/local/<gen>/` 配信
-  ルートに届かないこと。文書内の相対ローカル参照（img/CSS）を `/local/<gen>/<rel>` へ**書き換える**処理が必要。
+- **ローカル画像（修正済み・後続コミット）**: 相対 `<img src="img/sample.png">` が文書 URL `/doc/<gen>` 基準で
+  `/doc/img/...` に解決され `/local/<gen>/` 配信ルートに届かず破損していた。pika-core 純粋関数
+  `rewrite_local_image_refs(body, "/local/<gen>/")` を追加し `prepare_preview` で素の body の相対 `<img src>` を
+  配信ルートへ前置（絶対/スキーム付き/アンカー/`<a href>` は不変・封じ込めは従来の `resolve_local_ref`）。
+  → **実機で showcase.md のグラデーション画像が表示されることを確認**。
 - **繰り越し**: 権限ゼロ実証（JS 実行による形式検証）／Stage ③（テーマ CSS 変数・失敗件数 Tauri event 化・
   プレビュー＋差分の左右並置）／Stage ④（HTML 系統B・外部 opt-in・暴走ガード実機）。
 - **状態**: Stage ② 完了（4ゲート緑＋実機目視 OK・Mermaid/KaTeX/highlight 描画確認）。ローカル画像は次対応。
