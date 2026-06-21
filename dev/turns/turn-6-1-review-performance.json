@@ -1,0 +1,39 @@
+{
+  "reviewer": "performance",
+  "sprint_id": 6,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "IPC ペイロード / ホットパス",
+      "message": "search_in_text / replace_in_text が編集バッファ全文を `text: String` として毎回 invoke 引数で backend へ転送し、同期コマンドスレッドで search_all/replace_all を実行する。第1段階は最大 50MB まで CM6 で編集可能なため、検索のたびに最大 50MB の文字列が JS→Rust の IPC でシリアライズ/コピーされる(置換は戻り値でさらに全文を返す＝往復で 2 倍)。spec『IPC ラウンドトリップを性能予算に計上』『UI を 200ms 超ブロックしない』に対し構造的な再考余地がある。同期 #[tauri::command] fn なのでコマンドワーカースレッド上で走り WebView UI スレッド自体はブロックしない点が救いで、IPC コスト実測は系統C(docs/acceptance.md)送りのため critical でなく high。改善余地: 検索は backend がファイルを直接読む(編集中のみ全文転送)/差分検索のインクリメンタル化/結果のみ返す置換(編集は CM6 トランザクション)など。少なくとも acceptance-findings に『50MB 検索/置換の IPC 往復実測』を明示的な計測項目として残すべき。",
+      "location": "src-tauri/src/document.rs:362-416, src/ipc.ts:404-436"
+    },
+    {
+      "severity": "medium",
+      "area": "協調キャンセルの粒度",
+      "message": "search_all/replace_all のキャンセル確認(cancel.is_cancelled)はマッチ境界(ループ先頭)でのみ行われる。1 回の find_from_pos / captures_from_pos がヒットなしで長距離を走査する間はキャンセルが効かない。catastrophic backtracking は backtrack_limit(100万)で上限化されているため無限ハングはしないが、50MB の haystack で稀なパターンを 1 回走査する場合のキャンセル応答性は粗い。要件5.4『キャンセル可能』は満たすが、巨大ファイルでの応答性として改善余地(全件走査のバッチ分割で定期チェック等)。",
+      "location": "crates/pika-core/src/search.rs:180-213, 261-308"
+    },
+    {
+      "severity": "medium",
+      "area": "保存パスの多重スキャン",
+      "message": "encode_for_save の Shift_JIS 経路は (1) find_unmappable で全 char を 1 文字ずつ encode 試行 → (2) encoding_rs().encode(text) で全文 encode → (3) had_errors なら find_unmappable をもう一度、と全文を最大 3 回走査する。第1段階は最大 50MB の Shift_JIS 保存があり得るため O(n) 係数が無駄に大きい。had_errors を信頼して unmappable 検出を encode の結果から導く/find_unmappable と encode を一本化することでパス数を削減できる。コマンドスレッド実行で UI ブロックはしないため medium。UTF-8/UTF-16 経路は検査スキップ済みで適切。",
+      "location": "crates/pika-core/src/encoding.rs:225-273"
+    },
+    {
+      "severity": "low",
+      "area": "ハッシュ用バッファ確保",
+      "message": "hash_normalized_lf は LF 正規化のため `Vec::with_capacity(bytes.len())` で入力全体のコピーを 1 本作ってからハッシュする。save_document の自己保存抑制で保存バイト列(第1段階最大 50MB)に対し毎保存 1 回走る。XxHash は逐次 write 可能なのでコピーを作らずチャンク単位に正規化しながら write すればピークメモリを削減できる。保存頻度は『たまに』かつコマンドスレッド実行のため低優先。range 読取(read_range)は 1MB ウィンドウのみ読む正しい設計で全量ロードを避けており、ここは指摘なし(良い)。",
+      "location": "crates/pika-core/src/hashing.rs:22-41, src-tauri/src/document.rs:207-210"
+    },
+    {
+      "severity": "low",
+      "area": "段階制の設計妥当性(肯定的所見)",
+      "message": "巨大ファイル段階制の中核(第2段階で open_document が text を返さず needs_virtual_viewer で range 読取へ回す/read_range が window_around の 1 ウィンドウのみ seek+read する/第1段階で preview・diff・baseline 内容保存・highlight を auto_off)は『CM6 に全量ロードしない』『重い機能を自動オフ』という性能要件を構造的に満たしている。閾値(10/50/500MB)も実測ゲート(系統C)に紐づき妥当。これは過剰最適化ではなく必要十分。critical/high 該当の構造的破綻は本観点では検出されなかった。",
+      "location": "src-tauri/src/document.rs:96-141, 261-297"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 6 の性能アーキは健全。巨大ファイルは段階制で第2段階を range 読取(1MBウィンドウ)へ回し CM6 全量ロードを構造的に回避、検索は backtrack_limit + マッチ件数上限 + 協調キャンセルで ReDoS/結果爆発を上限化しており、criteria のレイテンシ/スループット要件を『構造的に』満たせない実装(=critical)は無い。残課題は high 1 件(search/replace が編集全文 最大50MB を毎回 IPC 転送・同期コマンドスレッド実行、IPC コスト実測は系統C送りで critical 未満)、medium 2 件(キャンセル粒度がマッチ境界のみ・Shift_JIS 保存の全文多重スキャン)、low 2 件(ハッシュ用全量コピー・段階制設計は肯定所見)。いずれもコマンドワーカースレッド実行で WebView UI 自体はブロックしない点が救い。spec が IPC コスト/性能ゲートを系統C 手動 acceptance へ寄せている前提と整合する。"
+}

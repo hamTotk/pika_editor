@@ -276,3 +276,161 @@ export function onFsChanged(
 export function onWatchMode(handler: (message: string) => void): Promise<UnlistenFn> {
   return listen<string>("watch-mode", (e) => handler(e.payload));
 }
+
+// ── sprint 6: 巨大ファイル段階制・エンコーディング・検索置換 ──────────────────
+
+/** 巨大ファイル段階（要件2.2・pika-core::huge::FileStage と対応）。 */
+export type FileStage = "normal" | "stage1" | "stage2" | "too-large";
+
+/** 段階制の縮退フラグ（自動オフされた機能・通知バー提示用・要件2.2/11.1）。 */
+export interface DegradeFlags {
+  preview_off: boolean;
+  diff_off: boolean;
+  baseline_content_off: boolean;
+  highlight_off: boolean;
+  wrap_off: boolean;
+  editing_off: boolean;
+}
+
+/** 改行分類（表示メニュー用・要件5.2）。 */
+export type LineEnding = "lf" | "crlf" | "cr" | "mixed" | "none";
+
+/** エンコーディング識別子（保存時に維持する・要件5.2）。 */
+export type DocEncoding = "utf-8" | "utf-16le" | "utf-16be" | "shift_jis";
+
+/** open_document の戻り（src-tauri document::OpenedDocument と対応・要件2.2/5.2）。 */
+export interface OpenedDocument {
+  stage: FileStage;
+  degrade: DegradeFlags;
+  /** デコード済みテキスト（第2段階以降/上限超では空＝仮想化ビューア or エラー）。 */
+  text: string;
+  encoding: DocEncoding;
+  has_bom: boolean;
+  line_ending: LineEnding;
+  /** 自動判定に失敗し UTF-8 警告で開いたか（要件5.2）。 */
+  decode_warning: boolean;
+  size_bytes: number;
+}
+
+/**
+ * 文書を開く（巨大ファイル段階制＋エンコーディング自動判定・要件2.2/5.2）。
+ * 第2段階以降は内容を返さず段階だけ返す（仮想化ビューアは readRange で読む）。
+ */
+export function openDocument(path: string): Promise<OpenedDocument> {
+  return invoke<OpenedDocument>("open_document", { path });
+}
+
+/** 表現不能文字 1 件（［該当文字を確認］のジャンプ用・要件5.6）。 */
+export interface UnmappableChar {
+  ch: string;
+  char_index: number;
+}
+
+/** save_document の結果（src-tauri document::SaveResultDto と対応・要件5.2/5.6）。 */
+export interface SaveResult {
+  /** "saved" = 保存完了 / "unmappable" = 表現不能文字で中断（選択肢提示）。 */
+  status: "saved" | "unmappable";
+  /** 中断時の表現不能文字（［UTF-8で保存/該当文字を確認/キャンセル］の「確認」用）。 */
+  unmappable: UnmappableChar[];
+}
+
+/**
+ * エンコーディングを維持して保存する（要件5.2/5.6）。表現不能文字があれば保存せず中断する。
+ * forceUtf8=true は［UTF-8で保存］選択肢（BOM なし UTF-8 で書き出す）。
+ */
+export function saveDocument(
+  path: string,
+  content: string,
+  encoding: DocEncoding,
+  hasBom: boolean,
+  forceUtf8: boolean,
+): Promise<SaveResult> {
+  return invoke<SaveResult>("save_document", {
+    path,
+    content,
+    encoding,
+    hasBom,
+    forceUtf8,
+  });
+}
+
+/** 仮想化ビューアの 1 ウィンドウ（src-tauri document::RangeWindowDto と対応・要件2.2 第2段階）。 */
+export interface RangeWindow {
+  start: number;
+  end: number;
+  size_bytes: number;
+  /** 範囲のテキスト（読み取り専用ビューア表示用）。 */
+  text: string;
+}
+
+/**
+ * 巨大ファイル（第2段階）のバイト範囲を読み行境界に整えて返す（要件2.2 第2段階・design doc 8章）。
+ * CM6 に全量ロードせず要求位置近傍の 1 ウィンドウだけを読む（読み取り専用）。
+ */
+export function readRange(
+  path: string,
+  center: number,
+  window?: number,
+): Promise<RangeWindow> {
+  return invoke<RangeWindow>("read_range", { path, center, window: window ?? null });
+}
+
+/** 検索オプション（要件5.4: 大文字小文字区別・単語単位・正規表現）。 */
+export interface SearchOptions {
+  case_sensitive: boolean;
+  whole_word: boolean;
+  regex: boolean;
+}
+
+/** 検索 1 ヒット（バイトオフセット半開区間・要件5.4）。 */
+export interface SearchMatch {
+  start: number;
+  end: number;
+}
+
+/** 検索結果（src-tauri document::SearchResultDto と対応・要件5.4）。 */
+export interface SearchResult {
+  matches: SearchMatch[];
+  /** 件数上限で打ち切られたか。 */
+  truncated: boolean;
+  /** キャンセルで打ち切られたか。 */
+  cancelled: boolean;
+}
+
+/**
+ * テキスト内検索（要件5.4: 全ヒット・件数・後方参照/キャプチャ参照/Unicode 文字クラス）。
+ * 新しい検索を始めると直前の検索はキャンセルされる（固まらない）。
+ */
+export function searchInText(
+  text: string,
+  query: string,
+  options: SearchOptions,
+): Promise<SearchResult> {
+  return invoke<SearchResult>("search_in_text", { text, query, options });
+}
+
+/** 置換結果（src-tauri document::ReplaceResultDto と対応・要件5.4）。 */
+export interface ReplaceResult {
+  text: string;
+  replaced: number;
+  truncated: boolean;
+  cancelled: boolean;
+}
+
+/**
+ * テキスト全置換（要件5.4: 正規表現置換・キャプチャ参照 $1/${name}）。
+ * 差分は読み取り専用・第2段階は置換無効（呼び出し側が段階で活性制御する）。
+ */
+export function replaceInText(
+  text: string,
+  query: string,
+  replacement: string,
+  options: SearchOptions,
+): Promise<ReplaceResult> {
+  return invoke<ReplaceResult>("replace_in_text", {
+    text,
+    query,
+    replacement,
+    options,
+  });
+}

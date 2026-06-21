@@ -258,6 +258,23 @@ CLI パース・役割決定の判断は系統A（core/ipc・controller/app_cont
 | TE7 | 暴走ガード（入力段計測・**本番経路結線済み**） | 画像6000万px・SVG8000万px/5万要素・HTML10秒を超える入力は配信せず通知バーで「既定のアプリ/ブラウザで開く」へ誘導（WebView 任せにしない） | 要件2.2・design doc 6章/7章 | [ ] 未実施（要実機。`local_resource_response` が配信前に `check_image_bytes`/`check_svg_bytes` を呼び 413 で弾く配線済み＝iteration2・check_image_bytes/check_svg_bytes/check_image_pixels/check_svg は cargo test 済み） |
 | TE8 | パス封じ込め | ローカル相対参照（画像/CSS）が基準ディレクトリ配下に封じ込められ、`../`/絶対パス/シンボリックリンク脱出/機密ファイル（`.env` 等）は配信拒否（壊れた参照はプレースホルダ） | 要件6.2/6.3/9.1・design doc 6章 | [ ] 未実施（要実機。resolve_local_ref/confine_under は cargo test 済み・local_resource_response は canonicalize+prefix 配線済み） |
 
+## TF. sprint 6 巨大ファイル段階制・エンコーディング・検索置換（所見は acceptance-findings.md T-009）
+
+> 段階判定・range 範囲算出・行整列・エンコーディング往復/保存中断・検索置換（fancy-regex）の
+> **決定論ロジックは系統A（cargo test）で検証済み**（pika-core::huge/range/encoding/search・61 件の新規テスト）。
+> 本節は実 GUI（Windows 実機 Release）での CM6 体感・仮想化ビューア描画・検索バー・エンコーディングメニュー・
+> 保存中断ダイアログの実効を確認する。**TF1 は必達（design doc 15章-6）**＝10MB 第1段階死守の合否ゲート。
+
+| # | 項目 | 受け入れ基準 | 根拠（requirements / design doc） | 結果 |
+|---|------|-------------|------|------|
+| TF1 | CM6 巨大ファイル実測（**必達**） | 基準機 Release で 10MB のファイルが編集・検索・保存が**通常通り可能**（第1段階死守）。CM6 劣化開始サイズを実測し第2段階=**50MB**・上限=**500MB** の確定値の妥当性を再確認。10MB を下回って劣化するなら中心体験後退として要件改訂提案 | 要件2.2・design doc 8章/15章-6（T-009） | [ ] 未実施（要基準機。段階確定値は requirements.md 2.2 改訂済み・FileStage は cargo test 済み 13 件） |
+| TF2 | エンコーディング往復 | Shift_JIS・CRLF のファイルを開いて編集・保存しても、エンコーディングと改行コードが変わらない | 要件5.2/5.6（T-009） | [ ] 未実施（要実機。decode/encode_for_save の往復一致は cargo test 済み） |
+| TF3 | Reopen with Encoding | Shift_JIS と誤判定された UTF-8 を「エンコーディングを指定して開き直す」で正しく再表示できる（「表示」メニュー） | 要件5.2/5.6（T-009） | [ ] 未実施（要実機。判定順 BOM→UTF-8→Shift_JIS は cargo test 済み） |
+| TF4 | 保存中断フロー | Shift_JIS で表現できない文字（絵文字等）を入れて保存しようとすると保存が中断し［UTF-8で保存/該当文字を確認/キャンセル］が提示される（無確認の文字欠落なし） | 要件5.2/5.6（T-009） | [ ] 未実施（要実機。Unmappable 検出＋該当文字インデックスは cargo test 済み） |
+| TF5 | 正規表現検索/置換 | 後方参照・キャプチャ参照・Unicode 文字クラスで検索でき、キャプチャ参照で全置換できる | 要件5.4・design doc 15章-8（T-009） | [ ] 未実施（要実機。fancy-regex 全機能は cargo test 済み 17 件・第一候補で確定） |
+| TF6 | 第2段階 読み取り専用ビューア | 50MB 超は仮想化ウィンドウビューア（range 読取）で閲覧・検索でき、編集/保存/置換が無効化される（CM6 へ全量ロードしない） | 要件2.2 第2段階・design doc 8章（T-009） | [ ] 未実施（要実機。window_around/align_to_lines は cargo test 済み・read_range 配線済み） |
+| TF7 | キャンセル可能な検索/置換 | 巨大ファイル/長行での検索・全置換が UI をブロックせず、進捗表示＋キャンセルできる（別スレッド実行） | 要件5.4・design doc 3章（T-009） | [ ] 未実施（要実機。Cancel 協調キャンセル・ReDoS バックトラック上限は cargo test 済み） |
+
 ## TB. 各スプリント末の性能計測（要件2.1・design doc 12章）
 
 | # | 指標 | 上限 | 結果 |

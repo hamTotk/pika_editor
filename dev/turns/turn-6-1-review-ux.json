@@ -1,0 +1,39 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 6,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "タスク完了導線（縮退/保存中断の到達性）",
+      "message": "sprint6 の保護導線（巨大ファイル段階制の縮退通知・第2段階の読み取り専用ビューア・エンコーディング保存中断の［UTF-8で保存/該当文字を確認/キャンセル］）は core ロジックと IPC 契約（document.rs/ipc.ts の openDocument/saveDocument/readRange）まで揃っているが、実際のエディタ起動フロー（src/main.ts）は依然として旧 read_file/save_file（commands.rs: read_to_string / std::fs::write でガード無し）を呼んでいる。openDocument/saveDocument/readRange は ipc.ts にのみ存在し main.ts/ui/* から未参照。結果、現状の生 UI フローで 600MB ファイルや Shift_JIS ファイルを開いても (1)上限超エラー誘導 (2)stage2 仮想化ビューアへの切替 (3)表現不能文字の保存中断 のいずれも発火しない。データ喪失には至らない（旧経路で読み書きは成立する）が、ユーザーが頼る保護導線が live UI から到達不能。sprint の must は cargo test 観測＋系統C 委譲で満たすが、UX 完了導線としては『契約あり・到達経路なし』の宙吊り状態。次ターンで main.ts/editor の open/save を openDocument/saveDocument 経路へ差し替え、degrade フラグ→通知バー・unmappable→選択肢ダイアログ・stage2→仮想化ビューアの結線が要る（acceptance L1〜L7・系統C で実機確認予定）。",
+      "location": "src/main.ts:161, src/main.ts:287; src-tauri/src/commands.rs:76; src-tauri/src/document.rs:97"
+    },
+    {
+      "severity": "medium",
+      "area": "システム状態の可視化（検索の打切り/キャンセルの提示）",
+      "message": "search_in_text/replace_in_text は truncated（DEFAULT_MAX_MATCHES=10万 超で打切り）と cancelled を DTO に正しく返し、ipc.ts 型にも露出している（情報設計は良好）。ただし要件5.4『進捗を表示する／一部のみ表示の提示』に対応する UI 側（検索バー・件数表示・truncated/cancelled の文言提示）は本スプリントでは未結線で、現状ユーザーには truncated（一部のみ）か完了かが判別できない。要件5.4 のインクリメンタル検索・ヒット件数表示・全ヒットハイライトを含め、検索バー UI は系統C（acceptance L5/L7）扱い。core/契約は十分なので次ターンの結線で『上限超のため一部のみ表示』『キャンセルしました』のフィードバック文言を必ず出すこと。",
+      "location": "src-tauri/src/document.rs:362; src/ipc.ts:404"
+    },
+    {
+      "severity": "medium",
+      "area": "エラーからの回復支援（decode_warning の次の一手）",
+      "message": "decode 自動判定に失敗した場合 UTF-8 lossy で無条件に開き had_decode_warning=true を返す設計は『まず開ける（行き止まりにしない）』点で UX 上正しい。OpenedDocument.decode_warning として契約にも露出している。一方で要件5.2 が想定する回復の次の一手＝『エンコーディングを指定して開き直す（Reopen with Encoding）』の導線（表示メニュー）が本スプリントでは未結線（acceptance L3 / 要件5.6 受入基準・系統C）。decode_warning を受け取って『文字化けの可能性。表示メニューから開き直せます』と次の一手を必ず提示する結線を次ターンで入れること。現状は警告フラグが UI に届く経路（main.ts）が無く、ユーザーは誤判定に気づいても回復導線に辿り着けない。",
+      "location": "crates/pika-core/src/encoding.rs:122; src-tauri/src/document.rs:79"
+    },
+    {
+      "severity": "low",
+      "area": "エラー文言の品質（CLI/通知バー DX）",
+      "message": "core/IPC 層のエラー文言は日本語で『何が起きたか＋次の一手』が概ね成立しており UX 上良好（例: ファイルが大きすぎて開けません（512.0 MB 上限）／検索が複雑すぎて打ち切りました（ReDoS の疑い）。パターンを見直してください）。一方 InvalidPattern は fancy-regex の内部メッセージ（e.to_string()）をそのまま連結しており、エンジン由来の英語/技術的表現がユーザーに露出しうる（perspectives『スタックトレースや内部コードの露出は ux 上 NG』に近い軽微な懸念）。実害は小さいが、UI 結線時に『正規表現が不正です: 〈該当箇所〉』のように平易化する余地がある。",
+      "location": "crates/pika-core/src/search.rs:111; crates/pika-core/src/search.rs:152"
+    },
+    {
+      "severity": "low",
+      "area": "情報設計（canon の TBD 確定の整合）",
+      "message": "要件2.2/5.4/9.2 の TBD 数値（第2段階 50MB・上限 500MB・第1段階 10MB 維持）が requirements.md に確定反映され、acceptance-findings T-009 / L1 に実測根拠と系統C 再確認項目が節番号併記で記録されている（情報設計・トレーサビリティは良好）。確認のみ: 実測（CM6 の体感劣化サイズ）は系統C 未実施で『50MB/500MB は Web 現実値の暫定確定・実機で妥当性再確認』段階であり、findings 上もその旨は明記済み。canon に推測値を断定で書き込んでいない点は適切。指摘ではなく整合確認。",
+      "location": "docs/requirements.md:111; docs/acceptance-findings.md:966"
+    }
+  ],
+  "has_critical": false,
+  "summary": "ux 観点で critical なし。本スプリントは巨大ファイル段階制・エンコーディング往復/保存中断・range 読取・検索置換の純粋ロジック（pika-core）と IPC/DTO 契約（document.rs/ipc.ts）を実装し、cargo test で導線分岐（上限超→開かない・stage2→読み取り専用・unmappable→保存中断・truncated/cancelled）を観測可能にした。エラー文言は日本語で『何が起きたか＋次の一手』が概ね成立し、decode 失敗時もまず開ける（行き止まりにしない）設計で UX 原則に適合。データ喪失導線・CLI 終了コード破綻は無く critical 該当なし。最大の UX 課題（high）は、これらの保護導線が ipc.ts の契約止まりで実エディタフロー（main.ts は旧 read_file/save_file を継続使用）から未到達なこと＝現状の live UI では縮退通知・保存中断・仮想化ビューアが発火しない『契約あり・到達経路なし』状態。ただし sprint の must は cargo test＋系統C 委譲で充足する設計であり、acceptance L1〜L7 に実機結線確認が節番号併記で登録済み。次ターンで open/save を新コマンド経路へ差し替え、degrade→通知バー／unmappable→選択肢ダイアログ／decode_warning→開き直し導線／truncated・cancelled→検索フィードバックを結線することを強く推奨する。"
+}

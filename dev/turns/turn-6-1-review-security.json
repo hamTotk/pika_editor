@@ -1,0 +1,27 @@
+{
+  "reviewer": "security",
+  "sprint_id": 6,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "DoS / リソース枯渇",
+      "message": "read_range の window 引数に上限クランプが無く、その値で vec![0u8; raw_range.len()] を確保する。window_around は window をそのまま使う(file_size でしかクランプされない)ため、フロントが過大な window(例 2GB)を渡すと巨大確保→一時的メモリ枯渇になりうる。到達経路は信頼境界内の main WebView 限定(プレビュー別WebViewはcapabilityゼロで到達不能)であり、ローカル単一ユーザーのデスクトップツールという性質上 critical でも high でもなく多層防御の不足。read_range 入口で window を DEFAULT_WINDOW_BYTES 等の妥当上限へクランプすると堅い。",
+      "location": "src-tauri/src/document.rs:266-283"
+    },
+    {
+      "severity": "low",
+      "area": "情報設計 / データ最小化の一貫性",
+      "message": "open_document / read_range / save_document は path をそのまま std::fs に渡し、snapshot::policy::is_sensitive(.env/*.key/*.pem/*secret*) による機密ファイル扱いを適用しない。設計上『機密ファイルは custom protocol からも配信拒否』(spec sprint3/4)だが、これらは編集系コマンドで読み書き対象として機密ファイルもデコードしてフロントへ返す。ただし(1)呼び出せるのは main WebView(=ユーザー自身の信頼シェル)のみで未信頼コンテンツからは到達不能、(2)機密ファイルでも『ベースライン内容保存をしない/平文コピーを残さない』のが要件9.1の趣旨で、ユーザーが自分の .env を開いて編集する経路自体は要件上の禁止行為ではない。よって脆弱性ではなく既存 read_file/save_file と同じ確立パターンに沿った設計判断。スナップショット退避が機密扱いを守れているか(policy.rs は守れている)が本質で、本コマンド群は対象外。記録のみ。",
+      "location": "src-tauri/src/document.rs:97,177,266"
+    },
+    {
+      "severity": "low",
+      "area": "依存 / 既知脆弱性",
+      "message": "新規追加依存 fancy-regex 0.16.2 / encoding_rs 0.8.35(推移: regex 1.12.4・aho-corasick 1.1.4・bit-set 0.8.0)はいずれも保守された定番クレートで、本レビュー時点で把握する既知の重大 CVE は無い。spec は cargo audit を CVE ゲートとして sprint7 で must 化する設計のため、本スプリントでの未実行は計画通り。追加依存の妥当性のみ確認(問題なし)。",
+      "location": "crates/pika-core/Cargo.toml:35-37"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint6(巨大ファイル段階制・エンコーディング往復・検索置換)の security 観点に critical は無い。最重要の injection sink である正規表現(ReDoS)は search.rs で適切に防御されている: fancy-regex の backtrack_limit(100万)で1マッチ毎のバックトラック爆発を上限化し BacktrackLimitExceeded を SearchError::Backtrack として弾く、全体処理は協調キャンセル(Cancel)+マッチ件数上限(10万)で打ち切る、空マッチの無限ループも char 境界前進で防ぐ。リテラル検索は fancy_regex::escape でメタ文字を無害化し injection 経路を作らない。新規コマンド(open_document/save_document/read_range/search_in_text/replace_in_text)は generate_handler! に登録されるが、capabilities/main.json が windows:[\"main\"] のみを許可し withGlobalTauri:false かつプレビュー別WebViewは capability ファイル不在=権限ゼロのため、未信頼文書 WebView から invoke/__TAURI_INTERNALS__ 経由で到達不能(sprint1/4 の最重要隔離契約を本スプリントの新コマンドも崩していない)。read_range の slice 境界算出(lead/trail)は align_to_lines の不変条件(start>=base かつ end>=start かつ end<=base+len)に守られパニックしない。エンコーディングは encoding_rs で BOM 最優先→strict 検査→UTF-8 lossy フォールバックと安全側で、Shift_JIS 表現不能文字は保存中断して無確認の文字欠落を防ぐ(データ最小化と整合)。残る指摘は read_range の window 無制限確保(信頼境界内のみ到達のため low)・編集系コマンドが機密ファイル扱いを適用しない一貫性(既存パターン踏襲・未信頼到達不能のため low)・新規依存の妥当性(問題なし)のみ。いずれも high/critical ではない。"
+}

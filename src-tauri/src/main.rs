@@ -13,6 +13,7 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod commands;
+mod document;
 mod jumplist;
 mod preview;
 mod single_instance;
@@ -60,6 +61,11 @@ fn run() {
             snapshot::confirm_all,
             snapshot::rollback_file,
             preview::prepare_preview,
+            document::open_document,
+            document::save_document,
+            document::read_range,
+            document::search_in_text,
+            document::replace_in_text,
         ])
         .setup(|app| {
             use tauri::Manager;
@@ -84,6 +90,8 @@ fn run() {
             app.manage(snapshot::SnapshotService::new());
             // プレビューサービス（サニタイズ済みレスポンスを世代キーで保持・custom protocol が引く）。
             app.manage(preview::PreviewService::new());
+            // 検索/置換のキャンセルトークン置き場（新しい検索で前のを打ち切る＝固まらない・要件5.4）。
+            app.manage(document::SearchCancelService::new());
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
             }

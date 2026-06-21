@@ -9,9 +9,10 @@
 
 use std::hash::Hasher;
 
-/// 巨大ファイル第1段階の閾値（要件2.2 暫定値・sprint6 で CM6 実測確定）。
+/// 巨大ファイル第1段階の閾値（要件2.2・sprint6 CM6 実測で 10MB に確定）。
 /// この値以上のファイルはハッシュのみ記録し、起動復元時の content_hash 全量読込もしない
 /// （起動0.5秒ゲートのホットパス保護＝spec「10MB 以上はハッシュのみ」）。
+/// [`crate::huge::STAGE1_THRESHOLD_BYTES`]・[`crate::snapshot::policy::DEFAULT_CONTENT_LIMIT_BYTES`] と同値。
 pub const HUGE_FILE_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024;
 
 /// バイト列を LF 正規化してハッシュ化する（`CRLF`/`CR` → `LF`）。

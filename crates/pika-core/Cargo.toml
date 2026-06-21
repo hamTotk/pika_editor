@@ -31,3 +31,7 @@ getrandom = { workspace = true }
 # 自前 named pipe で受け渡す JSON とアプリ状態の永続表現を型で固め、決定論ゲートに乗せる。
 serde = { workspace = true }
 serde_json = { workspace = true }
+# encoding: BOM/UTF-8/Shift_JIS 自動判定・往復・保存時の表現不能文字検出（design doc 11章・要件5.2/5.6）。
+encoding_rs = { workspace = true }
+# search: fancy-regex 検索/置換（後方参照・キャプチャ参照・Unicode文字クラス・ReDoS バックトラック上限）。
+fancy-regex = { workspace = true }

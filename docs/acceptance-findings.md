@@ -921,3 +921,60 @@
   - **状態（sprint 5・iteration2）**: 決定論ゲート（cargo test pika-core 207 件〔iteration1 比 +14＝hashing 6・
     recent 6・state +2〕＋pika-cli 11・pika-app 5）PASS・cargo build（警告エラー扱い・exit 0）／npm typecheck
     成立・cargo fmt --check クリーン。上記 H8〜H12 と H1〜H7 は引き続き系統C（Windows 実機）で確認する。
+
+## T-009 巨大ファイル段階制・エンコーディング・検索置換（sprint 6・design doc 8章/15章-6/15章-8／系統C）
+
+- **重大度**: 高（中心シナリオ「AI 出力の単一行巨大 JSON/JSONL」の編集死守＝要件2.2 第1段階・最上位原則
+  「固まらない」＝巨大ファイルを CM6 へ全量ロードしない・「データを失わない」＝エンコーディング保存中断で
+  無確認の文字欠落を防ぐ）。
+- **対応章**: 要件2.2（巨大ファイル段階制・行長ガード）・5.2/5.6（エンコーディング往復・保存中断）・5.4
+  （検索/置換）・9.2（内容保存境界）・design doc 8章/15章-6（CM6 実測）/15章-8（fancy-regex 機能テスト）/16章
+  （canon 改訂）。acceptance.md L1〜L7（後述）。
+- **決定論側（cargo test 済み・pika-core）**:
+  - **huge** — `pika-core::huge`。`FileStage::from_size`（**Normal〔10MB 未満〕/Stage1〔10MB 以上・第2段階以下〕/
+    Stage2ReadOnly〔第2段階超・上限以下〕/TooLarge〔上限超〕**・境界＝第1段階は 10MB「以上」〔ちょうど 10MB は第1段階・
+    9.2 と整合〕、第2段階/上限は閾値「超」）・`can_open/can_edit/can_save/can_replace/auto_off_heavy_features/
+    needs_virtual_viewer`・`degrade_flags`（段階制〔サイズ〕と行長ガード〔内容〕を合算した自動オフフラグ）・
+    `has_long_line`（1 行 10万字超でハイライト/折返し自動オフ・改行で行ごとリセット・CR は行長に数えない）。
+  - **range** — `pika-core::range`。仮想化ビューアの `window_around`（中心の前後をウィンドウ幅で取りファイル端
+    クランプ・幅 0 は既定 1MB・サイズ超中心でも破綻しない）・`align_to_lines`（読んだバイト列を**行頭/行末**に整え
+    半端な行を前後から削る・先頭ファイルは先頭を削らない・改行なし巨大1行は全体返し）。実 I/O（seek+read）は
+    src-tauri 側で算出結果を使う。
+  - **encoding** — `pika-core::encoding`。`decode`（**BOM 最優先〔UTF-8/UTF-16 LE/BE〕→ BOM なしは UTF-8→Shift_JIS
+    の strict デコードで妥当性検査 → いずれも不正なら UTF-8 lossy で警告**・改行は原文保持）・`classify_line_ending`
+    （LF/CRLF/CR/Mixed/None・混在検出）・`encode_for_save`（**元エンコ/BOM 維持・Shift_JIS で表現不能文字があれば
+    `SaveOutcome::Unmappable` で保存中断**〔無確認の文字欠落を防ぐ＝要件5.6〕）・`encode_as_utf8`（［UTF-8で保存］
+    選択肢）。UTF-8/Shift_JIS の往復がバイト一致・BOM 維持・絵文字 Shift_JIS で中断＋該当文字インデックスを cargo test
+    で観測。
+  - **search** — `pika-core::search`。`search_all`/`replace_all`（**fancy-regex＝後方参照 `(\w)\1`・キャプチャ参照
+    `$1`/`${name}`・Unicode 文字クラス `\p{Hiragana}`** をサポート＝要件5.4 全機能・Scintilla 正規表現不採用の理由を
+    解消）・大文字小文字区別/単語単位/リテラル（メタ文字エスケープ）の各オプション・**ReDoS バックトラック上限
+    〔`backtrack_limit` 100万・catastrophic backtracking でハングせず `SearchError::Backtrack`〕＋協調キャンセル
+    〔`Cancel` フラグで途中打切り・別ハンドルからも効く〕＋件数上限〔10万件で truncated〕**・空マッチで無限ループしない
+    前進保証・キャンセル時も内容を失わない。**fancy-regex は要件5.4 全機能を通過したため第一候補で確定（pcre2 フォール
+    バック不要）＝design doc 15章-8 の判断**。
+- **配線（cargo build＋npm typecheck 成立・`src-tauri/src/document.rs`／`src/ipc.ts`）**:
+  - `open_document`（サイズで段階判定→上限超はエラー・第2段階以降は内容を返さず段階だけ返す〔CM6 へ全量ロードしない〕・
+    通常/第1段階はエンコーディング判定してデコード済みテキスト＋縮退フラグを返す）。
+  - `save_document`（エンコーディング維持保存・Shift_JIS 表現不能で `status:"unmappable"` を返し中断〔フロントは
+    ［UTF-8で保存/該当文字を確認/キャンセル］提示〕・`force_utf8` で UTF-8 書込・**アトミック書込〔一時ファイル→rename〕**・
+    自己保存抑制トークン登録）。
+  - `read_range`（第2段階の仮想化ビューア＝要求位置近傍 1 ウィンドウだけ seek+read し行境界整列して返す・読み取り専用）。
+  - `search_in_text`/`replace_in_text`（pika-core::search 委譲・`SearchCancelService` で新検索が前の検索を打ち切る）。
+  - frontend 型バインディング（`src/ipc.ts`: openDocument/saveDocument/readRange/searchInText/replaceInText・各 DTO）。
+- **本スプリントで系統C（Windows 実機）に残す確認**（acceptance.md L1〜L7）:
+  - **L1（design doc 15章-6・必達）CM6 巨大ファイル実測**: 基準機・Release で **10MB のファイルが編集・検索・保存が
+    通常通り可能**（第1段階死守）であることを実測。CM6 の編集体感が劣化し始めるサイズを計測し、第2段階を **50MB**・
+    上限を **500MB** に確定したこと〔旧 200MB/2GB から Web 現実値へ引下げ〕の妥当性を実機で再確認する。10MB を下回って
+    劣化するなら中心体験後退として要件改訂を提案（本スプリントでは 10MB 死守と判断し維持）。
+  - L2: Shift_JIS・CRLF のファイルを開いて編集・保存しても、エンコーディングと改行が変わらない（要件5.6 受け入れ基準）。
+  - L3: Shift_JIS と誤判定された UTF-8 を「エンコーディングを指定して開き直す（Reopen with Encoding）」で正しく再表示。
+  - L4: Shift_JIS で表現できない文字（絵文字等）を入れて保存しようとすると保存が中断し選択肢が提示される（文字欠落なし）。
+  - L5: 正規表現＋キャプチャ参照で全置換ができる（実 GUI の検索バー）。
+  - L6: 第2段階（50MB 超）の読み取り専用ビューアで閲覧・検索ができ、編集/保存/置換が無効化される。
+  - L7: 巨大ファイル/長行での検索・全置換が UI をブロックせず、キャンセルできる（進捗表示・別スレッド実行は実機で確認）。
+- **状態（sprint 6・iteration1）**: 決定論ゲート（cargo test pika-core 268 件〔iteration5 比 +61＝huge 13・range 9・
+  encoding 22・search 17〕＋pika-cli 11・pika-app 5）PASS・cargo build（crates＋src-tauri・警告エラー扱い・exit 0）／
+  npm typecheck 成立。**要件 2.2/5.4/9.2 の TBD を CM6 実測値（第2段階 50MB・上限 500MB・第1段階 10MB 維持）で確定し
+  requirements.md を改訂済み（design doc 16章）**。上記 L1〜L7 と実 GUI 反映（仮想化ビューア描画・検索バー・エンコーディング
+  メニュー・保存中断ダイアログ）は系統C（Windows 実機）で確認する。

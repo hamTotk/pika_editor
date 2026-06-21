@@ -1,0 +1,39 @@
+{
+  "reviewer": "data",
+  "sprint_id": 6,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "保存パスのデータ不可逆性 (atomic_write)",
+      "message": "atomic_write の Windows 既存ファイル置換フォールバックが原子的でなく、クラッシュ窓でデータを失いうる。std::fs::rename が既存ファイルで失敗した場合に remove_file(target) → rename(tmp,target) の2段に分解している (document.rs:236-244)。remove と rename の間でプロセスがクラッシュ/電源断すると、元ファイルは消え新ファイルは未配置のまま .pika.tmp だけが残り、対象パスが消失する。関数 doc は『途中クラッシュで元ファイルが半端にならない』と保証しているが、このフォールバック経路はその保証を破る。最上位原則『データを失わない』(CLAUDE.md 設計原則1) に直接抵触。Windows なら ReplaceFileW か MoveFileExW(MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH) で単一アトミック置換にすべき (delete+rename ではなく)。tmp 残置時の回収導線も無い。",
+      "location": "src-tauri/src/document.rs:221-246"
+    },
+    {
+      "severity": "high",
+      "area": "破壊的上書き前の退避欠落 (save_document)",
+      "message": "sprint6 で新設したエンコーディング対応保存 save_document が、ディスク上の現内容を退避(incoming stash)せずに atomic_write で直接上書きする (document.rs:177-215)。登録するのは自己保存抑制ハッシュ(register_self_save)のみで SnapshotService を経由しない。CLAUDE.md 判断ガイド『ユーザーデータを消す/上書きする → 退避スナップショットを先に書く(確認ダイアログより退避が先)』および sprint3 must『保存時 incoming 退避が失敗したときベースラインを更新せずエラーを返す』に対し、本コマンドは退避フックを一切持たない。タブを開いた後にディスク側が外部変更され(未確認)、その状態でユーザーが保存すると外部変更が無退避で失われる。退避が確実にフロント/上位層で save 前に必ず実行される保証がコード上確認できないため high とする(critical 化は退避到達不能が確証できる場合)。save_file も同じ欠落を持つが、save_document が本スプリントの正式保存経路。",
+      "location": "src-tauri/src/document.rs:177-215"
+    },
+    {
+      "severity": "medium",
+      "area": "range 読取のマルチバイト境界整合",
+      "message": "read_range が String::from_utf8_lossy(&buf[lead..slice_end]) でテキスト化している (document.rs:290)。align_to_lines は改行(\n)境界でしか整列せず、UTF-8 マルチバイト文字の途中でウィンドウが切れた場合 (改行を含まない巨大1行=AI出力の単一行 JSON、または末尾整列が効かないケース) に末尾/先頭の半端バイトが U+FFFD へ lossy 置換され、ビューアに化け文字が出る。第2段階は読み取り専用でディスクには書き戻さないためデータ損失ではないが、表示の正確性を損なう。範囲端を char_boundary まで内側に詰める(is_char_boundary で lead/slice_end を調整)処理を入れると正確になる。range.rs の doc(12行目)は『UTF-8 のマルチバイト境界を割らないよう前後で行頭/行末に整える』と書いているが、行整列だけではマルチバイト境界保証にならない(改行が来る前に文字境界を割りうる)。",
+      "location": "src-tauri/src/document.rs:285-290"
+    },
+    {
+      "severity": "low",
+      "area": "閾値定数の単一源化",
+      "message": "10MB 閾値が huge::STAGE1_THRESHOLD_BYTES・snapshot::policy::DEFAULT_CONTENT_LIMIT_BYTES・hashing::HUGE_FILE_THRESHOLD_BYTES の3箇所に同値リテラル(10*1024*1024)で重複定義されている。各 doc に『同値』とコメントで約束しているが、片方だけ変えるとベースライン内容保存境界と段階制境界がズレてデータ整合(差分対象/未読判定/内容保存の一貫性)が壊れる。hashing.rs(コメントで『以前 commits.rs/state_store.rs に重複実装されドリフト源だった』と自認)同様、定数も1箇所(例 huge の値)を pub use 再エクスポートで参照する単一源にすると安全。compile-time const_assert で三者一致を担保する手もある。",
+      "location": "crates/pika-core/src/snapshot/policy.rs:16"
+    },
+    {
+      "severity": "low",
+      "area": "エンコーディング判定の取りこぼし種別",
+      "message": "decode は BOM なし時 UTF-8 → Shift_JIS の2候補のみ妥当性検査する (encoding.rs:109)。BOM なし UTF-16 (NUL バイト多めの実ファイル) は両候補とも妥当性失敗しうるが、その場合 lossy UTF-8 で開き had_decode_warning を立てるため『開けない/壊す』には至らず安全側。要件5.2 範囲(UTF-8/Shift_JIS/BOM付UTF-16)としては妥当で、データ損失リスクは無い。保存時は検出エンコを維持し往復一致がテスト済(往復バイト一致テスト群)なので整合は保たれている。記録のみ。",
+      "location": "crates/pika-core/src/encoding.rs:108-133"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint6 は DB を持たない (永続化=内容アドレス退避ストア/state.json/エンコーディング往復/巨大ファイル range 読取)。データ観点の中核は『保存=最も不可逆な書き込み』の安全性。pika-core 側の純粋ロジック (encoding 往復・huge 段階制・range 範囲算出・search の置換でキャンセル時も内容を失わない) は決定論テストが充実し境界も正しく、LF 正規化ハッシュの単一源化も良い。一方 src-tauri の保存配線に2つの高リスク: (1) atomic_write の Windows 置換が delete+rename でクラッシュ窓を持ちアトミック性の保証を破る、(2) save_document が破壊的上書き前に incoming 退避を行わず『退避が先』原則の保証がコード上見えない。いずれも最上位原則『データを失わない』に関わるが、退避の上位層実行可能性と個人ローカルツール前提を踏まえ critical ではなく high とした。range の lossy は読み取り専用ゆえデータ損失でなく medium。critical=0。"
+}

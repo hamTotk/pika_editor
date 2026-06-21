@@ -1,0 +1,27 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 6,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "状態の網羅 / 巨大ファイル UI",
+      "message": "sprint 6 must『巨大ファイル range 読取＋フロントの仮想化ウィンドウビューアで読み取り専用閲覧』が frontend には未配線。本ターンの frontend 変更は src/ipc.ts の型バインディング追加のみで、openDocument/readRange/DegradeFlags/FileStage の消費者が src/ 内に 1 つも無い（grep 0 件）。文書を開く経路 activateTab は依然 readFile(path) を直接呼び（src/main.ts:161）、段階・エンコーディング・縮退フラグを一切見ない。このため >10MB(第1段階)で『差分/プレビュー/ハイライト 自動オフ＋理由通知(Partial)』が起きず、>50MB(第2段階)では仮想化ビューアを通らず CM6 へ全量ロードしようとする縮退の網（『固まらない』）が UI 側で機能しない。spec の検証戦略(DOM 描画=系統C / モード別配線=sprint7)が deferral を明示しており generator report・acceptance-findings(T-009/TF1-7)に記録済みのため critical ではないが、frontend の状態網羅(Ideal/Empty/Loading/Partial/Error の Partial)が現状ロジック層に届いていない実装ギャップとして高優先で残課題化する。",
+      "location": "src/main.ts:161 / src/ipc.ts:319-376"
+    },
+    {
+      "severity": "medium",
+      "area": "状態の網羅 / 保存中断フロー",
+      "message": "saveDocument の戻り SaveResult.status==='unmappable'(表現不能文字で保存中断・要件5.6 の[UTF-8で保存/該当文字を確認/キャンセル])に対応する frontend ハンドラが無い。保存経路は旧 saveFile(path,content) のまま(src/main.ts:287)で、unmappable 分岐を観測する箇所が存在しない。IPC 契約(unmappable[].char_index)は正しく型付けされているが、配線スプリント(sprint7)が『該当文字を確認』ジャンプを実装する際、char_index→CM6 位置の写像と、status を握り潰さずダイアログ提示する責務が frontend 側に残る。現状は『データを失わない』のための保存中断 UI が未提示の状態であることを明示する(決定論側は document.rs/encoding.rs で担保済み)。",
+      "location": "src/ipc.ts:329-355 / src/main.ts:287"
+    },
+    {
+      "severity": "low",
+      "area": "ビジュアル一貫性 / IPC 契約",
+      "message": "src/ipc.ts の新規型・関数は既存ファイルの命名・コメント様式(snake_case フィールドで Rust DTO と対応、JSDoc に要件番号併記)に整合しており、document.rs の各 Dto(OpenedDocument/SaveResultDto/RangeWindowDto/SearchResultDto/ReplaceResultDto)とフィールドが一致する。バイトオフセット(start/end/size_bytes/char_index)を TS number で受けるが、確定上限 500MB(<2^53)のため精度欠落は発生せず問題なし。frontend-ui 観点での品質欠陥ではなく、契約整合が取れている旨の記録。",
+      "location": "src/ipc.ts:280-436"
+    }
+  ],
+  "has_critical": false,
+  "summary": "frontend-ui 観点で critical なし。本ターンの frontend 変更は src/ipc.ts の型付き IPC バインディング追加のみで、Rust DTO と契約整合が取れ、tsc strict(npm run typecheck)も exit 0。新コードに a11y 違反や主要操作の不能/不可視は無い(DOM 変更が無いため新たな a11y サーフェスを持たない)。ただし sprint 6 が掲げる巨大ファイル仮想化ビューア・段階制 Partial 状態提示・エンコーディング保存中断 UI・モード別検索置換は frontend に未消費(ipc 関数の呼び出し元 0 件、activateTab/save は旧 readFile/saveFile のまま)で、縮退の網が UI に届いていない実装ギャップが残る。これは spec の検証戦略(DOM 描画=系統C・モード別配線=sprint7)が明示的に deferral とし、generator report と acceptance-findings(T-009/TF1-7)に追跡済みのため d_review をブロックする critical には当たらないが、後続スプリントで frontend 配線(Partial 状態の通知バー提示・保存中断ダイアログ・仮想化ビューア DOM)を確実に閉じる必要がある(high)。"
+}

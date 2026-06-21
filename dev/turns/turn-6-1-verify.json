@@ -1,0 +1,17 @@
+[
+  {
+    "command": "cargo test",
+    "exit_code": 0,
+    "tail": "test result: ok. 268 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n\n   Doc-tests pika_core\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n(pika-core 268 passed [+61 new: huge/range/encoding/search] / pika-cli 11 / pika-app 5)"
+  },
+  {
+    "command": "cargo build",
+    "exit_code": 0,
+    "tail": "Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.50s\n(crates + src-tauri, warnings=\"deny\", zero warnings)"
+  },
+  {
+    "command": "npm run typecheck",
+    "exit_code": 0,
+    "tail": "> pika-frontend@0.1.0 typecheck\n> tsc -p tsconfig.app.json\n(no type errors, tsc strict exit 0)"
+  }
+]

@@ -1,0 +1,37 @@
+{
+  "score": 94,
+  "plan_implementation": {
+    "overall": 94,
+    "notes": "sprint6 must 6件すべて充足。must1 fancy-regex(後方参照・キャプチャ参照・Unicode文字クラス・backtrack_limit 100万・協調キャンセル・件数上限10万)を search.rs で観測、pcre2 不要判断を findings 記録。must2 巨大ファイル段階制(FileStage 4段階・境界=第1段階「以上」/第2段階・上限「超」・行長ガード10万字・degrade_flags)を huge.rs で決定論判定。must3 エンコーディング往復+保存中断(BOM最優先→UTF-8/Shift_JIS妥当性→UTF-8警告・往復バイト一致・改行維持・Shift_JIS表現不能で Unmappable 中断+char_index)を encoding.rs で観測。must4 range読取(window_around/align_to_lines cargo test)+document.rs::read_range が seek+read で1ウィンドウのみ・読取専用は can_edit=false で保証。must5 verify全 exit 0。must6 requirements.md 2.2/5.4/9.2 を第2段階50MB超・上限500MB超・第1段階10MB維持で確定し実測確認を系統C(T-009/TF1)へ・推測値を断定で書かず再確認を明記。should は CM6単一Undo(既存維持)・アトミック書込(実装)が充足、検索モード依存/Reopen Encodingメニュー配置は frontend配線が sprint7 委譲で部分(spec検証戦略どおりの deferral)。充足率約0.625。"
+  },
+  "quality": {
+    "overall": 94,
+    "breakdown": {"d_verify": 100, "d_accept": 100, "d_quality": 88},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[合格] sprint6(巨大ファイル段階制・エンコーディング往復・検索置換)は決定論ゲート全通過(cargo test/build/typecheck exit 0)、must 6件全充足、レビュワー5観点 critical=0。pika-core の4新規モジュール(huge/range/encoding/search)が『コアは UI を知らない』を守り充実したテストで観測可能・テスト改竄なし。要対応(high・次ターン feedback_structured 経由): (1)data — atomic_write の Windows フォールバックが remove_file→rename の2段でクラッシュ窓を持ちアトミック性保証を破る(ReplaceFileW/MoveFileExW へ)。(2)data — save_document が破壊的上書き前に incoming 退避(SnapshotService)を経由せず『退避が先』原則の保証がコード上見えない。(3)performance — search/replace が編集全文最大50MB を毎回 IPC 転送(置換は往復2倍)、IPC実測を系統C acceptance に明示項目化を。(4)frontend-ui/ux — 巨大ファイル仮想化ビューア・段階制Partial通知・保存中断ダイアログ・decode_warning開き直し導線・モード別検索置換が ipc.ts 契約止まりで live UI(main.ts は旧 read_file/save_file)から未到達。spec検証戦略で sprint7 配線委譲が明示済みのため critical 不該当だが後続で確実に閉じること。medium: 検索キャンセル粒度がマッチ境界のみ/Shift_JIS保存の全文多重スキャン/read_range の UTF-8マルチバイト境界が行整列だけでは保証されず lossy 化(読取専用ゆえデータ損失でなく表示精度)。low: read_range の window 上限クランプ欠落/閾値定数の3箇所重複(コメント相互参照のみ・const_assert 推奨)/InvalidPattern が fancy-regex 内部英語メッセージ露出。",
+  "feedback_structured": {
+    "high": [
+      {"area": "data / 保存のアトミック性", "message": "atomic_write の Windows 既存ファイル置換フォールバックが remove_file(target)→rename(tmp,target) の2段に分解されており、間でクラッシュ/電源断すると元ファイル消失・新ファイル未配置で対象パスが消える。関数 doc の『途中クラッシュで元ファイルが半端にならない』保証を破る。最上位原則『データを失わない』に直接抵触。ReplaceFileW か MoveFileExW(MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH) で単一アトミック置換にする。tmp残置の回収導線も無い。(src-tauri/src/document.rs:221-246)"},
+      {"area": "data / 破壊的上書き前の退避", "message": "sprint6 の正式保存経路 save_document が、ディスク上の現内容を incoming 退避(SnapshotService)せず atomic_write で直接上書きする。登録は register_self_save のみ。CLAUDE.md 判断ガイド『上書きする→退避が先(確認ダイアログより退避が先)』と sprint3 must『保存時 incoming 退避失敗時はベースライン更新せずエラー』に対し退避フックが無い。外部変更(未確認)状態で保存すると外部変更が無退避で失われうる。退避が save 前に必ず実行される保証をコード上に持たせる。(src-tauri/src/document.rs:177-215)"},
+      {"area": "performance / IPC ペイロード", "message": "search_in_text/replace_in_text が編集バッファ全文を text:String で毎回 invoke 引数へ転送し同期コマンドスレッドで実行。第1段階は最大50MB編集可のため検索毎に最大50MBのシリアライズ/コピー(置換は戻り値で全文返す=往復2倍)。コマンドワーカースレッド実行で UI 自体はブロックしない点が救いだが、spec『IPCラウンドトリップを性能予算に計上』に対し再考余地。acceptance-findings に『50MB検索/置換のIPC往復実測』を明示項目化し、backend がファイルを直接読む/インクリメンタル化/結果のみ返す置換を検討。(src-tauri/src/document.rs:362-416, src/ipc.ts:404-436)"},
+      {"area": "frontend-ui / ux 保護導線の到達性", "message": "sprint6 の保護導線(巨大ファイル仮想化ビューア・段階制Partial状態の縮退通知・保存中断[UTF-8で保存/該当文字を確認/キャンセル]・decode_warning の Reopen 導線・モード別検索置換)が ipc.ts の型/関数契約止まりで、実エディタフロー(main.ts:161/287 は旧 readFile/saveFile を継続使用)から未参照=『契約あり・到達経路なし』。現状 live UI では縮退通知・保存中断・仮想化ビューアが発火しない。spec検証戦略(DOM描画=系統C・モード別配線=sprint7)が deferral を明示し acceptance L1〜L7/T-009 に登録済みのため critical 不該当だが、sprint7 で open/save を新コマンド経路へ差し替え degrade→通知バー/unmappable→選択肢ダイアログ/decode_warning→開き直し/truncated・cancelled→検索フィードバックを確実に結線すること。(src/main.ts:161,287)"}
+    ],
+    "medium": [
+      {"area": "performance / キャンセル粒度", "message": "search_all/replace_all のキャンセル確認がマッチ境界(ループ先頭)のみ。1回の find_from_pos がヒットなしで長距離を走査する間はキャンセルが効かない(backtrack_limit でハングはしないが50MBで稀パターン1回走査時の応答性が粗い)。全件走査のバッチ分割で定期チェックを。(crates/pika-core/src/search.rs:180-213,261-308)"},
+      {"area": "performance / 保存パスの多重スキャン", "message": "encode_for_save の Shift_JIS 経路が find_unmappable(全char encode試行)→encode(text)→had_errors時に再度 find_unmappable と全文を最大3回走査。第1段階最大50MB保存で O(n)係数が無駄。had_errors を信頼し検出を一本化する。(crates/pika-core/src/encoding.rs:225-273)"},
+      {"area": "data / range のマルチバイト境界", "message": "read_range が String::from_utf8_lossy でテキスト化し、align_to_lines は改行境界のみ整列のため改行を含まない巨大1行(AI出力の単一行JSON)で末尾/先頭の半端バイトが U+FFFD へ置換され化け文字が出る。読取専用ゆえデータ損失でなく表示精度の問題だが、is_char_boundary で lead/slice_end を内側に詰めると正確。range.rs doc の『マルチバイト境界を割らない』は行整列だけでは保証にならない。(src-tauri/src/document.rs:285-290)"},
+      {"area": "ux / 状態可視化", "message": "search/replace の truncated(10万超打切り)・cancelled を DTO に正しく返すが、要件5.4『進捗表示/一部のみ表示の提示』の UI(検索バー・件数・truncated/cancelled文言)が未結線でユーザーに一部のみか完了か判別不能。sprint7 結線時に『上限超のため一部のみ表示』『キャンセルしました』を必ず出す。(src/ipc.ts:404)"},
+      {"area": "ux / decode_warning の次の一手", "message": "decode 失敗時 UTF-8 lossy で開き had_decode_warning=true を返す(まず開ける点は正しい)が、要件5.2『Reopen with Encoding』導線が未結線で警告フラグが UI(main.ts)に届かず回復導線へ辿り着けない。sprint7 で『文字化けの可能性。表示メニューから開き直せます』を提示。(src-tauri/src/document.rs:79)"}
+    ],
+    "low": [
+      {"area": "security / DoS", "message": "read_range の window 引数に上限クランプが無く raw_range.len() 分のバッファを確保。到達経路は信頼境界内 main WebView 限定(プレビュー別WebView は capability ゼロで到達不能)のため low。read_range 入口で window を妥当上限へクランプすると堅い。(src-tauri/src/document.rs:266-283)"},
+      {"area": "data / 閾値定数の単一源化", "message": "10MB 閾値が huge::STAGE1_THRESHOLD_BYTES・snapshot::policy::DEFAULT_CONTENT_LIMIT_BYTES・hashing::HUGE_FILE_THRESHOLD_BYTES の3箇所に同値リテラル重複(doc コメントで相互参照のみ)。片方だけ変えると段階制境界と内容保存境界がズレてデータ整合が壊れる。pub use 再エクスポートの単一源か const_assert で三者一致を担保。(crates/pika-core/src/snapshot/policy.rs:16)"},
+      {"area": "ux / エラー文言", "message": "SearchError::InvalidPattern が fancy-regex 内部メッセージ(e.to_string())をそのまま連結しエンジン由来の英語/技術表現がユーザーに露出しうる。UI 結線時に『正規表現が不正です: 該当箇所』へ平易化する余地。(crates/pika-core/src/search.rs:111,152)"},
+      {"area": "security / 機密ファイル一貫性", "message": "open_document/read_range/save_document は path をそのまま std::fs に渡し is_sensitive による機密扱いを適用しない。呼び出せるのは main WebView(信頼シェル)のみで未信頼到達不能・退避側 policy.rs は機密を守る・ユーザーが自分の.env を編集する経路は要件上の禁止行為でないため既存 read_file/save_file と同じ確立パターン。記録のみ。(src-tauri/src/document.rs:97,177,266)"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}
