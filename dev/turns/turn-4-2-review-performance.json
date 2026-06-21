@@ -1,0 +1,33 @@
+{
+  "reviewer": "performance",
+  "sprint_id": 4,
+  "iteration": 2,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "再計算/キャッシュ余地",
+      "message": "prepare_preview は呼び出しのたびに content 全量から comrak→ammonia の全パイプラインを再実行し、同一 content でも結果をキャッシュしない（preview.rs:121-151 で inner.documents.clear() 後に常に新世代を作る）。タブ切替やモード切替（onTogglePreview/activateTab）で同じファイルを行き来するたびにフル再サニタイズが走る。要件2.1 の更新300ms 予算に対し、AI 出力の通常規模(数十KB〜数MB)では現状の実測(A3 初回383.6ms/≤2000・A4 warm 7-10ms)から見て構造破綻ではないが、content ハッシュ→世代マップのメモ化で warm 切替コストを削れる余地がある。ただし設計上『直近1世代のみ保持』はメモリ節約と前モード残留防止の意図的選択であり、キャッシュ追加は YAGNI とのトレードオフ。実測(系統C T-001)で更新300ms に余裕があるなら現状維持で可。",
+      "location": "src-tauri/src/preview.rs:121"
+    },
+    {
+      "severity": "low",
+      "area": "メモリ/不要コピー",
+      "message": "svg_attr_value が呼ばれるたびに text.to_ascii_lowercase() で SVG 全文の複製を確保する（guard.rs:271）。svg_estimated_pixels は width/height/viewbox で最大3回 svg_attr_value を呼ぶため、1つの SVG ガード判定で最大3回の全文 lowercase コピーが発生する。ただし check_svg_bytes に到達する SVG は要素数ガード(5万要素)で上限が掛かり、配信1回あたりの呼び出しでホットループではないため実害は小さい。lowercase を1回に巻き上げて使い回せば不要コピーを2回削れる(low の最適化余地)。",
+      "location": "crates/pika-core/src/render/guard.rs:270"
+    },
+    {
+      "severity": "low",
+      "area": "走査回数",
+      "message": "check_svg_bytes は count_svg_elements でバイト列を1走査し、svg_estimated_pixels(svg_attr_value 経由)で別途 lowercase 全文走査を行う。SVG 1件あたりの配信前判定で複数回の全文走査が発生するが、ローカル画像/SVG 配信はホットパス(レンダリングごと)ではなく参照1件ごとの一度きりであり、入力段ガードの目的(デコード爆発を防ぐ=固まらない)は果たせている。過剰最適化を避ける観点では現状で妥当。指摘は記録のみ。",
+      "location": "crates/pika-core/src/render/guard.rs:116"
+    },
+    {
+      "severity": "low",
+      "area": "IPC ペイロード",
+      "message": "renderActivePreview / renderActiveDiff は毎回エディタの content 全量(getContent())を invoke で backend へ送る(main.ts:257/205)。これは設計上『HTML 本体は custom protocol 直配信で invoke に乗せない・content は1回だけ送る(hazards 同梱で二重転送回避)』という IPC 予算配慮が既に効いており、上り content 1回は避けられない最小コスト。巨大ファイル(10MB境界)は sprint6 の段階制(プレビュー自動オフ)で別途縮退するため、本スプリント時点で構造的問題はない。記録のみ。",
+      "location": "src/main.ts:257"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 4 のプレビュー実装に performance 観点の critical は無い。要件2.1(プレビュー初回2.0秒・更新300ms)を構造的に外す実装は見当たらず、むしろ核となる設計選択がレイテンシ予算に正しく配慮している: (1) プレビュー HTML を invoke で返さず custom protocol(pika-preview://)直配信し JS メインワールドを経由しない、(2) content は1回だけ invoke で送り系統B の hazards を同戻りに同梱して IPC 二重転送を回避、(3) 暴走ガード(画像/SVG をヘッダ寸法・要素数で配信前に計測しフルデコードを避ける)で『固まらない』予算を能動的に守る。実測(A3 初回383.6ms/≤2000・A4 warm 7-10ms)も基準内で、IPC ラウンドトリップの本実測は T-001 として系統C に明示的に委ねられている(評価基準どおり)。medium 1件は同一 content の再サニタイズに対するキャッシュ余地(更新300ms に実測余裕があれば YAGNI で現状維持可)、low 3件は SVG ガードの lowercase 全文コピーの巻き上げ等の微小最適化余地で、いずれもホットパスではなく可読性を優先して据え置いてよい範囲。"
+}

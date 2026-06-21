@@ -50,11 +50,7 @@ pub enum RejectReason {
 /// canonicalize したうえで [`confine_under`] で prefix 検証する（シンボリックリンク脱出はそこで弾く）。
 pub fn resolve_local_ref(reference: &str) -> LocalRefDecision {
     // クエリ/フラグメントを剥がす（custom protocol は ?query を持ちうる）。
-    let raw = reference
-        .split(['?', '#'])
-        .next()
-        .unwrap_or("")
-        .trim();
+    let raw = reference.split(['?', '#']).next().unwrap_or("").trim();
     if raw.is_empty() {
         return LocalRefDecision::Reject(RejectReason::Empty);
     }

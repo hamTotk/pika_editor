@@ -70,13 +70,62 @@ fn build_sanitizer(flavor: PreviewFlavor) -> Builder<'static> {
     // 許可タグ（GFM 出力 + SVG サブセット）。<script>/<iframe>/<object>/<embed>/<base>/<meta> は含めない。
     let mut tags: HashSet<&'static str> = HashSet::from([
         // ブロック/インライン（GFM 出力）。
-        "h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "span", "blockquote", "pre", "code", "br",
-        "hr", "em", "strong", "del", "s", "sub", "sup", "a", "ul", "ol", "li", "table", "thead",
-        "tbody", "tr", "th", "td", "img", "input", // タスクリストの checkbox（type=checkbox disabled）。
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "p",
+        "div",
+        "span",
+        "blockquote",
+        "pre",
+        "code",
+        "br",
+        "hr",
+        "em",
+        "strong",
+        "del",
+        "s",
+        "sub",
+        "sup",
+        "a",
+        "ul",
+        "ol",
+        "li",
+        "table",
+        "thead",
+        "tbody",
+        "tr",
+        "th",
+        "td",
+        "img",
+        "input", // タスクリストの checkbox（type=checkbox disabled）。
         // SVG サブセット（design doc 6章: script/foreignObject は含めない）。
-        "svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "text",
-        "tspan", "defs", "lineargradient", "radialgradient", "stop", "use", "symbol", "title",
-        "desc", "marker", "clippath", "mask", "pattern",
+        "svg",
+        "g",
+        "path",
+        "rect",
+        "circle",
+        "ellipse",
+        "line",
+        "polyline",
+        "polygon",
+        "text",
+        "tspan",
+        "defs",
+        "lineargradient",
+        "radialgradient",
+        "stop",
+        "use",
+        "symbol",
+        "title",
+        "desc",
+        "marker",
+        "clippath",
+        "mask",
+        "pattern",
     ]);
     // 系統B（HTML）は文書スタイル尊重のため <style> を許可する（要件6.3・11.3。JS は CSP/ammonia で無効）。
     // ammonia 既定は <style> を `clean_content_tags`（中身ごと除去）に入れているため、tags へ足すなら
@@ -123,12 +172,27 @@ fn tag_attributes(
     map.insert("img", HashSet::from(["src", "alt", "width", "height"]));
     // タスクリストの checkbox（comrak は disabled checked を出す）。
     map.insert("input", HashSet::from(["type", "checked", "disabled"]));
-    map.insert("th", HashSet::from(["align", "colspan", "rowspan", "scope"]));
+    map.insert(
+        "th",
+        HashSet::from(["align", "colspan", "rowspan", "scope"]),
+    );
     map.insert("td", HashSet::from(["align", "colspan", "rowspan"]));
     map.insert("code", HashSet::from(["class"]));
     map.insert("pre", HashSet::from(["class"]));
     // comrak sourcepos の data-sourcepos（双方向スクロール同期の土台）。
-    for tag in ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote", "table", "pre"] {
+    for tag in [
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "p",
+        "li",
+        "blockquote",
+        "table",
+        "pre",
+    ] {
         map.insert(tag, HashSet::from(["data-sourcepos"]));
     }
 
@@ -203,8 +267,29 @@ fn tag_attributes(
         // 全タグに style を許すと generic に足したいが ammonia の API 上は generic_attributes だと
         // url スキーム検査が効かない属性なので generic 側で扱う。ここでは主要タグへ付与する。
         for tag in [
-            "div", "span", "p", "table", "tr", "td", "th", "h1", "h2", "h3", "h4", "h5", "h6",
-            "img", "a", "ul", "ol", "li", "blockquote", "code", "pre", "em", "strong",
+            "div",
+            "span",
+            "p",
+            "table",
+            "tr",
+            "td",
+            "th",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "img",
+            "a",
+            "ul",
+            "ol",
+            "li",
+            "blockquote",
+            "code",
+            "pre",
+            "em",
+            "strong",
         ] {
             map.entry(tag).or_default().insert("style");
         }
@@ -239,16 +324,25 @@ mod tests {
     #[test]
     fn javascript_url_は除去される() {
         let out = clean_a(r#"<a href="javascript:alert(1)">x</a>"#);
-        assert!(!out.contains("javascript:"), "javascript: URL が残った: {out}");
+        assert!(
+            !out.contains("javascript:"),
+            "javascript: URL が残った: {out}"
+        );
     }
 
     #[test]
     fn scriptable_data_url_は除去される() {
         // data:text/html・data:image/svg+xml は scriptable なので除去（data: 全除去方針）。
         let out = clean_a(r#"<a href="data:text/html,<script>alert(1)</script>">x</a>"#);
-        assert!(!out.contains("data:text/html"), "scriptable data: が残った: {out}");
+        assert!(
+            !out.contains("data:text/html"),
+            "scriptable data: が残った: {out}"
+        );
         let img = clean_a(r#"<img src="data:image/svg+xml,<svg onload=alert(1)>">"#);
-        assert!(!img.contains("data:image/svg+xml"), "svg data: が残った: {img}");
+        assert!(
+            !img.contains("data:image/svg+xml"),
+            "svg data: が残った: {img}"
+        );
     }
 
     #[test]
@@ -272,8 +366,14 @@ mod tests {
     fn id_と_name_属性は除去される_dom_clobbering防止() {
         // DOM clobbering 防止（要件6.2・design doc 6章）。
         let out = clean_a(r#"<div id="x" name="y"><a name="z">a</a></div>"#);
-        assert!(!out.contains("id="), "id 属性が残った（DOM clobbering）: {out}");
-        assert!(!out.contains("name="), "name 属性が残った（DOM clobbering）: {out}");
+        assert!(
+            !out.contains("id="),
+            "id 属性が残った（DOM clobbering）: {out}"
+        );
+        assert!(
+            !out.contains("name="),
+            "name 属性が残った（DOM clobbering）: {out}"
+        );
     }
 
     #[test]
@@ -301,7 +401,9 @@ mod tests {
 
     #[test]
     fn 安全な_markdown_は保持される() {
-        let html = markdown_to_unsafe_html("# 見出し\n\n- [x] task\n- a\n\n| a | b |\n|---|---|\n| 1 | 2 |\n");
+        let html = markdown_to_unsafe_html(
+            "# 見出し\n\n- [x] task\n- a\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+        );
         let out = clean_a(&html);
         assert!(out.contains("<h1"), "見出しが消えた: {out}");
         assert!(out.contains("<table"), "テーブルが消えた: {out}");
@@ -313,7 +415,10 @@ mod tests {
         // comrak(unsafe_) は raw HTML を透過するが、最終段 ammonia が必ず除去する（多層の要）。
         let html = markdown_to_unsafe_html("text\n\n<script>steal()</script>\n\n<div>ok</div>");
         let out = clean_a(&html);
-        assert!(!out.contains("<script"), "raw HTML の script が残った: {out}");
+        assert!(
+            !out.contains("<script"),
+            "raw HTML の script が残った: {out}"
+        );
         assert!(!out.contains("steal()"));
         assert!(out.contains("<div>ok</div>"));
     }
@@ -332,15 +437,24 @@ mod tests {
     fn sourcepos_data属性は双方向スクロール同期の土台として保持される() {
         // comrak sourcepos の data-sourcepos を ammonia が落とさないこと（要件6.1 同期の土台・should）。
         let html = markdown_to_unsafe_html("# 見出し\n\n段落");
-        assert!(html.contains("data-sourcepos"), "comrak が sourcepos を出していない: {html}");
+        assert!(
+            html.contains("data-sourcepos"),
+            "comrak が sourcepos を出していない: {html}"
+        );
         let out = clean_a(&html);
-        assert!(out.contains("data-sourcepos"), "sourcepos がサニタイズで消えた: {out}");
+        assert!(
+            out.contains("data-sourcepos"),
+            "sourcepos がサニタイズで消えた: {out}"
+        );
     }
 
     #[test]
     fn 系統a_でも_script_は系統bと同様に除去される() {
         // 系統A/B いずれも文書 JS は実行させない（同梱 JS は別WebView へ nonce 注入する）。
         let out_b = sanitize_html("<script>x()</script><p>y</p>", PreviewFlavor::HtmlNoJs);
-        assert!(!out_b.contains("<script"), "系統B で script が残った: {out_b}");
+        assert!(
+            !out_b.contains("<script"),
+            "系統B で script が残った: {out_b}"
+        );
     }
 }

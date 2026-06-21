@@ -1,0 +1,33 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 4,
+  "iteration": 2,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "エラー回復／次の一手",
+      "message": "暴走ガードは前イテレーションの high(配信経路から未呼出)を解消し、local_resource_response が配信前に guard_local_resource→pika-core を呼び巨大画像/SVG を 413(PAYLOAD_TOO_LARGE)で弾く配線が入った(src-tauri/src/preview.rs:272-277)。ただし『なぜ表示されないか＋次の一手(既定のアプリ/ブラウザで開く)』というユーザー向け回復導線は依然として未結線。413 は別WebView へのローカルリソース応答として返るが、当該別WebView は本スプリントでは実アタッチされておらず(系統C 繰延)、413 を受けて通知バーに『この画像/SVG は大きすぎるため表示できません。既定のアプリで開いてください』を出す frontend 側ハンドラが存在しない(src/main.ts に 413/ローカルリソース失敗のハンドリングなし)。generator も preview.rs:271 のコメントで『frontend は 413 をプレースホルダ＋通知導線(既定のアプリで開く)にする』と意図を書きつつ未実装で、acceptance.md TE7 へ系統C として明示追跡している。Nielsen #9(エラーからの回復支援)の観点で、ブロック自体(固まらない=性能/安全)は成立したが回復導線は未完。プレビューは読み取り専用の補助ビューで本体タスク(開く→編集→保存→差分→確認)は完了でき、別WebView 実アタッチ全体が系統C へ明示繰延されている設計分割どおりのため critical でなく medium。",
+      "location": "src-tauri/src/preview.rs:272"
+    },
+    {
+      "severity": "medium",
+      "area": "フィードバック欠如",
+      "message": "信頼JS(Mermaid/KaTeX/highlight)のブロック単位失敗件数を受信する導線が追加された(src/main.ts:477-482 で window.message リスナ＋parsePreviewFailureMessage で型検証→通知バー『プレビューの一部ブロックを描画できませんでした(N件・元コード表示)』)。前イテレーションの『受信側ゼロ(片側配線)』の medium は解消。ただし送信側 buildTrustedJsInit は依然 window.parent.postMessage(src/preview/index.ts:147)を使い、別WebView は iframe でなく独立 WebView のため本番では window.parent が本体に届かず、この通知は実環境では発火しない。generator/コメント/acceptance.md TE6 が『本番は window.parent 不達＝Tauri event/IPC 経路へ置換が必要』と明記し系統C で追跡しているため隠れた導線破綻ではないが、現状フロントに残る window.message 経路はテスト/将来 iframe 用で、本番のユーザー向けフィードバック(失敗件数通知)は依然未到達のまま。spec の二系統検証(系統A補=型成立／系統C=実挙動)に沿った既知ギャップとして medium。",
+      "location": "src/preview/index.ts:147"
+    },
+    {
+      "severity": "low",
+      "area": "状態の可視化／空状態",
+      "message": "プレビューペインの 5状態(ui-design 15章)のうち loading/error/empty のプレースホルダ CSS とユーザー向け日本語文言が追加され(src/styles/app.css:161-183『プレビューを準備しています…』『プレビューを表示できませんでした(既定のアプリで開けます)』『プレビューする内容がありません』)、setPreviewState で loading→ready→error が出し分くようになった(src/main.ts:261/283/286)。前イテレーションの low(中間フィードバック無し)はおおむね解消。ただし(1)data-state='empty' は CSS と setPreviewState のシグネチャに存在するが main.ts から一度も呼ばれず、空内容/非プレビュー文書時に empty 文言が出ない、(2)data-state='ready' でも別WebView 未アタッチのため実際は --bg-raised 背景のみで中身は空に見える(系統C 結線で実描画)。いずれも別WebView 実アタッチ前提の設計分割どおりで、文言とプレースホルダの骨格は揃ったため low。系統C 結線時に empty 分岐の呼出と ready 時の実描画を忘れないよう申し送る。",
+      "location": "src/main.ts:292"
+    },
+    {
+      "severity": "low",
+      "area": "操作の一貫性",
+      "message": "前イテレーションの low(『すべて確認済み』ボタンが disable 制御外)は、refreshTabs(src/main.ts:82)と setMutatingButtonsDisabled(src/main.ts:113)で confirmAllBtn を busy 中は無効化するよう改善され、退避を伴う操作の多重実行ガード(withBusy)に統合された。これは『データを失わない』の UI ガードとして良好。残る軽微点は、busy でないときは confirm-all がフォルダ未オープン/未読ゼロでも常時クリック可能で、他の退避系ボタン(保存/確認/巻き戻し)が hasActive で無効化される一貫性から外れること。押すと『確認すべき未読はありません』が出るためフィードバック自体は成立し誤操作で害は無い(意図的にタブ非依存=フォルダ全体操作のため)。一貫性の磨き込み余地として low。",
+      "location": "src/main.ts:82"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint4(プレビュー)修正イテレーション(iter2)の UX 観点レビュー。critical ゼロ。本ターンは前イテレーションの feedback(high4/medium6/low6)を品質改善した修正ターンで、UX 観点の指摘は実コードで確認した範囲でほぼ解消されている: (1)暴走ガードがプレビュー配信経路へ結線され巨大画像/SVG を 413 で弾く(前 high 解消)、(2)has_meta_refresh の通知握り潰しを解消(notify 追加)、(3)『すべて確認済み』スキップ時に F5 再同期の次の一手を明示(行き止まり解消)、(4)信頼JS 失敗件数の受信導線(window.message リスナ＋parsePreviewFailureMessage)を追加(片側配線解消)、(5)プレビュー 5状態のプレースホルダ日本語文言を追加、(6)confirm-all を busy ガードへ統合。中心体験(開く→編集→保存→差分→確認済み)は完了でき、破壊的操作(巻き戻し/すべて確認済み)は退避が先行しデータ喪失導線は無く、withBusy で二重送信も防いでいる。残るギャップは2点の medium(暴走ガード 413→ユーザー向け回復通知が未結線・失敗件数の本番通知が window.parent 不達)だが、いずれも別WebView 実アタッチごと系統C(acceptance.md TE6/TE7・findings T-007)へ明示繰延されており、隠れた導線破綻ではなく spec の二系統検証に沿った追跡済みギャップ。low は data-state='empty' 未呼出とプレビュー実描画(系統C 申し送り)・confirm-all の disable 一貫性。"
+}

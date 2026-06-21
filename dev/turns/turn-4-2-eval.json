@@ -1,0 +1,80 @@
+{
+  "score": 90,
+  "plan_implementation": {
+    "overall": 90,
+    "notes": "sprint4(プレビュー=全Web化の最重要セキュリティ境界)修正ターン(iter2)。must 8件は各 criterion の検証アンカー(cargo test/npm typecheck/系統C記録)で全充足・前ターンから後退なし。前イテレーション(4-1)の high4件(暴走ガード未結線・CSPディレクティブインジェクション・失敗件数受信片側配線・非同期中の二重送信防止)を全解消: (1)guard_local_resource を local_resource_response 配信前に結線し巨大画像/SVG を 413 で弾く+配線テスト、(2)validate_allow_hosts を新設し prepare 各 preview 入口で fail-closed・build_csp で防御的再検証(多層)+回帰テスト、(3)window.message 受信リスナ+parsePreviewFailureMessage で通知バー集計、(4)withBusy で保存/確認/一括確認/巻き戻しの in-flight 抑止。多層サニタイズ・CSPレスポンスヘッダ強制(系統A nonce限定/系統B none・緩和は img/font のみ・既定遮断復帰)・権限ゼロ別WebView+custom protocol直配信(capabilities/main.json は windows=[main]のみで preview 権限ゼロ)・パス封じ込め(canonicalize から prefix 検証・解決後実体名でも is_sensitive 再判定)・系統A/B直列化(PreviewSerializer)・信頼JS危険オプション封じ(Mermaid securityLevel strict・KaTeX trust false/strict true/maxExpand・per-block+1秒timeout+元コード復帰)・暴走ガード(pika-core render 段で計測)は維持。テスト改竄なし=新規追加のみ。残未実装は frontend-ui high2件(失敗ブロック弁別CSSと buildTrustedJsInit の別WebView 実注入が未結線=同根の完全HTML文書ラッパ欠落・系統C の別WebView 実アタッチ段へ意図的据え置き・spec と整合)。should は 3モード×差分トグル直交のみ完了・双方向スクロール同期は sourcepos 付与まで土台・プレビュー内検索/テーマCSS変数/リンク規則は系統C/後続へ繰延(約0.4)。"
+  },
+  "quality": {
+    "overall": 90,
+    "breakdown": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 86
+    },
+    "dimension_thresholds": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 80
+    }
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[GATE] d_verify=100(cargo test/cargo build warnings=deny/npm run typecheck 全 exit0)・d_accept=100(must 8件は各 criterion の検証アンカーで充足・前ターン後退なし)・d_quality=86・d_review=100(security/performance/frontend-ui/ux 4観点とも has_critical=false)。全足切りクリア AND score=90>=90 で passed=true。前イテレーション(4-1)の high4件(暴走ガード未結線・CSPインジェクション・失敗件数受信片側配線・二重送信防止)を全解消し品質が明確に向上(d_quality 83 から 86)。テスト改竄なし。[HIGH 残(critical未満・次ターン任意)] (1)信頼JS の失敗ブロック弁別スタイル(.pika-block-error/.pika-mermaid)が配信文書のどこにも無く視覚識別不能。(2)buildTrustedJsInit が dead code で main.ts が import せず renderActivePreview が nonce と script 注入を結線せず Mermaid/KaTeX/highlight が描画経路として未結線。(1)(2)は配信文書の完全HTMLラッパを組む同根の未実装で系統C の別WebView 実アタッチ段へ意図的に据え置き=spec と整合するが CSS/script 注入文字列の文書組み込みは frontend/pika-core で完結でき自動検証側で詰める余地がある。[MEDIUM] 系統A style-src の unsafe-inline を sprint7 で nonce 寄せ再評価/同一 content 再サニタイズのキャッシュ余地(YAGNI)/プレビューへのテーマ CSS 変数受け渡し未実装(should)/empty 状態 CSS の死蔵/暴走ガード 413 から 回復通知未結線/失敗件数の本番通知が window.parent 不達/preview-host の role 未指定(sprint7)。[LOW] 暫定 postMessage のワイルドカード origin は本番置換時に撤去/origin 検証・scan_hazards は防御に昇格させない・SVG ガードの lowercase 全文コピー巻き上げ・confirm-all の disable 一貫性。",
+  "feedback_structured": {
+    "high": [
+      {
+        "area": "信頼JS 失敗ブロックの視覚弁別スタイル欠落(frontend-ui・must#5 周辺)",
+        "message": "markError が付与する .pika-block-error と Mermaid 描画ホストの .pika-mermaid に対応する CSS が、メインWebView の app.css にも別WebView へ配信される文書本体(sanitize_html が返す body=head/style 無しフラグメント)にも存在しない(grep で pika-block-error/pika-mermaid は src/preview/index.ts のみヒット)。クラスを付けても見た目が変わらず描画失敗ブロックを画面で識別できない。must#5 のブロック単位エラーマーク弁別が視覚に出ていない。色だけでなく枠/記号での弁別(forced-colors 追従)を配信文書の同梱 CSS として用意する。critical ではない(spec が別WebView 実描画を系統C へ寄せている)が、配信 CSS 文字列の組成は frontend/pika-core で純粋ロジックとして完結でき自動検証側で詰められる。"
+      },
+      {
+        "area": "buildTrustedJsInit が dead code・別WebView 実注入の文書ラッパ未結線(frontend-ui・must#5)",
+        "message": "信頼JS 初期化スクリプト buildTrustedJsInit(nonce) が定義+export のみで呼出元ゼロ(main.ts は import すらしない)。renderActivePreview は ready.nonce を受け取るが使わず data-preview-url 属性へ URL を保持するだけで、配信文書(PreviewResponse.body)へ script nonce として組み込む配線が無い。現経路では別WebView へ head/style/script 無しの HTML フラグメントのみ配信され Mermaid/KaTeX/highlight は描画されない。危険オプション設定値の組立と per-block/1秒タイムアウト/markError ロジックは実装済みだが注入経路が繋がっておらず描画として成立していない。generator は別WebView 実アタッチを系統C へ意図的に据え置いた旨を turn report に明記し spec と整合する据え置きだが、文書本体の組成(同梱CSS+nonce script の文書への組み込み)は frontend/pika-core で閉じられる純粋ロジックであり次ターン以降で結線余地。"
+      }
+    ],
+    "medium": [
+      {
+        "area": "プレビューへのテーマ CSS 変数受け渡し未実装(frontend-ui・should#5)",
+        "message": "プレビュー別WebView へテーマ CSS 変数(tokens.css の bg/text/font トークン等)を渡す配線が無く配信文書本体に style や root 変数が含まれない。系統A(Markdown)プレビューがアプリのライト/ダークと無関係な無スタイルになりメインWebView のダークと並べたとき視覚一貫性が崩れる。系統B(HTML)は文書スタイル尊重で対象外という切り分けは妥当。上記 high の文書ラッパ組成と同じ作業で同梱できる。should のため passed はブロックしない。"
+      },
+      {
+        "area": "empty 状態 CSS の死蔵(frontend-ui/ux)",
+        "message": "data-state empty の CSS プレースホルダ(プレビューする内容がありません)は app.css に定義済みだが setPreviewState empty を呼ぶ経路が main.ts に無い(loading/ready/error のみ)。空内容/空白のみのタブで empty 文言が出ず別WebView 側も空表示になる。renderActivePreview で content が空/空白のみのとき empty へ分岐する判定を入れる。"
+      },
+      {
+        "area": "暴走ガード 413 から ユーザー向け回復通知が未結線(ux)",
+        "message": "local_resource_response が巨大画像/SVG を 413 で弾く配線は入った(前 high 解消)が、413 を受けて通知バーに既定のアプリで開く誘導文言を出す frontend ハンドラが無い(別WebView 実アタッチが系統C 繰延・acceptance TE7 で追跡)。ブロック(固まらない=安全)は成立したが Nielsen 9番(エラーからの回復支援)の回復導線は未完。別WebView 実アタッチ時に結線する。"
+      },
+      {
+        "area": "系統A style-src の unsafe-inline(security・sprint7 再評価)",
+        "message": "系統A/B いずれの CSP も style-src に unsafe-inline を付与(csp.rs:149-152)。script-src は系統A=nonce限定/系統B=none を死守でき XSS 直撃は塞がるが CSS injection 経由の限定的情報抽出余地が残る。実害は薄い(connect-src none・img/font は既定 pika-preview のみで exfil 経路ほぼ無し)。系統A は同梱 KaTeX/highlight CSS に nonce を付ける設計なので sprint7(forced-colors で style を増やす段)で系統A の style-src から unsafe-inline を外し nonce 寄せできないか再評価する。criterion は style-src を制約せず必須修正でない。"
+      },
+      {
+        "area": "同一 content の再サニタイズにキャッシュ余地(performance)",
+        "message": "prepare_preview は呼出のたびに comrak から ammonia の全パイプラインを再実行し同一 content をキャッシュしない(直近1世代のみ保持はメモリ節約+前モード残留防止の意図的選択)。タブ/モード切替で同じファイルを行き来するたびフル再サニタイズが走る。実測(A3 初回383.6ms 上限2000・A4 warm 7-10ms)は基準内で構造破綻ではない。content ハッシュから世代マップのメモ化で warm 切替コストを削れるがキャッシュ追加は YAGNI とのトレードオフ。系統C T-001 の更新300ms 実測に余裕があれば現状維持で可。"
+      },
+      {
+        "area": "preview-host の role 未指定(frontend-ui・sprint7)",
+        "message": "preview-host は aria-label プレビュー を持つが role 未指定(差分レンダラは role document/aria-readonly を付与)。占有領域が支援技術に何の領域かを伝えられない。sprint7 の ARIA 全Web再構築で preview-host の role/読み上げ(切替時のフォーカス移動含む)を確定する。"
+      }
+    ],
+    "low": [
+      {
+        "area": "暫定 postMessage のワイルドカード origin(security)",
+        "message": "失敗件数通知が別WebView 側 window.parent.postMessage でワイルドカード targetOrigin で送信され(preview/index.ts:147)、メイン側 message リスナも event.origin を検証せず型だけ確認して受理する(main.ts:477-482)。運ぶのは失敗件数(整数)のみで作用は通知バー文言表示のみ・本番は window.parent 不達で Tauri event/IPC へ置換予定のため実害は小さい。本番経路置換時にこのワイルドカード postMessage 経路を撤去し、残すなら event.origin/source を検証する方針をコメントに残す。"
+      },
+      {
+        "area": "scan_hazards は防御層でなく UX 補助(security・記録)",
+        "message": "scan_hazards は素朴な部分文字列一致で has_script/has_external_ref/has_meta_refresh を判定する(preview.rs:340)。これは通知バー文言の根拠(UX 補助)で防御層ではなく実防御は ammonia+CSP が独立して担う。コードに 検知=防御に昇格させない と明記され位置づけは正しい(良好点記録)。"
+      },
+      {
+        "area": "SVG ガードの lowercase 全文コピー(performance・微小最適化)",
+        "message": "svg_attr_value が呼ばれるたび text.to_ascii_lowercase で SVG 全文を複製し svg_estimated_pixels が最大3回呼ぶため1判定で最大3回の全文 lowercase コピーが発生(guard.rs:271)。check_svg_bytes は要素数ガード(5万)で上限が掛かり配信1回ごとでホットループでないため実害は小さい。lowercase を1回に巻き上げて使い回せば不要コピーを2回削れる(low の最適化余地)。"
+      },
+      {
+        "area": "confirm-all の disable 一貫性(ux・磨き込み)",
+        "message": "confirmAllBtn は busy 中は無効化される(withBusy 統合)が、busy でないときはフォルダ未オープン/未読ゼロでも常時クリック可能で他の退避系ボタン(保存/確認/巻き戻し)が hasActive で無効化される一貫性から外れる。押すと 確認すべき未読はありません が出てフィードバックは成立し誤操作で害は無い(意図的にタブ非依存=フォルダ全体操作)。一貫性の磨き込み余地。"
+      }
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

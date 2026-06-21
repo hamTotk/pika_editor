@@ -17,10 +17,10 @@ pub mod guard;
 pub mod path;
 pub mod sanitize;
 
-pub use csp::{build_csp, generate_nonce, ExternalResourceAllow, Nonce};
+pub use csp::{build_csp, generate_nonce, validate_allow_hosts, ExternalResourceAllow, Nonce};
 pub use guard::{
-    check_image_pixels, check_svg, has_long_line, BlockReason, GuardDecision,
-    DEFAULT_HTML_TIMEOUT_MS, DEFAULT_IMAGE_MAX_PIXELS, DEFAULT_LONG_LINE_CHARS,
+    check_image_bytes, check_image_pixels, check_svg, check_svg_bytes, has_long_line, BlockReason,
+    GuardDecision, DEFAULT_HTML_TIMEOUT_MS, DEFAULT_IMAGE_MAX_PIXELS, DEFAULT_LONG_LINE_CHARS,
     DEFAULT_SVG_MAX_ELEMENTS, DEFAULT_SVG_MAX_PIXELS,
 };
 pub use path::{confine_under, join_under, resolve_local_ref, LocalRefDecision, RejectReason};
@@ -50,12 +50,26 @@ pub fn prepare_markdown_preview(markdown: &str, allow: &ExternalResourceAllow) -
     let unsafe_html = markdown_to_unsafe_html(markdown);
     let body = sanitize_html(&unsafe_html, PreviewFlavor::MarkdownTrustedJs);
     let nonce = generate_nonce();
-    let csp = build_csp(PreviewFlavor::MarkdownTrustedJs, &nonce, allow);
+    // CSP インジェクション防止: 許可ホストに不正要素があれば全外部許可を破棄して既定（遮断）へ倒す。
+    let safe_allow = sanitize_allow(allow);
+    let csp = build_csp(PreviewFlavor::MarkdownTrustedJs, &nonce, &safe_allow);
     PreviewResponse {
         body,
         csp,
         nonce,
         flavor: PreviewFlavor::MarkdownTrustedJs,
+    }
+}
+
+/// オプトイン外部許可を CSP へ渡す前に検証し、不正があれば**外部遮断（既定）へ倒す**（fail-closed）。
+///
+/// [`validate_allow_hosts`] で 1 つでも不正ホストが見つかれば許可リスト全体を破棄する
+/// （部分採用で攻撃者制御文字列が CSP へ漏れるのを避ける＝要件6.2/6.3 の「既定は必ずオフに戻る」と整合）。
+fn sanitize_allow(allow: &ExternalResourceAllow) -> ExternalResourceAllow {
+    if validate_allow_hosts(allow).is_ok() {
+        allow.clone()
+    } else {
+        ExternalResourceAllow::blocked()
     }
 }
 
@@ -67,7 +81,9 @@ pub fn prepare_html_preview(html: &str, allow: &ExternalResourceAllow) -> Previe
     let body = sanitize_html(html, PreviewFlavor::HtmlNoJs);
     // 系統B は nonce を使わないが、CSP 組立 API の引数に空文字を渡す（script-src 'none' で無視される）。
     let nonce = String::new();
-    let csp = build_csp(PreviewFlavor::HtmlNoJs, &nonce, allow);
+    // CSP インジェクション防止: 系統B も同様に fail-closed で外部許可を検証する。
+    let safe_allow = sanitize_allow(allow);
+    let csp = build_csp(PreviewFlavor::HtmlNoJs, &nonce, &safe_allow);
     PreviewResponse {
         body,
         csp,
@@ -88,9 +104,14 @@ mod tests {
         );
         assert_eq!(resp.flavor, PreviewFlavor::MarkdownTrustedJs);
         assert!(resp.body.contains("<h1"), "見出しが消えた: {}", resp.body);
-        assert!(!resp.body.contains("<script"), "script が残った: {}", resp.body);
         assert!(
-            resp.csp.contains(&format!("script-src 'nonce-{}'", resp.nonce)),
+            !resp.body.contains("<script"),
+            "script が残った: {}",
+            resp.body
+        );
+        assert!(
+            resp.csp
+                .contains(&format!("script-src 'nonce-{}'", resp.nonce)),
             "CSP に nonce が無い: {}",
             resp.csp
         );
@@ -104,16 +125,65 @@ mod tests {
             &ExternalResourceAllow::blocked(),
         );
         assert_eq!(resp.flavor, PreviewFlavor::HtmlNoJs);
-        assert!(resp.body.contains("style="), "インライン CSS が消えた: {}", resp.body);
-        assert!(!resp.body.contains("<script"), "script が残った: {}", resp.body);
+        assert!(
+            resp.body.contains("style="),
+            "インライン CSS が消えた: {}",
+            resp.body
+        );
+        assert!(
+            !resp.body.contains("<script"),
+            "script が残った: {}",
+            resp.body
+        );
         assert!(resp.csp.contains("script-src 'none'"), "CSP: {}", resp.csp);
         assert!(resp.nonce.is_empty(), "系統B に nonce が付いた");
     }
 
     #[test]
     fn 既定で外部遮断_緩和なし() {
-        let resp = prepare_markdown_preview("![x](http://evil/a.png)", &ExternalResourceAllow::blocked());
+        let resp =
+            prepare_markdown_preview("![x](http://evil/a.png)", &ExternalResourceAllow::blocked());
         assert!(resp.csp.contains("img-src pika-preview:;"), "{}", resp.csp);
         assert!(resp.csp.contains("connect-src 'none'"), "{}", resp.csp);
+    }
+
+    #[test]
+    fn 不正な外部許可ホストは_csp_へ漏れず外部遮断へ倒れる() {
+        // CSP インジェクション余地（high 指摘）: prepare 経路で fail-closed になることを担保する。
+        let allow = ExternalResourceAllow {
+            hosts: vec!["https://evil.com; script-src *".to_string()],
+        };
+        let resp = prepare_markdown_preview("![x](rel.png)", &allow);
+        assert!(
+            !resp.csp.contains("script-src *"),
+            "不正ホストが CSP に漏れた: {}",
+            resp.csp
+        );
+        assert!(
+            resp.csp
+                .contains(&format!("script-src 'nonce-{}'", resp.nonce)),
+            "nonce 限定が破られた: {}",
+            resp.csp
+        );
+        // 1 つでも不正があれば外部遮断（既定）へ倒れる。
+        assert!(
+            resp.csp.contains("img-src pika-preview:;"),
+            "外部遮断に戻っていない: {}",
+            resp.csp
+        );
+    }
+
+    #[test]
+    fn 正常な外部許可ホストは_img_font_に反映される() {
+        let allow = ExternalResourceAllow {
+            hosts: vec!["https://cdn.example.com".to_string()],
+        };
+        let resp = prepare_markdown_preview("![x](rel.png)", &allow);
+        assert!(
+            resp.csp
+                .contains("img-src pika-preview: https://cdn.example.com"),
+            "正常な許可ホストが反映されない: {}",
+            resp.csp
+        );
     }
 }

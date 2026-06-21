@@ -1,0 +1,27 @@
+{
+  "reviewer": "security",
+  "sprint_id": 4,
+  "iteration": 2,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "CSP 多層防御 / style-src",
+      "message": "系統A/B いずれの CSP も style-src に 'unsafe-inline' を付与している(csp.rs:149-152)。コメント通り script-src は系統A=nonce限定・系統B='none' を死守できており XSS 直撃は塞がれているが、'unsafe-inline' な CSS は CSS injection 経由の限定的情報抽出(属性セレクタ + 既定許可 src での値推測等)の余地を残す。実害は薄い: connect-src 'none'・img-src/font-src は既定 pika-preview: のみ(外部遮断)で exfil 経路がほぼ無く、文書 CSS の出所は ammonia サニタイズ済み(系統B の <style>/style 属性は許可するが script は除去)。前イテレーション(4-1)で medium として記録済みの継続事項。系統A は同梱 KaTeX/highlight CSS に既に nonce を付与する設計なので、sprint7(forced-colors/テキストスケールで style を増やす段)で系統A の style-src から 'unsafe-inline' を外し nonce のみへ寄せられないか再評価する余地を引き続き記録する。spec criteria は style-src を制約していないため必須修正ではない。",
+      "location": "crates/pika-core/src/render/csp.rs:149"
+    },
+    {
+      "severity": "low",
+      "area": "オリジン検証 / postMessage",
+      "message": "信頼 JS の失敗件数通知が別WebView 側 window.parent.postMessage({type:'pika-preview-failures',count}, '*') とワイルドカード targetOrigin で送信され(src/preview/index.ts:147)、メイン側 window.addEventListener('message') も event.origin を検証せず parsePreviewFailureMessage で type/count 形だけ確認して受理する(src/main.ts:477-482)。通常は無検証 message 受信は DOM ベース XSS/なりすまし通知の足がかりだが、本ケースは(1)運ぶ内容が失敗『件数』(整数)のみで機密も実行可能データも含まない、(2)受信側の作用は通知バー文言表示のみ(コード実行・状態変更・データ操作なし)、(3)コード自身が『別WebView は独立 WebView で window.parent では本体に届かず本番(系統C)では Tauri event/IPC へ置換する』と明記する暫定配線(将来 iframe/テスト用)であるため実害は小さい。本番経路を Tauri event/IPC に置換する際にこのワイルドカード postMessage 経路自体を撤去し、残すなら event.origin/source を検証する方針を該当箇所のコメントに残しておくと安全。現状 low。",
+      "location": "src/main.ts:477 / src/preview/index.ts:147"
+    },
+    {
+      "severity": "low",
+      "area": "機密情報 / 検知の位置づけ",
+      "message": "scan_hazards は素朴な部分文字列一致(to_ascii_lowercase + contains)で has_script/has_external_ref/has_meta_refresh を判定する(preview.rs:340)。これは通知バー文言の根拠(UX 補助)であって防御層ではなく、実防御は ammonia + CSP ヘッダが独立して担うため誤検知/見逃しがあってもセキュリティ境界は破れない。コードに『これは防御層ではなく UX 補助・検知=防御に昇格させない』と明記されており位置づけは正しい(前イテレーション low 指摘を反映済み)。実害なしの確認記録。",
+      "location": "src-tauri/src/preview.rs:340"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint4(プレビュー=全Web化の最重要セキュリティ境界)の iteration2 は前イテレーションで唯一残った high(オプトイン外部許可ホスト allow_external が無検証で CSP ヘッダへ直結する CSP directive injection 余地)が完全解消されており critical なし・新規 high なし。修正の実体: pika-core::render::csp に validate_allow_hosts/validate_one_host を新設し allowlist 方式で検証(https:// のみ・ホスト名[:ポート]は [A-Za-z0-9.-] とポート数字のみ・空白/;/'/\"/*/,/バックスラッシュ/改行/パス・クエリ・フラグメント・非https スキーム・不正ポートを拒否)、prepare_markdown_preview/prepare_html_preview の入口で sanitize_allow が validate に通らなければ許可リスト全体を破棄して外部遮断(fail-closed)へ倒し、さらに build_csp が連結直前に validate_one_host で防御的に再検証(多層)する。CSP インジェクション/非https/パス付き/不正ポート/fail-closed の回帰テストが render::csp と render::mod に追加され『呼び出し側で検証済み前提』というコメント契約が実装とテストで担保された。多層防御は引き続き堅実: comrak(unsafe_)→ammonia 最終段サニタイズ(script/on*/javascript:/scriptable data: 全除去/iframe/object/embed/base/meta/id/name/SVG script・foreignObject・xlink:href javascript: を明示 allowlist で除去・決定論テスト済み)、CSP をレスポンスヘッダで強制(文書内 meta 非依存・X-Content-Type-Options:nosniff・Referrer-Policy:no-referrer も付与)、CSPRNG(getrandom)nonce(毎回異なる base64url・失敗時は推測可能値へフォールバックせず panic)、script-src は系統A=nonce限定/系統B='none' で 'unsafe-inline' 不付与、ローカル参照封じ込め(percent-decode 後に絶対/UNC/ドライブ/../脱出/機密を拒否 → join → canonicalize → Path::starts_with の component 単位 prefix 検証でシンボリックリンク脱出を弾き、解決後実体名でも is_sensitive 再判定)、暴走ガード(画像6000万px・SVG8000万px/5万要素を入力段で計測し saturating で乗算オーバーフロー回避・配信前に 413)まで一貫。権限ゼロ別WebView は capabilities/main.json が windows:[\"main\"] の exact ラベルのみ・preview ラベル未宣言で構造的に Tauri command 到達不能であり、invoke/__TAURI_INTERNALS__ 到達不能の実機実証は系統C(Windows 実機 Release・design doc 15章-3)へ正しく委譲済み。信頼 JS 注入(buildTrustedJsInit)も Mermaid securityLevel:'strict'・KaTeX trust:false/strict:true/maxExpand 制限で安全オプションを固定し注入文字列へ未信頼内容を連結せず nonce のみ補間。新規追加依存(ammonia 4.1.2/comrak 0.29.0/getrandom 0.2.17)に既知の重大 CVE は見当たらず、cargo audit は sprint7 の must ゲートとして妥当に配置されている。残課題は medium 1(系統A style-src の 'unsafe-inline' を sprint7 で nonce 化検討・実害は外部遮断で限定的)と low 2(暫定 postMessage のワイルドカード origin は本番 Tauri IPC 置換時に撤去/origin 検証・scan_hazards は防御に昇格させない設計コメント維持)で、いずれも passed を妨げない。"
+}

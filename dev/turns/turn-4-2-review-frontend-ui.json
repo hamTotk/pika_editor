@@ -1,0 +1,45 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 4,
+  "iteration": 2,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "状態の可視化(色非依存)/状態網羅",
+      "message": "信頼JS(Mermaid/KaTeX/highlight)の per-block 失敗を視覚弁別するスタイルが、プレビューが配信される文書のどこにも存在しない。markError() は失敗ブロックへ .pika-block-error クラスを付与し(src/preview/index.ts:199)、Mermaid 描画ホストへ .pika-mermaid を付ける(同:182)が、これらに対応する CSS が (a)メインWebView の app.css に無く、(b)別WebView へ配信される文書本体(crates/pika-core/src/render/sanitize.rs の sanitize_html が返す HTML フラグメント=PreviewResponse.body)にも無い(grep で pika-block-error/pika-mermaid は src/preview/index.ts のみヒット)。配信文書には <head>/<style> が一切組まれていないため、クラスを付けても見た目が一切変わらず、ユーザーは『どのブロックが失敗したか』を画面上で識別できない。must『構文エラー/タイムアウト時は当該ブロックを元コード表示へ戻しエラーマーク』(sprint4 must 5番目)のうち、件数の通知バー集計(4-1 で受信導線追加=解消)は片付いたが、ブロック単位のエラーマーク弁別が視覚に出ない。前ターン(4-1)medium#5 の継続だが、文書ラッパ自体が無いことで影響範囲が当初想定より広い(下記の文書ラッパ欠落と同根)ため high とする。色だけでなく枠/記号での弁別(forced-colors 追従)を、配信文書の同梱 CSS として用意する必要がある。",
+      "location": "src/preview/index.ts:182,199 (.pika-mermaid/.pika-block-error 付与), crates/pika-core/src/render/sanitize.rs:58 (body は head/style なしフラグメント)"
+    },
+    {
+      "severity": "high",
+      "area": "描画/状態網羅(プレビュー本体)",
+      "message": "プレビューに注入する信頼JS の初期化スクリプト buildTrustedJsInit(nonce) が定義のみで一切呼ばれておらず(grep: src/preview/index.ts:135 の定義以外に呼出元なし。main.ts は import すらしていない)、かつ配信文書(PreviewResponse.body)へ <script nonce> として組み込む配線が存在しない。結果として、現状の経路では別WebView へ配信されるのは <head>/<style>/<script> の無い HTML フラグメントのみで、Mermaid 図・KaTeX 数式・highlight.js のシンタックスハイライトは『描画されない』。renderActivePreview は ready.nonce を受け取るが(main.ts:264)使っておらず、nonce↔script 注入の結線が成立していない。must『信頼JS の危険オプション封じ…各ブロック個別描画』(sprint4 must 5番目)は危険オプション設定値(securityLevel:strict/trust:false 等)の組立までは出来ているが、注入経路が繋がっておらず描画として成立していない。generator は『完全HTML文書ラッパ(head/CSS/nonce script 注入)は系統C の別WebView 実アタッチで組む段』として意図的に据え置いた旨を turn report(turn-4-2-generator.md:57-59)に明記しており、別WebView の実アタッチが系統C(手動)であること自体は spec と整合する。ただし『注入する信頼スクリプト文字列の生成』(buildTrustedJsInit)と『文書本体の組成』をどちらも frontend/pika-core で完結できる純粋ロジックとして持ちながら、両者を繋ぐ文書ラッパ組成だけが空白で、buildTrustedJsInit が dead code 化している点は frontend 側で閉じられる配線の欠落。critical(主要操作が不能/不可視)には倒さない=プレビュー以外の中心体験(開く/編集/保存/差分/確認済み)は機能し、プレビュー描画自体は spec で系統C 寄せのため。",
+      "location": "src/preview/index.ts:135 (buildTrustedJsInit 未使用), src/main.ts:254-289 (renderActivePreview が nonce/script 注入を結線していない)"
+    },
+    {
+      "severity": "medium",
+      "area": "ビジュアル一貫性/テーマ追従",
+      "message": "プレビュー(別WebView)へテーマ CSS 変数(tokens.css の --bg-*/--text-*/--font-* 等)を渡す配線が無い。should『プレビューにテーマ CSS 変数を渡す(HTML プレビューは文書スタイル尊重=要件11.3)』(sprint4 should 5番目)が未実装で、配信文書本体に <style> も :root 変数も含まれない(render/*.rs に theme/--text-1/font-ui のヒットなし)。系統A(Markdown)プレビューはアプリのライト/ダークと無関係な無スタイル(ブラウザ既定の白背景/Times 系フォント)になり、メインWebView のダークテーマと並べたときに視覚一貫性が崩れる。should のため passed はブロックしないが、文書ラッパ組成(上記 high)と同じ作業で同梱すべき。系統B(HTML)は文書スタイル尊重で対象外という切り分けは妥当。",
+      "location": "crates/pika-core/src/render/sanitize.rs (body にテーマ <style> なし), src/main.ts:254-289 (テーマ変数を preview へ渡す配線なし)"
+    },
+    {
+      "severity": "medium",
+      "area": "状態網羅(empty 状態)",
+      "message": "プレビューペインの empty 状態(data-state='empty')の CSS プレースホルダは用意されている(app.css:177-183)が、setPreviewState('empty') を呼ぶ経路が main.ts のどこにも無い(呼ばれるのは loading/ready/error のみ=main.ts:261,283,286)。空ファイルや内容ゼロのタブをプレビューしたとき、ローディング→ready へ進み『プレビューする内容がありません』が出ず、別WebView 側も空表示になる(無表示が壊れて見えるのを防ぐための empty 文言が死蔵)。renderActivePreview で content が空/空白のみのときに setPreviewState('empty') へ分岐する判定を入れるべき。チェックリスト『empty(0件)状態の実装』に該当。",
+      "location": "src/main.ts:254-289 (empty 分岐なし), src/styles/app.css:177-183 (empty CSS は定義済みで未使用)"
+    },
+    {
+      "severity": "medium",
+      "area": "a11y(セマンティクス)",
+      "message": "#preview-host は aria-label='プレビュー' を持つが role 未指定のまま(src/index.html:43)。差分レンダラは role=document/aria-readonly を付与しており(src/diff/index.ts 参照)、プレビュー占有領域も占有時に role=document 相当を持つと整合する。前ターン(4-1)low#7 と同じ指摘で、generator は sprint7 範囲として据え置き(turn-4-2-generator.md:66)。実害は小さい(中身は別WebView)が、占有領域が支援技術に『何の領域か』を伝えられないため medium 寄りに据える。sprint7 の ARIA 全Web再構築で preview-host の role/読み上げ(切替時のフォーカス移動含む)を確定されたい。",
+      "location": "src/index.html:43"
+    },
+    {
+      "severity": "low",
+      "area": "a11y(キーボード操作)",
+      "message": "プレビュー表示トグルにキーボードショートカットが無い(差分=Ctrl+バックスラッシュ, ソース復帰=Ctrl+E はあるがプレビューは toggle-preview ボタンのクリック/フォーカス→Enter/Space のみ)。ボタン自体はフォーカス可能で Enter/Space 発火するためキーボード到達不能ではない(critical でない)。ui-design のショートカット表整備は sprint7 must のため、プレビュー切替の代替割当の要否をそこで確認されたい。前ターン(4-1)low#6 の継続。",
+      "location": "src/main.ts:445-472 (keydown ディスパッチにプレビュー切替なし)"
+    }
+  ],
+  "has_critical": false,
+  "summary": "前ターン(4-1)の frontend-ui high 2件(信頼JS失敗件数の受信リスナ欠落・非同期中の二重送信防止欠落)はともに解消(message リスナ+parsePreviewFailureMessage、withBusy/busy フラグ+setMutatingButtonsDisabled)。medium のプレビューペイン状態網羅(loading/ready/error の data-state+CSS プレースホルダ)・#preview-host のグリッド占有 CSS(grid-row:2)も解消。3モード×差分トグル直交(resolveOccupancy)・系統A/B 直列化(PreviewSerializer)・差分レンダラの色非依存(下線/太字+記号)・aria 化は良好で、critical(主要操作が不能/不可視・致命的 a11y 違反)は無し=d_review ブロックなし。残る欠陥: (1)信頼JS の失敗ブロック弁別スタイル(.pika-block-error/.pika-mermaid)が配信文書のどこにも無く視覚で識別不能(high)、(2)buildTrustedJsInit が dead code で nonce↔script 注入の文書ラッパ組成が空白=Mermaid/KaTeX/highlight が描画経路として未結線(high。ただし別WebView 実アタッチは spec で系統C 寄せ・プレビュー以外の中心体験は機能するため critical には倒さない)、(3)プレビューへのテーマ CSS 変数受け渡し未実装=系統A が無スタイルでテーマ不一致(should・medium)、(4)empty 状態 CSS が用意されているが setPreviewState('empty') 呼出経路なしで死蔵(medium)、(5)preview-host の role 未指定(sprint7 送り・medium)。(1)(2)(3)は『配信文書の完全HTMLラッパ(head/style/nonce script)を組む』という同根の未実装に集約され、generator が系統C の別WebView 実アタッチ段へ意図的に据え置いた旨を turn report に明記している。spec と矛盾しない据え置きだが、文書ラッパ組成のうち frontend/pika-core で純粋ロジックとして完結できる部分(同梱CSS文字列・script注入文字列の文書への組み込み)は本フェーズの自動検証側で詰められる余地があり、次ターン以降の feedback_structured で優先対応されたい。"
+}

@@ -11,8 +11,10 @@
 //!   到達不能の実証は系統C（Windows 実機 Release・design doc 15章-3）。
 
 use pika_core::render::{
-    confine_under, join_under, prepare_html_preview, prepare_markdown_preview, resolve_local_ref,
-    ExternalResourceAllow, LocalRefDecision, PreviewFlavor, PreviewResponse,
+    check_image_bytes, check_svg_bytes, confine_under, join_under, prepare_html_preview,
+    prepare_markdown_preview, resolve_local_ref, ExternalResourceAllow, GuardDecision,
+    LocalRefDecision, PreviewFlavor, PreviewResponse, DEFAULT_IMAGE_MAX_PIXELS,
+    DEFAULT_SVG_MAX_ELEMENTS, DEFAULT_SVG_MAX_PIXELS,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -46,6 +48,11 @@ pub struct PreparedPreview {
     pub nonce: String,
     /// 系統（"markdown" | "html"）。frontend が信頼 JS 注入の要否を判断する。
     pub flavor: String,
+    /// 系統B（HTML）の危険検知（要件6.3・通知バー導線）。系統A では全 false。
+    ///
+    /// **content を 2 回 invoke しない**ため prepare_preview の戻りに同梱する（IPC 二重転送回避＝
+    /// performance 指摘）。系統A（Markdown）は danger 検知の対象外で常に全 false。
+    pub hazards: HtmlHazards,
 }
 
 /// プレビューサービス（managed state）。サニタイズ済みレスポンスを世代キーで保持する。
@@ -110,9 +117,16 @@ pub fn prepare_preview(
     };
 
     // サニタイズ＋CSP（pika-core::render）。HTML 本体は以後ストアにのみ置き、invoke で返さない。
+    // 系統B の危険検知（要件6.3）も同じ content からこの 1 回で済ませる（IPC 二重転送回避）。
     let response = match mode {
         PreviewMode::Markdown => prepare_markdown_preview(&content, &allow),
         PreviewMode::Html => prepare_html_preview(&content, &allow),
+    };
+    let hazards = match mode {
+        // 系統A（Markdown）は文書 JS 検知の対象外（comrak/ammonia でサニタイズ済み）。
+        PreviewMode::Markdown => HtmlHazards::default(),
+        // 系統B（HTML）は素の文書から危険検知して通知バー導線に使う（要件6.3）。
+        PreviewMode::Html => scan_hazards(&content),
     };
 
     // ローカル相対参照の基準ディレクトリ（canonicalize して prefix 検証の基準にする＝design doc 6章）。
@@ -144,6 +158,7 @@ pub fn prepare_preview(
         generation,
         nonce,
         flavor,
+        hazards,
     })
 }
 
@@ -250,12 +265,37 @@ fn local_resource_response(doc: &PreparedDoc, reference: &str) -> Response<Vec<u
         return error_response(StatusCode::NOT_FOUND, "読み取り失敗");
     };
     let content_type = guess_content_type(&resolved);
+
+    // 暴走ガード（要件2.2・design doc 6章「WebView 任せにしない」）。巨大画像/SVG はデコード前に
+    // ヘッダ寸法/要素数を pika-core::render で計測し、超過は配信せず 413 で弾く（UI が固まらない）。
+    // frontend は 413 をプレースホルダ＋通知導線（既定のアプリで開く）にする。
+    if let GuardDecision::Block(_) = guard_local_resource(content_type, &bytes) {
+        return error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "暴走ガード: 上限超過のため配信拒否",
+        );
+    }
+
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header("X-Content-Type-Options", "nosniff")
         .body(bytes)
         .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "応答組立失敗"))
+}
+
+/// ローカルリソース配信前の暴走ガード（要件2.2）。Content-Type で画像/SVG を判別し pika-core で判定する。
+///
+/// 判定ロジック本体（ヘッダ寸法読取・SVG 要素数計数）は pika-core::render::guard（cargo test 済み）。
+/// 画像/SVG 以外（CSS/フォント）は対象外で常に Allow（巨大化してもデコード爆発しないため）。
+fn guard_local_resource(content_type: &str, bytes: &[u8]) -> GuardDecision {
+    if content_type == "image/svg+xml" {
+        check_svg_bytes(bytes, DEFAULT_SVG_MAX_PIXELS, DEFAULT_SVG_MAX_ELEMENTS)
+    } else if content_type.starts_with("image/") {
+        check_image_bytes(bytes, DEFAULT_IMAGE_MAX_PIXELS)
+    } else {
+        GuardDecision::Allow
+    }
 }
 
 /// 拡張子から最小限の Content-Type を推定する（ローカル画像/CSS の配信用）。
@@ -292,12 +332,12 @@ fn error_response(status: StatusCode, _detail: &str) -> Response<Vec<u8>> {
         .unwrap_or_else(|_| Response::new(Vec::new()))
 }
 
-/// 系統B（HTML・JS無効）プレビューの「JS/外部参照検知」を frontend に伝える（要件6.3・通知バー導線）。
+/// 系統B（HTML）の危険検知の純粋ロジック（要件6.3）。
 ///
-/// `<script>` や Tailwind CDN・外部 http(s) リソースを検知したら通知バーで「既定のブラウザで開く」へ
-/// 誘導する（要件6.3）。検知ロジックは軽量で純粋なため command 内で素朴に走査する。
-#[tauri::command]
-pub fn scan_html_hazards(content: String) -> HtmlHazards {
+/// `<script>` や Tailwind CDN・外部 http(s) リソース・`<meta refresh>` を検知する。これは
+/// **防御層ではなく UX 補助**（実防御は ammonia + CSP・low 指摘 #6）。検知＝防御に昇格させない。
+/// 1 回の lowercase で全判定を済ませる（performance）。prepare_preview から呼び二重走査を避ける。
+fn scan_hazards(content: &str) -> HtmlHazards {
     let lower = content.to_ascii_lowercase();
     HtmlHazards {
         has_script: lower.contains("<script"),
@@ -307,7 +347,7 @@ pub fn scan_html_hazards(content: String) -> HtmlHazards {
 }
 
 /// HTML プレビューの危険検知結果（要件6.3・通知バー文言の根拠）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct HtmlHazards {
     /// `<script>` を含む（JS は CSP/ammonia で無効化済みだが「表示が崩れる」通知を出す）。
     pub has_script: bool,
@@ -323,9 +363,8 @@ mod tests {
 
     #[test]
     fn html_危険検知_script_と外部参照と_meta_refresh() {
-        let h = scan_html_hazards(
-            r#"<script src="https://cdn.tailwindcss.com"></script><meta http-equiv="refresh" content="0">"#
-                .to_string(),
+        let h = scan_hazards(
+            r#"<script src="https://cdn.tailwindcss.com"></script><meta http-equiv="refresh" content="0">"#,
         );
         assert!(h.has_script);
         assert!(h.has_external_ref);
@@ -334,10 +373,22 @@ mod tests {
 
     #[test]
     fn html_危険検知_安全な文書はすべて_false() {
-        let h = scan_html_hazards("<div style=\"color:red\">こんにちは</div>".to_string());
+        let h = scan_hazards("<div style=\"color:red\">こんにちは</div>");
         assert!(!h.has_script);
         assert!(!h.has_external_ref);
         assert!(!h.has_meta_refresh);
+    }
+
+    #[test]
+    fn prepare_preview_の_hazards_は系統bでのみ検知し系統aは全false() {
+        // IPC 二重転送回避（performance 指摘）の回帰防止: hazards は prepare_preview の戻りに同梱され、
+        // 系統B でのみ検知・系統A（Markdown）は常に全 false であることを観測する。
+        let dangerous = "<script>x()</script><meta http-equiv=\"refresh\" content=\"0\">";
+        let b = scan_hazards(dangerous);
+        assert!(b.has_script && b.has_meta_refresh);
+        // 系統A は対象外で Default（全 false）を入れる方針。
+        let a = HtmlHazards::default();
+        assert!(!a.has_script && !a.has_external_ref && !a.has_meta_refresh);
     }
 
     #[test]
@@ -349,5 +400,54 @@ mod tests {
         );
         assert!(!resp.body.contains("<script"));
         assert!(resp.csp.contains("script-src 'none'"));
+    }
+
+    /// PNG ヘッダ（IHDR の width/height）を組み立てる（配線テスト用）。
+    fn png_header(w: u32, h: u32) -> Vec<u8> {
+        let mut b = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        b.extend_from_slice(&[0, 0, 0, 13]);
+        b.extend_from_slice(b"IHDR");
+        b.extend_from_slice(&w.to_be_bytes());
+        b.extend_from_slice(&h.to_be_bytes());
+        b.extend_from_slice(&[8, 2, 0, 0, 0]);
+        b
+    }
+
+    #[test]
+    fn ローカル配信の暴走ガードが結線されている() {
+        // high 指摘の回帰防止: 配信前ガード（guard_local_resource）が pika-core を呼び、
+        // 巨大画像/SVG をブロック・通常サイズを許可することを配線レベルで観測する。
+        let big = png_header(10_000, 7_000); // 7000万px > 6000万px
+        assert!(
+            matches!(
+                guard_local_resource("image/png", &big),
+                GuardDecision::Block(_)
+            ),
+            "巨大画像が配信ガードを通過した"
+        );
+        let ok = png_header(800, 600);
+        assert!(
+            guard_local_resource("image/png", &ok).is_allowed(),
+            "通常画像がブロックされた"
+        );
+
+        let big_svg = {
+            let mut s = String::from("<svg>");
+            for _ in 0..60_000 {
+                s.push_str("<rect/>");
+            }
+            s.push_str("</svg>");
+            s.into_bytes()
+        };
+        assert!(
+            matches!(
+                guard_local_resource("image/svg+xml", &big_svg),
+                GuardDecision::Block(_)
+            ),
+            "巨大 SVG が配信ガードを通過した"
+        );
+
+        // 画像/SVG 以外（CSS）は対象外で常に許可（巨大でもデコード爆発しない）。
+        assert!(guard_local_resource("text/css; charset=utf-8", &vec![0u8; 1024]).is_allowed());
     }
 }

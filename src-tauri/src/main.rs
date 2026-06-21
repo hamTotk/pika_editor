@@ -52,7 +52,6 @@ fn run() {
             snapshot::confirm_all,
             snapshot::rollback_file,
             preview::prepare_preview,
-            preview::scan_html_hazards,
         ])
         .setup(|app| {
             // 起動時にメインウィンドウを表示（visible:false で生成し、初期化後に出す）。
