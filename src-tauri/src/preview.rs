@@ -190,8 +190,9 @@ pub fn prepare_preview(
         PreviewMode::Html => prepare_html_preview(&content, &allow),
     };
     let hazards = match mode {
-        // 系統A（Markdown）は文書 JS 検知の対象外（comrak/ammonia でサニタイズ済み）。
-        PreviewMode::Markdown => HtmlHazards::default(),
+        // 系統A（Markdown）は文書 JS 検知の対象外（comrak/ammonia でサニタイズ済み）だが、外部リソース
+        // 参照（リモート画像/フォント）はオプトイン許可の対象なので外部参照だけは収集する（要件6.2）。
+        PreviewMode::Markdown => scan_markdown_external(&content),
         // 系統B（HTML）は素の文書から危険検知して通知バー導線に使う（要件6.3）。
         PreviewMode::Html => scan_hazards(&content),
     };
@@ -588,14 +589,81 @@ fn error_response(status: StatusCode, _detail: &str) -> Response<Vec<u8>> {
 ///
 /// `<script>` や Tailwind CDN・外部 http(s) リソース・`<meta refresh>` を検知する。これは
 /// **防御層ではなく UX 補助**（実防御は ammonia + CSP・low 指摘 #6）。検知＝防御に昇格させない。
+/// 外部参照を検知したらホスト名も収集し、オプトイン許可（要件6.2「許可しますか」）の候補にする。
 /// 1 回の lowercase で全判定を済ませる（performance）。prepare_preview から呼び二重走査を避ける。
 fn scan_hazards(content: &str) -> HtmlHazards {
     let lower = content.to_ascii_lowercase();
+    let external_hosts = collect_external_hosts(content);
     HtmlHazards {
         has_script: lower.contains("<script"),
-        has_external_ref: lower.contains("http://") || lower.contains("https://"),
+        has_external_ref: !external_hosts.is_empty(),
         has_meta_refresh: lower.contains("http-equiv") && lower.contains("refresh"),
+        external_hosts,
     }
+}
+
+/// 系統A（Markdown）の外部参照だけを収集する（要件6.2 オプトイン許可導線）。
+///
+/// Markdown は comrak/ammonia でサニタイズ済みで `<script>`/`meta refresh` 検知は対象外だが、
+/// リモート画像/フォントはオプトイン許可（既定遮断）の対象なので外部ホストだけを集める。
+/// `has_script`/`has_meta_refresh` は常に false（Markdown の通知バー文言は外部参照のみ）。
+fn scan_markdown_external(content: &str) -> HtmlHazards {
+    let external_hosts = collect_external_hosts(content);
+    HtmlHazards {
+        has_script: false,
+        has_external_ref: !external_hosts.is_empty(),
+        has_meta_refresh: false,
+        external_hosts,
+    }
+}
+
+/// 素の文書から外部参照ホスト（`https://<host>`）を重複排除して収集する（要件6.2/6.3・2.4）。
+///
+/// オプトイン許可（[`validate_allow_hosts`] が後段で https のみ受理して再検証）する候補なので、
+/// **`https://` のみ**収集する（`http://` は盗聴/プライバシーのため対象外＝既定遮断のまま）。
+/// 防御ではなく UX 補助（実防御は ammonia + CSP）なので走査は簡易でよい:
+/// `https://` 出現位置からホスト部（`/`・`?`・`#`・空白・クォート・`<`/`>` の手前まで）を切り出し、
+/// `validate_one_host` 相当の最終検証は CSP 組立時（[`build_csp`]）が行う（緩く集めて検証で落とす）。
+fn collect_external_hosts(content: &str) -> Vec<String> {
+    let mut hosts: Vec<String> = Vec::new();
+    let bytes = content.as_bytes();
+    let lower = content.to_ascii_lowercase();
+    let mut search_from = 0usize;
+    // 大文字小文字を無視して `https://` を探すため lowercase 側で位置を取り、ホスト抽出は元 content で行う
+    // （ホスト名は ASCII なので大小は host source 比較に影響しないが、元文字列から切り出す）。
+    while let Some(rel) = lower[search_from..].find("https://") {
+        let start = search_from + rel;
+        let host_start = start + "https://".len();
+        // ホスト部の終端を、区切り文字（パス/クエリ/フラグメント/空白/引用/タグ境界）まで進めて決める。
+        let mut end = host_start;
+        while end < bytes.len() {
+            let c = bytes[end] as char;
+            if c == '/'
+                || c == '?'
+                || c == '#'
+                || c == '"'
+                || c == '\''
+                || c == '<'
+                || c == '>'
+                || c == ')'
+                || c == ']'
+                || c.is_whitespace()
+            {
+                break;
+            }
+            end += 1;
+        }
+        let host = &content[host_start..end];
+        if !host.is_empty() {
+            let normalized = format!("https://{host}");
+            if !hosts.contains(&normalized) {
+                hosts.push(normalized);
+            }
+        }
+        // 次の検索開始位置（最低でも 1 進めて無限ループを防ぐ）。
+        search_from = end.max(start + "https://".len());
+    }
+    hosts
 }
 
 /// HTML プレビューの危険検知結果（要件6.3・通知バー文言の根拠）。
@@ -607,6 +675,12 @@ pub struct HtmlHazards {
     pub has_external_ref: bool,
     /// `<meta http-equiv="refresh">` を含む（ammonia で除去済みだが通知する）。
     pub has_meta_refresh: bool,
+    /// 収集した外部参照ホスト（`https://<host>`・重複排除・http は対象外）。
+    ///
+    /// frontend の「許可して再読込」が `allow_external` としてそのまま backend へ返す候補。
+    /// 最終検証は CSP 組立時の [`validate_allow_hosts`]/[`build_csp`] が https のみ受理して行う
+    /// （緩く集めて検証で落とす＝要件6.2 のオプトイン許可）。
+    pub external_hosts: Vec<String>,
 }
 
 #[cfg(test)]
@@ -654,6 +728,104 @@ mod tests {
         assert!(!h.has_script);
         assert!(!h.has_external_ref);
         assert!(!h.has_meta_refresh);
+        assert!(h.external_hosts.is_empty());
+    }
+
+    #[test]
+    fn 外部ホスト収集_https_のみを重複排除して集める() {
+        // 要件6.2/6.3・2.4: オプトイン許可候補は https のみ。http は盗聴/プライバシーのため除外する。
+        let hosts = collect_external_hosts(
+            "<img src=\"https://www.w3.org/logo.png\"> \
+             <link href='https://cdn.example.com/x.css'> \
+             <img src=\"http://insecure.example/a.png\"> \
+             <img src=\"https://www.w3.org/another.svg\">",
+        );
+        // www.w3.org は重複排除され 1 件、cdn.example.com が 1 件。http は含めない。
+        assert!(
+            hosts.contains(&"https://www.w3.org".to_string()),
+            "w3.org が収集されない: {hosts:?}"
+        );
+        assert!(
+            hosts.contains(&"https://cdn.example.com".to_string()),
+            "cdn が収集されない: {hosts:?}"
+        );
+        assert!(
+            !hosts.iter().any(|h| h.contains("insecure.example")),
+            "http ホストが混入した: {hosts:?}"
+        );
+        // 重複排除: www.w3.org は 1 回だけ。
+        assert_eq!(
+            hosts
+                .iter()
+                .filter(|h| h.as_str() == "https://www.w3.org")
+                .count(),
+            1,
+            "重複排除されていない: {hosts:?}"
+        );
+        // 収集したホストは https のみ・パス/クエリを含まない（CSP の host source 形式）。
+        for h in &hosts {
+            assert!(h.starts_with("https://"), "https 以外が混入: {h}");
+            assert!(!h["https://".len()..].contains('/'), "パスが残った: {h}");
+        }
+    }
+
+    #[test]
+    fn 外部ホスト収集_ポート付きとフラグメント_クエリを正しく切る() {
+        let hosts = collect_external_hosts(
+            "see https://example.com:8443/path?q=1#frag and https://cdn.test/a",
+        );
+        assert!(
+            hosts.contains(&"https://example.com:8443".to_string()),
+            "ポート付きホストが取れない: {hosts:?}"
+        );
+        assert!(
+            hosts.contains(&"https://cdn.test".to_string()),
+            "ホストが取れない: {hosts:?}"
+        );
+    }
+
+    #[test]
+    fn 外部ホスト収集_収集結果は_csp_検証を通る() {
+        // 緩く集めて検証で落とす規約（要件6.2）: collect の出力は build_csp/validate_allow_hosts が
+        // 受理できる host source 形式（https のみ・パス/クエリ/区切りなし）であることを担保する。
+        use pika_core::render::{validate_allow_hosts, ExternalResourceAllow};
+        let hosts = collect_external_hosts(
+            "<img src=\"https://www.w3.org/Icons/valid-html401.png\"> \
+             <img src=\"https://cdn.example.com:443/lib/font.woff2\">",
+        );
+        let allow = ExternalResourceAllow {
+            hosts: hosts.clone(),
+        };
+        assert!(
+            validate_allow_hosts(&allow).is_ok(),
+            "収集ホストが CSP 検証で落ちた: {hosts:?}"
+        );
+    }
+
+    #[test]
+    fn 系統a_markdown_でも外部参照ホストを収集する() {
+        // 要件6.2: Markdown の外部画像もオプトイン許可の対象。has_script/meta_refresh は常に false。
+        let h = scan_markdown_external("![logo](https://www.w3.org/logo.png) と普通のテキスト");
+        assert!(h.has_external_ref, "外部参照が検知されない");
+        assert!(!h.has_script, "Markdown で has_script が立った");
+        assert!(!h.has_meta_refresh, "Markdown で has_meta_refresh が立った");
+        assert_eq!(h.external_hosts, vec!["https://www.w3.org".to_string()]);
+        // 外部参照のない Markdown はすべて false・空。
+        let none = scan_markdown_external("# 見出し\n\n本文だけ");
+        assert!(!none.has_external_ref);
+        assert!(none.external_hosts.is_empty());
+    }
+
+    #[test]
+    fn prepare_preview_の_hazards_は外部ホストを同梱する() {
+        // prepare_preview の戻り（HtmlHazards）に external_hosts が乗り、frontend が allow_external として
+        // 再投入できることを配線レベルで観測する（要件6.2 オプトイン許可・IPC 二重転送回避）。
+        let b = scan_hazards("<img src=\"https://cdn.example.com/a.png\">");
+        assert!(b.has_external_ref);
+        assert_eq!(
+            b.external_hosts,
+            vec!["https://cdn.example.com".to_string()]
+        );
     }
 
     #[test]

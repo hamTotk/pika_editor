@@ -77,6 +77,12 @@ interface OpenTab extends TabModel {
   encoding: DocEncoding;
   /** 開いたときに BOM があったか（保存時に維持する＝要件5.2）。 */
   hasBom: boolean;
+  /**
+   * このタブで「許可して再読込」したオプトイン外部許可ホスト（要件6.2/6.3・2.4）。
+   * 既定は undefined（外部遮断）。許可は **タブ単位** で保持し、別タブ/別文書では既定オフに戻る
+   * （永続はしない＝要件6.2「既定は必ずオフに戻る」）。renderActivePreview がこれを buildPreview へ渡す。
+   */
+  allowExternal?: string[];
 }
 
 const state = {
@@ -170,6 +176,9 @@ async function activateTab(path: string): Promise<void> {
   // 通知バーのタブ固有通知をこのタブへ切り替える（要件11.1: タブ切替で表示が切り替わる）。
   notices.setActiveTab(path);
   const tab = state.tabs.find((t) => t.path === path);
+  // 外部リソース許可は **タブ切替で必ず既定オフに戻す**（要件6.2「既定は必ずオフに戻る」・永続しない）。
+  // 「許可して再読込」はこのタブをアクティブに見ている間だけ有効で、切り替えると遮断へ戻る。
+  if (tab) tab.allowExternal = undefined;
   // 削除済みタブはディスクから読めない。退避/ベースラインは snapshot に残るので、
   // 直近内容を空にしてエディタを出し「確認済み時点に戻す（rollback）」導線を保つ（eval high）。
   if (tab?.deleted) {
@@ -586,6 +595,7 @@ async function renderActivePreview(): Promise<void> {
   if (!state.active) return;
   const path = state.active;
   const content = state.editor ? state.editor.getContent() : await readFile(path);
+  const tab = state.tabs.find((t) => t.path === path);
   // 占有世代を発番（最新世代の load のみ採用＝前モード残留防止）。
   const gen = state.previewSerializer.next();
   // 5状態の Loading（ui-design 15章）。準備中であることを可視化する（系統C で実描画と結線）。
@@ -593,7 +603,12 @@ async function renderActivePreview(): Promise<void> {
   try {
     // content は 1 回だけ invoke で送る（hazards も同じ戻りに同梱＝IPC 二重転送回避）。
     // テーマ配色を別WebView へ降ろす（Stage ③・design doc 10章）。系統B は backend が無視する。
-    const ready = await buildPreview(path, content, { theme: activePreviewTheme() });
+    // 外部許可（このタブで「許可して再読込」した https ホスト）があれば渡す（要件6.2・既定は空＝遮断）。
+    // 最終検証は backend(CSP)が https のみ受理して行う（不正は fail-closed で全破棄）。
+    const ready = await buildPreview(path, content, {
+      theme: activePreviewTheme(),
+      allowExternal: tab?.allowExternal,
+    });
     // 古い世代（素早い切替で後着）なら破棄して前モード残留を防ぐ（design doc 6章 直列化）。
     if (!state.previewSerializer.isCurrent(gen)) return;
     // 系統B（HTML）の危険検知を通知バー導線に出す（要件6.3）。has_meta_refresh も伝える。
@@ -602,7 +617,33 @@ async function renderActivePreview(): Promise<void> {
       notify("JS を使うHTMLのため表示が崩れる可能性があります（既定のブラウザで開けます）", "warn");
     }
     if (hz.has_external_ref) {
-      notify("この文書は外部リソースを参照しています（既定で遮断・許可は設定）", "info");
+      // 既に許可済み（このタブで「許可して再読込」した）なら通知を消し、未許可なら許可導線を出す。
+      // 許可状態はタブ単位・このセッション限り（タブ切替/別文書で既定オフに戻る＝要件6.2）。
+      if (tab && tab.allowExternal && tab.allowExternal.length > 0) {
+        notices.dismiss("external-resource", path);
+      } else {
+        // アクション付き通知（［許可して再読込］）。クリックで当該タブの allowExternal に収集ホストを
+        // 覚え、プレビューを再描画する（許可された https 画像が表示される＝要件6.2 オプトイン許可）。
+        notices.push(
+          "external-resource",
+          path,
+          "この文書は外部リソースを参照しています（既定で遮断）",
+          [
+            {
+              label: "許可して再読込",
+              onClick: () => {
+                const t = state.tabs.find((x) => x.path === path);
+                if (!t) return;
+                t.allowExternal = hz.external_hosts;
+                // 再読込は当該タブがアクティブ・プレビュー表示中のときのみ意味を持つ。
+                if (state.active === path && resolveOccupancy(state.viewMode, state.diffOn).showPreview) {
+                  void renderActivePreview();
+                }
+              },
+            },
+          ],
+        );
+      }
     }
     if (hz.has_meta_refresh) {
       // meta refresh は ammonia で除去されるため自動遷移しない＝挙動が変わる旨を伝える（medium 指摘）。
