@@ -1,6 +1,91 @@
-// アクセシビリティ（ARIA 全Web再構築・F6/Shift+F6 ペイン間フォーカス循環）。
-// 本実装は sprint 7（design doc 17章）。ツリー/タブ/通知/ステータスの role と
-// aria-label テキスト化・forced-colors 追従・テキストスケールを集約する。
-// 本スプリントは骨格のみ（HTML 側で role の土台のみ付与済み）。
+// アクセシビリティ（ARIA 全Web再構築・F6/Shift+F6 ペイン間フォーカス循環＝要件11.5・design doc 17章）。
+//
+// 旧版は wx ネイティブコントロールが UIA/MSAA のアクセシブルネームを自動供給した。全Web UI では
+// これが消えるため ARIA で再構築する（要件11.5 を満たす唯一の手段）。本モジュールは:
+// - F6/Shift+F6 のペイン間フォーカス循環をフロントの自前フォーカスマネージャで実装する
+//   （要件11.5「F6/Shift+F6 はフロントの自前フォーカスマネージャで実装する」）。
+// - 各ペインへ role/aria を付与する初期化を集約する（ツリー/タブ/通知/ステータスは各 ui/* が付与済み）。
+//
+// キーボードのみで「開く→プレビュー→差分→確認済み」が完走できることを担保する（要件11.4/11.5）。
 
-export {};
+/** F6 で巡回するペインの ID（フォーカス順・要件11.5）。 */
+const PANE_IDS = ["tree", "tabs", "editor-host", "diff-host", "preview-host"] as const;
+
+/** ペインへフォーカスを移す（hidden や非表示ペインは飛ばす）。 */
+function focusPane(id: string): boolean {
+  const el = document.getElementById(id);
+  if (!el || (el as HTMLElement).hidden || el.getAttribute("aria-hidden") === "true") {
+    return false;
+  }
+  // ペイン内のフォーカス可能要素があればそれへ、なければペイン自身を tabindex=-1 でフォーカス。
+  const focusable = el.querySelector<HTMLElement>(
+    '[tabindex]:not([tabindex="-1"]), button:not([disabled]), [role="treeitem"], [role="tab"]',
+  );
+  if (focusable) {
+    focusable.focus();
+  } else {
+    el.tabIndex = -1;
+    el.focus();
+  }
+  return true;
+}
+
+/** 現在フォーカスのあるペインの index を求める（無ければ -1）。 */
+function currentPaneIndex(): number {
+  const active = document.activeElement;
+  if (!active) return -1;
+  for (let i = 0; i < PANE_IDS.length; i++) {
+    const pane = document.getElementById(PANE_IDS[i]);
+    if (pane && pane.contains(active)) return i;
+  }
+  return -1;
+}
+
+/** 次（forward）/前（backward）の表示中ペインへフォーカスを循環移動する（要件11.5）。 */
+function cyclePane(forward: boolean): void {
+  const start = currentPaneIndex();
+  const n = PANE_IDS.length;
+  for (let step = 1; step <= n; step++) {
+    const idx = forward
+      ? (start + step + n) % n
+      : (start - step + n) % n;
+    if (focusPane(PANE_IDS[idx])) return;
+  }
+}
+
+/**
+ * F6/Shift+F6 のペイン間フォーカス循環を初期化する（要件11.5・design doc 17章）。
+ * capture フェーズで拾い、CM6 等の既定処理より先にペイン移動を確定する。
+ */
+export function initFocusCycling(): void {
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key === "F6") {
+        e.preventDefault();
+        cyclePane(!e.shiftKey); // Shift+F6 は逆回り。
+      }
+    },
+    true,
+  );
+}
+
+/** 通知バー/ステータスの aria 属性を確実化する（index.html で土台付与済み・冪等な再保証）。 */
+export function initLandmarks(): void {
+  const notifications = document.getElementById("notifications");
+  if (notifications) {
+    notifications.setAttribute("role", "status");
+    notifications.setAttribute("aria-live", "polite");
+  }
+  const status = document.getElementById("status");
+  if (status) {
+    // ステータスは表示専用（要件11.1）。読み上げは aria-label（renderStatus が随時更新）。
+    status.setAttribute("aria-live", "off");
+  }
+}
+
+/** a11y 全体の初期化（main.ts から1回呼ぶ）。 */
+export function initA11y(): void {
+  initLandmarks();
+  initFocusCycling();
+}

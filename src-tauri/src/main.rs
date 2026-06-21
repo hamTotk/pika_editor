@@ -13,6 +13,7 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod commands;
+mod diagnostic;
 mod document;
 mod jumplist;
 mod preview;
@@ -66,6 +67,7 @@ fn run() {
             document::read_range,
             document::search_in_text,
             document::replace_in_text,
+            diagnostic::log_folder_path,
         ])
         .setup(|app| {
             use tauri::Manager;
