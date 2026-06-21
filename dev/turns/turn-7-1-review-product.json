@@ -1,0 +1,27 @@
+{
+  "reviewer": "product",
+  "sprint_id": 7,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "目的整合 (value realization)",
+      "message": "sprint 7 の must の多く (TG1 ARIA読み上げ / TG2 F6実フォーカス遷移 / TG3 通知バー実描画 / TG4 5状態実遷移 / TG5 画像実デコード / TG7 診断ログ実出力) はユーザー価値が GUI 実機の系統C(TG1〜TG10)へ全面委譲され、acceptance.md 上は全項目『未実施』である。これは spec の検証戦略 (use_playwright:false・GUI 実機は系統C・design doc 12章) に沿った正当な deferral であり、決定論部分 (キュー解決/状態解決/寸法プリチェック/ローテーション計画/ショートカット解決) は cargo test 49 件で観測可能になっている。ただしプロダクト観点では『a11y でキーボードのみ中心体験を完走できる』『巨大画像で固まらない』といった本来のユーザー価値の充足確認が系統C 実施まで latent (未確定) である点を記録する。dev ループの合否としては criteria 充足だが、リリース判断は系統C 完了をゲートにすべき。",
+      "location": "docs/acceptance.md:278 (TG section), dev/spec.md:97-101"
+    },
+    {
+      "severity": "low",
+      "area": "トレードオフの明示 (トレーサビリティ)",
+      "message": "turn-7-1-changed.txt が先頭の実ソース約20件のあとに target/ 配下のビルド成果物を約5470行含み (全5500行)、レビュー対象の特定を妨げる。プロダクト価値そのものの欠陥ではないが、changed_files はレビュワー/evaluator が『このスプリントが何を変えたか』を追う一次資料であり、ノイズはドリフト追跡 (spec の出典記録方針と同趣旨) を弱める。route-reviewers の決定論判定が target/ パスに反応しない設計か、生成時に .gitignore 相当で除外することを推奨 (基準変更ではなく運用改善提案)。",
+      "location": "dev/turns/turn-7-1-changed.txt"
+    },
+    {
+      "severity": "low",
+      "area": "MVP 判断 (should の deferral)",
+      "message": "should の Tauri bundler 実配布・エクスプローラー統合 (HKCU)・ジャンプリスト実機・About ライセンス同梱が T-010 に『リリース準備・系統C/別途』として未対応で残る。最終スプリントで配布が未完なのは MVP として違和感がありうるが、(1) これらは should かつ実インストーラー=系統C 項目、(2) spec『本フェーズの自動 verify に載せない』に Tauri bundler 実インストーラー・エクスプローラー統合が明記されており、(3) T-010/TG10 に追跡記録がある。よって価値毀損ではなく spec 準拠の意図的 deferral と判断。配布完成を別タスク/リリース前チェックとして残す前提が spec/acceptance に書かれている点で記録に留める。",
+      "location": "docs/acceptance-findings.md (T-010 未対応節), dev/spec.md:140-144"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 7 (a11y全Web再構築・エッジケース・配布の仕上げ・docs/acceptance.md 整備) は『正しいものを作っているか』の観点で spec の目的連鎖と一直線である。must 6 項目が全て requirements の具体節 (11.1 通知バーキュー=req440-441/11.2 ショートカット/11.5 ARIA・F6/12.1 FSエッジ/12.2 画像寸法プリチェック/12.3 診断ログ/ui-design 15章 5状態) に紐づき、各々が『実装の存在』でなく『目的の達成 (4件以上で3本+他N件・同一ファイル衝突1本・タブ切替で表示切替・6000万px超は外部誘導・既定warn以上・本文を型レベルで書けない LogLine・Empty3分岐で文言変化)』を観測する決定論テストを持つ。通知バー優先順位は req11.1 の『衝突＞設定エラー＞外部リソース＞JS検知＞巨大ファイル制限』と厳密一致。前ターン eval の high(data) 2件 (atomic_write 非アトミック窓・保存前 incoming 退避漏れ) を『データを失わない』最上位原則に沿って是正済み。要件14章『やらないこと』(画像の編集・変換/任意JS実行/GUI設定画面 等) への逸脱・gold plating・過剰抽象は無く、frontend モジュールは pika-core 規則を映す薄い DOM 提示に留まる。must6 の系統C チェックリストは TG1〜TG10 を requirements/design doc 節番号併記で完成。critical 該当 (sprint goal がユーザー価値に繋がらない/criteria が目的を取り違え) は無し。指摘は全て low: (1) must の多くがユーザー価値レベルでは系統C 実施までlatent (spec 準拠の deferral)、(2) changed_files の target/ ノイズ、(3) 配布 should の意図的 deferral。いずれも基準変更ではなく記録/運用改善。"
+}

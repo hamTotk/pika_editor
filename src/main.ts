@@ -23,11 +23,14 @@ import {
   type AppState,
 } from "./ipc";
 import { initTheme } from "./theme";
+import { initA11y } from "./a11y";
 import { renderTree } from "./ui/tree";
 import { renderTabs, type TabModel } from "./ui/tabs";
-import { notify } from "./ui/notifications";
+import { notify, notices } from "./ui/notifications";
 import { setStatus } from "./ui/status";
 import { UnreadStore } from "./ui/unread";
+import { isImageExt } from "./ui/image";
+import { degradeReasonsFromFlags, degradeMessage } from "./ui/viewstate";
 import { createEditor, type EditorHandle } from "./editor";
 import { renderDiff, type DiffHandle } from "./diff";
 import {
@@ -147,6 +150,8 @@ async function activateTab(path: string): Promise<void> {
   // 切替前に現在タブの位置を退避しておく（後でこのタブへ戻ったとき位置を復元するため）。
   captureActivePosition();
   state.active = path;
+  // 通知バーのタブ固有通知をこのタブへ切り替える（要件11.1: タブ切替で表示が切り替わる）。
+  notices.setActiveTab(path);
   const tab = state.tabs.find((t) => t.path === path);
   // 削除済みタブはディスクから読めない。退避/ベースラインは snapshot に残るので、
   // 直近内容を空にしてエディタを出し「確認済み時点に戻す（rollback）」導線を保つ（eval high）。
@@ -207,6 +212,12 @@ function markDirty(path: string): void {
 }
 
 async function openFile(entry: TreeEntry): Promise<void> {
+  // 非テキスト（画像）は簡易ビュー扱い（要件12.2）。寸法プリチェック（6000万px 超は外部誘導）は
+  // backend（custom protocol/command）が行う。ここでは種別判定で CM6 へテキスト全量ロードしない分岐を持つ
+  // （実描画・寸法プリチェックの実効は系統C＝acceptance TG5/TG6）。
+  if (isImageExt(entry.name)) {
+    notify(`画像ファイルです（簡易ビューで表示・編集はできません）: ${entry.name}`, "info");
+  }
   if (!state.tabs.some((t) => t.path === entry.path)) {
     state.tabs.push(newTab(entry.path, entry.name));
   }
@@ -214,6 +225,27 @@ async function openFile(entry: TreeEntry): Promise<void> {
   // 最近使ったファイルへ記録（要件10.2・ジャンプリスト反映は backend）。
   void noteRecent("file", entry.path).catch(() => undefined);
   void persistAppState();
+}
+
+/**
+ * 巨大ファイル等の機能縮退（Partial 状態）を通知バーで提示する（要件2.2・ui-design 15章）。
+ * backend の DegradeFlagsDto（open_document）から縮退理由を組み立て、黙って切らず理由を出す。
+ * 手動再有効化できる理由は今後トグルから戻せるよう、種別=巨大ファイル制限で集約する（要件11.1）。
+ */
+export function notifyDegrade(
+  path: string,
+  flags: {
+    preview_off: boolean;
+    diff_off: boolean;
+    highlight_off: boolean;
+    wrap_off: boolean;
+    editing_off: boolean;
+  },
+): void {
+  const reasons = degradeReasonsFromFlags(flags);
+  if (reasons.length === 0) return;
+  const text = reasons.map((r) => degradeMessage(r)).join(" / ");
+  notices.push("huge-file-limit", path, text);
 }
 
 /** 既定値で OpenTab を作る（content_hash/位置は開いた後に実値で埋める）。 */
@@ -765,6 +797,8 @@ function restoreTabPosition(path: string, line: number, column: number, scrollTo
 
 async function main(): Promise<void> {
   initTheme();
+  // ARIA 全Web再構築の初期化（F6/Shift+F6 ペイン間フォーカス循環・ランドマーク確実化＝要件11.5・design doc 17章）。
+  initA11y();
   document.getElementById("open-folder")?.addEventListener("click", () => void onOpenFolder());
   saveBtn().addEventListener("click", () => void onSave());
   togglePreviewBtn().addEventListener("click", () => void onTogglePreview());

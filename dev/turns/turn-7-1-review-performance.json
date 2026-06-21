@@ -1,0 +1,21 @@
+{
+  "reviewer": "performance",
+  "sprint_id": 7,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "アルゴリズム計算量",
+      "message": "notify_queue.rs の push/resolve/merge_key が O(n)〜O(n log n) で path String を clone するが、n は通知本数（実質 数件〜十数件・最大表示3本）であり通知イベント発生時のみ実行されるホットでない経路。criteria の性能要件（起動/プレビュー/外部変更反映のレイテンシ）に一切影響しないため最適化は YAGNI。指摘は事実記録のみで対応不要。",
+      "location": "crates/pika-core/src/notify_queue.rs:144-219"
+    },
+    {
+      "severity": "low",
+      "area": "メモリ/IO",
+      "message": "src-tauri diagnostic::record が呼び出しごとに state_store::resolve()（データルート解決）＋metadata()＋OpenOptions::open＋write_all を行う。ただし record は error/warn の診断記録経路（保存失敗・上限超オープン等）で、ホットパスでも高頻度でもない。診断は副次・失敗してもアプリを止めない設計（固まらないを優先）でトレードオフは妥当。ログが高頻度化する将来の経路（例: watcher の info ログ大量化）が出たらバッファリングを検討、現状は不要。",
+      "location": "src-tauri/src/diagnostic.rs:21-79"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 7（a11y仕上げ/エッジケース/配布の決定論ロジック）の performance 観点に critical・high は無い。中核の新規ロジック（notify_queue/diagnostic/nontext/view_state/huge）はいずれも n が小さい純粋判定か、イベント駆動の非ホット経路で、criteria のレイテンシ/スループット要件を構造的に満たせない実装は見当たらない。特に巨大ファイル対策として最重要な huge.rs::has_long_line は LONG_LINE_CHARS(10万字) で early-return し巨大単一行 JSON でも全走査しない正しい設計、第2段階以降は open_document が全量読みを避け range 読取へ委ねており『固まらない』原則と整合する。指摘は low 2件（いずれも将来余地のメモのみ・対応不要）。"
+}

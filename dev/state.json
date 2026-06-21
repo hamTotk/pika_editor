@@ -1,7 +1,7 @@
 {
-  "current_sprint": 6,
+  "current_sprint": 7,
   "iteration": 1,
-  "total_turns": 7,
+  "total_turns": 8,
   "max_turns_per_sprint": 3,
   "max_total_turns": 21,
   "history": [
@@ -11,8 +11,9 @@
     {"sprint": 4, "iteration": 1, "score": 88, "passed": false, "duration_sec": 0, "commit": "d528987"},
     {"sprint": 4, "iteration": 2, "score": 90, "passed": true, "duration_sec": 0, "commit": "8f3a681"},
     {"sprint": 5, "iteration": 1, "score": 84, "passed": false, "duration_sec": 0, "commit": "0a5fa9b"},
-    {"sprint": 5, "iteration": 2, "score": 100, "passed": true, "duration_sec": 0, "commit": "3fef265"}
+    {"sprint": 5, "iteration": 2, "score": 100, "passed": true, "duration_sec": 0, "commit": "3fef265"},
+    {"sprint": 6, "iteration": 1, "score": 94, "passed": true, "duration_sec": 0, "commit": "a8a5778"}
   ],
   "status": "running",
-  "sprint_criteria_done": {"sprint": 6, "reviewers": ["frontend-ui"]}
+  "sprint_criteria_done": {"sprint": 7, "reviewers": ["security", "product"]}
 }

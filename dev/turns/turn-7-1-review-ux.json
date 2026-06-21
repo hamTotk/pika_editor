@@ -1,0 +1,41 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 7,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "エラー回復・データ整合",
+      "message": "メインの保存ボタン(onSave)がエンコーディング非対応の簡易コマンド save_file(commands.rs:86・std::fs::write で UTF-8 直書き)を呼んでおり、本スプリント周辺で整備された save_document(document.rs:184)の『退避が先＋表現不能文字で保存中断し[UTF-8で保存/該当文字を確認/キャンセル]を提示』フロー(要件5.6・最上位原則『データを失わない』)に未接続。結果、Shift_JIS等の文書を編集保存すると元エンコーディングが暗黙に UTF-8 へ変わり、表現不能文字の確認も挟まれない。導線自体は ipc.ts::saveDocument まで存在し acceptance TF2/TF4 で系統C 未実施として追跡済みなので完了不能ではない。critical(誤操作でデータ喪失)には当たらない=保存中断フロー本体は実装済みで未配線なだけ。次の修正ターンで onSave を save_document 経路へ寄せ、unmappable 時に選択肢ダイアログを出すことを推奨。",
+      "location": "src/main.ts:313 / src-tauri/src/commands.rs:86"
+    },
+    {
+      "severity": "medium",
+      "area": "破壊的操作の確認",
+      "message": "フォルダ切替時の未保存破棄確認(switchFolder)は window.confirm 1 本で『続けますか？』のみ。選べるのは OK(破棄)/キャンセルの二択で、その場で『保存してから切替』に進む第3の選択肢がない(要件5.3 の保存/破棄/キャンセル三択思想とズレる)。未保存タブが複数あってもどのファイルが破棄されるか名前が出ない。データは退避されないため、誤って OK を押すと編集が失われる。ただしキャンセルで中断でき行き止まりではないため high 未満。文言に対象ファイル名を含め、可能なら『保存して切替』を加えると誤操作リスクが下がる。",
+      "location": "src/main.ts:281"
+    },
+    {
+      "severity": "low",
+      "area": "情報設計・空状態",
+      "message": "view_state の Empty 3分岐(NoFolderOpen/SearchNoResults/AllConsumed)と各 message は pika-core・viewstate.ts 両方で実装済みだが、main.ts の空状態提示は main() 末尾の setStatus('フォルダを開いてください')のみで、検索0件/消化後の文言分岐や CTA ボタン(『フォルダを開く』『最近使った項目から開く』)がフロントに結線されていない(描画は系統C TG4 で追跡)。決定論ロジックは揃っているので低リスクだが、初回・消化後の空画面で次の一手が出るよう viewstate.emptyMessage の分岐を実 DOM へ繋ぐと迷いが減る。",
+      "location": "src/main.ts:856 / src/ui/viewstate.ts:54"
+    },
+    {
+      "severity": "low",
+      "area": "フィードバック・進捗",
+      "message": "ViewState::Loading は done/total の進捗(percent-done＋件数)を持つ設計だが、1000ファイル級の初回オープン(switchFolder/openWorkspace)でフロントは件数表示のみで進捗 Loading 状態を出していない(『N 件』の完了表示はあるが取得中の可視化なし)。要件2.1『固まらない』は backend 非同期で担保されるものの、長時間列挙中のシステム状態可視化(Nielsen #1)としては弱い。決定論モデルは整っているので結線時に Loading を出せば十分。低優先。",
+      "location": "src/main.ts:281 / crates/pika-core/src/view_state.rs:21"
+    },
+    {
+      "severity": "low",
+      "area": "ヘルプ・発見可能性",
+      "message": "shortcuts::resolve に主要ショートカット表が決定論で揃い誤爆防止(Ctrl+Enter はエディタフォーカス時 None)・代替割当(Alt+Down/Up, Ctrl+Shift+E)まで実装されているが、ユーザーがこの割当を一覧で確認できる導線(ショートカット一覧表示・ヘルプ)はフロントに見当たらない。代替割当があっても発見できなければ価値が出にくい。要件14章でショートカットのカスタマイズは非対象だが『一覧の提示』は別物。記憶より再認(Nielsen #6)の観点で、メニューかヘルプに割当表を出す余地。低優先。",
+      "location": "crates/pika-core/src/shortcuts.rs:105"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 7 の UX 中核(通知バーキュー運用・ビュー別5状態・エラー文言＋次の一手・診断ログ・非テキスト/FSエッジ縮退・ショートカット誤爆防止)はいずれも pika-core の純粋ロジックとして決定論実装され、cargo test で観測可能。エラー文言は平易な日本語で原因＋次の一手を示し、スタックトレース/内部コードの露出はなく、診断ログは型レベルでファイル内容を持てない設計(LogLine に content フィールドなし)。回復導線も堅い=削除済みタブ→rollback 復元、busy ガードで破壊的操作の二重送信抑止、退避が先(stash-before-overwrite)、一括確認スキップ→『F5 で再同期して再度ご確認ください』、破損復元時は上書きせず保全を明示。通知優先順位(衝突＞設定エラー＞外部リソース＞JS検知＞巨大ファイル)は spec と一致。acceptance.md は旧 wx の A〜K を再検証扱いとしつつ Tauri 用 TA〜TG/TB を節番号併記で追補し、別WebView 権限ゼロ隔離・IPC ラウンドトリップ等の Tauri 固有項目を網羅=docs must を充足。critical(主要タスク導線破綻/誤操作でデータ喪失)は不在。残る指摘は medium 2件(保存ボタンがエンコーディング非対応の save_file に未接続で暗黙 UTF-8 化+保存中断フロー未配線/フォルダ切替の破棄確認が二択かつ対象名なし)と low 3件(空状態3分岐の DOM 未結線/長時間列挙の進捗 Loading 未提示/ショートカット一覧の発見導線なし)で、いずれも決定論モデルは整い系統C で追跡済み。次の修正ターンで onSave を save_document へ寄せると最上位原則『データを失わない』との整合が上がる。",
+  "use_playwright": false,
+  "playwright_note": "context.use_playwright=false かつ本観点では実機 UI 検証を行わず、コード Read と acceptance ドキュメント照合で評価した(spec の系統C=手動 acceptance 方針に沿う)。"
+}

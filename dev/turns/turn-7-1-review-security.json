@@ -1,0 +1,27 @@
+{
+  "reviewer": "security",
+  "sprint_id": 7,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "依存/CVE監査",
+      "message": "sprint 7 の must『cargo audit が CVE ゲートとして通る(advisory 既知 CVE が無いか記録)』が未実行。cargo-audit が本環境に未導入(PATH に無し)で、turn report も『未導入のため verify 配列対象外・系統C/CI 安定段で載せる』と環境制約として記録するに留まる。プレビュー経路は comrak(unsafe_HTML)/ammonia/Mermaid/KaTeX/highlight という攻撃面のある依存群を抱える(本フェーズ最重要のセキュリティ境界)。それらの既知 CVE が一度も照合されていないため、未知の脆弱依存を抱えたままリリースに進むリスクがある。security の観点としては『緩和を承認』せず、リリース前(系統C)までに cargo-audit を導入し advisory DB 照合結果を docs/acceptance-findings.md に記録することを要求する。critical ではない(現時点で具体的な既知 CVE が観測されたわけではなく、未照合という手続き欠落)。",
+      "location": "dev/sprints.json:176 (sprint7 must)/dev/turns/turn-7-1-generator.md:82-84"
+    },
+    {
+      "severity": "low",
+      "area": "情報漏洩/診断ログ",
+      "message": "診断ログは要件12.3『ユーザーのファイル内容を書かない』を構造的に満たしており(LogLine が content フィールドを持たず、document.rs の record() 呼び出しは error summary とパスのみを渡す)、設計として良好。残る配慮点として、log_folder_path() が返す絶対パス(<data_root>/logs)はユーザー名を含む LOCALAPPDATA 配下になりうる。診断ログ自体はローカルのみだが、ユーザーがログフォルダを開いてログを共有(バグ報告)する際、path= フィールドにワークスペースの絶対パス(ディレクトリ構造)が含まれる点はプライバシー上の弱情報開示。実害は薄く現状の設計判断(パスは内容でない=要件12.3)とも整合するため low。将来 path をデータルート相対化する余地のメモに留める。",
+      "location": "src-tauri/src/diagnostic.rs:21-35 / crates/pika-core/src/diagnostic.rs:71-106"
+    },
+    {
+      "severity": "low",
+      "area": "入力検証/外部リソース(SSRF的)",
+      "message": "image.ts renderImageView は img.src = src をそのまま設定する(src は呼び出し側=メインシェルが組む参照)。<img src> は script を実行しないため XSS ではないが、src に任意 http(s) URL が渡る経路ができると未信頼文書から外部リソース取得(ビーコン的フィンガープリンティング)が起きうる。本スプリントでは実際の src 供給(custom protocol/convertFileSrc 経由のローカル参照)が系統C に委ねられ未結線のため、現時点で具体的到達経路は無く low。結線スプリントでメインシェル CSP の img-src をローカル protocol に限定し、外部 URL を src に流さないことを担保することを推奨。security 観点の多層防御メモ。",
+      "location": "src/ui/image.ts:26-34"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 7(a11y全Web再構築・エッジケース・診断ログ・配布仕上げ)に security の critical は無い。pika はローカル単一ユーザーのデスクトップツールで認証/認可面が無く、唯一の信頼境界=権限ゼロ別WebView プレビューは sprint4 コードで本スプリント未変更。本スプリントの新規面は(1)診断ログ=要件12.3『ファイル内容を書かない』を LogLine 型(content フィールド無し)で構造的に担保し、record() 呼び出しも summary+パスのみで内容を渡さず良好、(2)通知/ステータス/画像/a11y の DOM 描画は全て textContent/createElement で innerHTML 未使用(ファイル名・パスを含むメッセージも安全)、(3)残る唯一の innerHTML は隔離プレビュー内(sprint4・securityLevel:strict 設定済・本スプリント未変更)。機密ハードコード無し・未検証入力の injection/RCE 到達無し・認可バイパス無し。指摘は medium 1(sprint7 must の cargo audit が未実行=CVE 未照合。comrak/ammonia/Mermaid 等の攻撃面依存があるためリリース前に照合を要求)と low 2(診断ログのパス弱開示・画像 src の外部URL 多層防御メモ)。いずれも critical 定義(機密ハードコード/未検証入力の injection・RCE 到達/認可バイパス)に該当せず d_review はブロックしない。"
+}

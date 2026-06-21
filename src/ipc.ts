@@ -434,3 +434,12 @@ export function replaceInText(
     options,
   });
 }
+
+/**
+ * 診断ログフォルダの絶対パスを取得する（要件12.3「メニューからログフォルダを開ける」）。
+ * バックエンドがフォルダ（<データルート>/logs/）を作成してからパスを返す。
+ * 実際にエクスプローラーで開くのは OS シェル（呼び出し側がこのパスを使う）。
+ */
+export function logFolderPath(): Promise<string> {
+  return invoke<string>("log_folder_path");
+}

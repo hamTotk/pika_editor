@@ -1,0 +1,34 @@
+{
+  "score": 84,
+  "plan_implementation": {
+    "overall": 84,
+    "notes": "sprint 7 の決定論側 (notify_queue/diagnostic/nontext/view_state/shortcuts/huge 単一源化) は cargo test 49 件追加で良好に観測化され、前ターン high(data) 2 件 (atomic_write を MoveFileExW 単一置換へ・stash_incoming_before_overwrite を save_document へ結線) も是正済み。ただし must『ARIA 全Web再構築 (frontend・design doc 17章)』が要求するキーボード操作性が破れている: ファイルツリー (src/ui/tree.ts) は treeitem が tabIndex=-1＋click のみで矢印/Enter/Space ハンドラが無く、host の <ul role=tree> にも tabindex が無いため、キーボードのみではツリーに入れず openFile に到達できない (req 11.4/11.5『マウスなしで中心フロー完走』に正面から反する=must 未充足)。should の主要ショートカット表は shortcuts.rs に実装・テスト済みだが frontend へ未 import (Ctrl+O/S/W/F/H/確認系がキーボードから発火不能・dead code 化)。docs/acceptance.md 整備・通知バーキュー・5状態・診断ログ・非テキスト縮退の決定論部分は must を充足。"
+  },
+  "quality": {
+    "overall": 84,
+    "breakdown": {"d_verify": 100, "d_accept": 0, "d_quality": 78},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80}
+  },
+  "all_dimensions_passed": false,
+  "feedback": "[HIGH] frontend-ui critical=ファイルツリーがキーボード操作不能 (treeitem tabIndex=-1＋click のみ・矢印/Enter ハンドラ無し・tree host に tabindex 無し) でキーボードのみでは『開く→プレビュー→差分→確認済み』の起点に到達できず、sprint 7 must『ARIA 全Web再構築』と req 11.4/11.5 に正面から反する (d_review=0/d_accept=0 でブロック)。tree.ts に矢印キー移動 (roving tabindex)・Enter/Space で openFile 発火・<ul role=tree> への Tab 経路を実装し、ディレクトリ treeitem に aria-expanded を付与すること。[HIGH] shortcuts.rs (resolve/Action) が core に実装・テスト済みなのに frontend へ未配線で、Ctrl+O/S/W/F/H/Ctrl+Enter 系がキーボードから発火不能。main.ts のインライン keydown を resolve ベースのディスパッチへ寄せ、shortcuts を import して should『フロントのキーディスパッチ表』を満たすこと。[MEDIUM] onSave がエンコーディング非対応の save_file (UTF-8 直書き) を呼び、整備済みの save_document (退避が先＋表現不能文字で保存中断) フローに未接続=Shift_JIS 文書が暗黙 UTF-8 化 (最上位原則『データを失わない』との不整合)。[MEDIUM] 診断ログの追記+ローテーションが無ロックで多スレッド競合し得る (副次データで critical 未満・専用 Mutex で直列化推奨)。[MEDIUM] フォルダ切替の破棄確認が window.confirm 二択で対象ファイル名・『保存して切替』第3選択肢が無い。[MEDIUM] 静的 div への aria-label 依存 (ステータス差分件数) は読み上げ到達が弱い・tablist の矢印移動欠如・treeitem の aria-expanded 欠落。[LOW] cargo audit 未実行 (環境未導入=CVE 未照合・リリース前に系統C で照合要求)・snapshot 永続化がインメモリ繰り越し (本スプリント非回帰)・空状態 3 分岐の DOM 未結線・診断ログ path のユーザー名弱開示・changed_files に target/ 成果物 5470 行混入。決定論ゲート (cargo test 333 PASS / cargo build / typecheck) は全 exit 0、テスト改竄 (緩和/skip/犠牲的期待値) は検出されず。",
+  "feedback_structured": {
+    "high": [
+      {"area": "a11y / キーボード操作 (frontend-ui critical)", "message": "ファイルツリー (src/ui/tree.ts) が treeitem=tabIndex-1＋click のみ・矢印/Enter/Space ハンドラ無し・<ul id=tree role=tree> に tabindex 無しで、キーボードのみではツリーに入れず openFile を起動できない。中心体験『開く→プレビュー→差分→確認済み』の起点に到達不能で sprint 7 must『ARIA 全Web再構築』と req 11.4/11.5 に正面から反する。roving tabindex による矢印移動・Enter/Space で openFile 発火・tree host への Tab 経路・ディレクトリの aria-expanded を実装すること。"},
+      {"area": "ショートカット配線", "message": "crates/pika-core/src/shortcuts.rs (resolve/Action・誤爆防止/代替割当をテスト済み) が frontend に一切 import されておらず dead code 化。main.ts は独自インライン keydown (F5/Ctrl+\/Ctrl+E/F8 のみ) で、Ctrl+O/Ctrl+Shift+O/Ctrl+S/Ctrl+W/Ctrl+F/Ctrl+H/Ctrl+Shift+D/Ctrl+Enter 系がキーボードから発火不能。should『主要ショートカット表をフロントのキーディスパッチ表として実装』が core 側だけで止まっている。main.ts の keydown を shortcuts::resolve ベースのディスパッチへ寄せること (Ctrl+O 不在は上記キーボード起点欠如も悪化させる)。"}
+    ],
+    "medium": [
+      {"area": "エラー回復・データ整合 (ux)", "message": "メイン保存ボタン onSave (src/main.ts:313) がエンコーディング非対応の save_file (commands.rs:86・std::fs::write で UTF-8 直書き) を呼び、整備済みの save_document (document.rs:184・退避が先＋表現不能文字で保存中断し [UTF-8/該当文字確認/キャンセル] 提示) に未接続。Shift_JIS 等の文書編集保存で元エンコーディングが暗黙に UTF-8 化し中断確認も挟まれない (要件5.6・最上位原則『データを失わない』との不整合)。onSave を save_document 経路へ寄せること。"},
+      {"area": "ログ永続化/並行書込 (data)", "message": "診断ログの追記+ローテーション (src-tauri/src/diagnostic.rs) が無ロックで、watcher/command/search の複数スレッドが record() を同時呼びすると metadata→delete→rename→append が交錯し世代ずれ/行取りこぼし/TOCTOU で 5MB 超過 append が起きうる。副次データでユーザー文書に影響せず critical 未満だが、診断ログ専用 Mutex (OnceLock<Mutex<()>>) で log_with_min 全体を直列化すること。pika-core::diagnostic::plan_rotation の純粋ロジック自体は正しい。"},
+      {"area": "破壊的操作の確認 (ux)", "message": "フォルダ切替時の未保存破棄確認 (src/main.ts:281 switchFolder) が window.confirm 二択 (OK破棄/キャンセル) のみで、対象ファイル名も『保存して切替』第3選択肢も無い (要件5.3 の保存/破棄/キャンセル三択思想とズレ)。誤 OK で編集喪失。文言に対象名を含め第3選択肢を加えること。"},
+      {"area": "ARIA 属性/ライブ通知", "message": "(1) ディレクトリ treeitem に aria-expanded が無い (sprint 7 must が明示要求)。(2) ステータス差分件数を aria-live=off の静的 div へ aria-label 依存で載せており多くの screen reader で読み上げ到達が弱い。(3) tablist に roving tabindex/矢印移動が無くタブ間移動が冗長。読み上げ実機は系統C だが設計上の到達性を補強すること。"}
+    ],
+    "low": [
+      {"area": "依存/CVE監査 (security)", "message": "sprint 7 must『cargo audit が CVE ゲートとして通る』が cargo-audit 本環境未導入で未実行。comrak(unsafe_HTML)/ammonia/Mermaid/KaTeX/highlight の攻撃面依存があるためリリース前 (系統C) に advisory DB 照合結果を docs/acceptance-findings.md に記録すること。verify 配列対象外の環境制約記録に留まる (テスト緩和ではない)。"},
+      {"area": "スナップショット永続化 (data・本スプリント非回帰)", "message": "SnapshotService の baseline/退避 object/diff_snapshots がインメモリ HashMap でプロセス終了で全消失 (sprint 3 からの意図的繰り越し・sprint 7 acceptance に永続化は含まれない)。退避が『最後の砦』である以上リリース前に index.json+content-addressed object+自己記述メタ復元の永続化が要る点を記録。"},
+      {"area": "情報設計・空状態 (ux)", "message": "view_state の Empty 3分岐 (NoFolderOpen/SearchNoResults/AllConsumed) と文言は pika-core/viewstate.ts 両方で実装済みだが、main.ts の空状態提示は setStatus('フォルダを開いてください') のみで分岐文言/CTA ボタンが DOM 未結線 (系統C TG4 追跡)。"},
+      {"area": "情報漏洩/トレーサビリティ", "message": "(1) 診断ログ path がユーザー名を含む LOCALAPPDATA 配下になりうる弱開示 (将来データルート相対化の余地)。(2) turn-7-1-changed.txt が target/ ビルド成果物 5470 行を含みレビュー対象特定を妨げる (生成時に除外推奨)。"}
+    ]
+  },
+  "passed": false,
+  "evaluator_skill": "assign-dev-evaluator"
+}

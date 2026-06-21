@@ -1,0 +1,27 @@
+{
+  "reviewer": "data",
+  "sprint_id": 7,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "ログ永続化/並行書込",
+      "message": "診断ログの追記+ローテーションが無ロックで実行され、GUI の複数スレッド（watcher スレッド・各 command スレッド・search スレッド）が同時に crate::diagnostic::record() を呼ぶと、metadata 読取→delete→rename→append のシーケンスが交錯しうる。具体的には (a) 2スレッドが同時に閾値超を観測すると rename を二重実行し pika.log.1/pika.log.2 の世代がずれる、(b) rename 進行中の append が古いハンドル/不在パスに当たって行を取りこぼす、(c) append 自体は OpenOptions(append) で OS のアトミック追記に乗るが、ローテーション判定の current_size は別 syscall で読むため TOCTOU で 5MB を超過した状態で append され得る。ただし診断ログはモジュールが明記するとおり『副次・ログ失敗でアプリを止めない』設計で、ユーザー文書データには一切影響しない。よって data 観点では critical/high ではなく medium。対策案: src-tauri 側に診断ログ専用 Mutex（または OnceLock<Mutex<()>>）を1本持ち log_with_min 全体を直列化する。pika-core::diagnostic::plan_rotation の純粋ロジック自体は正しい（最古削除→繰り上げ rename の順序に衝突なし）。",
+      "location": "src-tauri/src/diagnostic.rs:46"
+    },
+    {
+      "severity": "low",
+      "area": "ログ整合/タイムスタンプ",
+      "message": "now_iso_like() が chrono を避けて UNIX_EPOCH からの経過ミリ秒（t=<ms>）を行頭に置く設計は軽量で妥当だが、(1) duration_since 失敗時に 0 を返すため稀に t=0 行が混じる、(2) 単調増加でなく壁時計のため NTP 補正で前後し得る、(3) ローテーション後のファイル境界をまたぐと並べ替えの一意性が崩れうる。診断ログはソート/相関用途で人間文書データではないため low。各行のシーケンス（単調増加カウンタ）を併記すれば順序が一意になるが、現状の要件12.3 を満たす範囲では必須ではない。",
+      "location": "src-tauri/src/diagnostic.rs:96"
+    },
+    {
+      "severity": "low",
+      "area": "スナップショット永続化（既存の繰り越し・本スプリント非回帰）",
+      "message": "SnapshotService の baseline 索引・退避 object・diff_snapshots は依然インメモリ HashMap 保持で、プロセス終了で全消失する（コメントで『将来データルート配下へ zstd 永続化』と明記）。これは sprint 3 からの意図的な繰り越しで sprint 7 の変更ではなく、本スプリント（a11y/エッジ/配布）の acceptance_criteria にも snapshot 永続化は含まれない。退避が『最後の砦』である以上、リリース前には永続化（index.json + content-addressed object + 自己記述メタからの復元）の実装が要る点を data 観点として記録に留める。退避『が先』のガード（stash_incoming_before_overwrite が Err 時に保存中断、confirm/confirm_all が再照合で見ていない内容をベースライン化しない、退避 Result を握り潰さない）はロジックとして健全。",
+      "location": "src-tauri/src/snapshot.rs:65"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 7（a11y/エッジケース/配布の仕上げ）で追加された data 面はほぼ純粋な決定論モジュール（diagnostic 方針・notify_queue・nontext 縮退・view_state・huge 段階制）であり、永続スキーマや破壊的マイグレーションは導入していない。data 観点の critical/high はゼロ。中核の書込パスは堅い: document.rs の atomic_write は MoveFileExW(MOVEFILE_REPLACE_EXISTING|WRITE_THROUGH) の単一アトミック置換へ移行済みで旧 remove+rename のクラッシュ窓を解消、state_store.rs は PID 固有 tmp+fsync+rename で旧 state.json を壊さず未知 version/破損は上書きせず保全、huge.rs は 10MB 閾値の三者一致をコンパイル時 assert で単一源化し段階制と内容保存と未読判定のズレを構造的に防止、保存経路は『退避が先・退避不能なら中断』で外部変更の無退避喪失を塞いでいる。指摘は (1) 診断ログのローテーション+追記が無ロックで多スレッド競合し得る（ただし副次データでユーザー文書に影響せず medium）、(2) ログのタイムスタンプ順序の一意性（low）、(3) スナップショット永続化が依然インメモリで本スプリント非回帰だがリリース前に要実装（low）の3件。いずれも passed をブロックしない。"
+}

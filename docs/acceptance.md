@@ -275,6 +275,26 @@ CLI パース・役割決定の判断は系統A（core/ipc・controller/app_cont
 | TF6 | 第2段階 読み取り専用ビューア | 50MB 超は仮想化ウィンドウビューア（range 読取）で閲覧・検索でき、編集/保存/置換が無効化される（CM6 へ全量ロードしない） | 要件2.2 第2段階・design doc 8章（T-009） | [ ] 未実施（要実機。window_around/align_to_lines は cargo test 済み・read_range 配線済み） |
 | TF7 | キャンセル可能な検索/置換 | 巨大ファイル/長行での検索・全置換が UI をブロックせず、進捗表示＋キャンセルできる（別スレッド実行） | 要件5.4・design doc 3章（T-009） | [ ] 未実施（要実機。Cancel 協調キャンセル・ReDoS バックトラック上限は cargo test 済み） |
 
+## TG. sprint 7 a11y 全Web再構築・エッジケース・配布（所見は acceptance-findings.md T-010）
+
+> 通知バーキュー運用・診断ログ方針・非テキスト/FSエッジ縮退・ビュー別5状態・主要ショートカット表の
+> **決定論ロジックは系統A（cargo test）で検証済み**（pika-core::notify_queue / diagnostic / nontext /
+> view_state / shortcuts・49 件の新規テスト）。本節は実 GUI（Windows 実機 Release）での ARIA 読み上げ・
+> F6 フォーカス循環・通知バー実描画・5状態の遷移・画像簡易ビュー・診断ログ実出力・配布を確認する。
+
+| # | 項目 | 受け入れ基準 | 根拠（requirements / design doc） | 結果 |
+|---|------|-------------|------|------|
+| TG1 | ARIA 主要UIの読み上げ | ナレーター/UIA でツリー（role=tree/treeitem・aria-expanded/selected・状態マーク±/◆/取消線の読み上げテキスト）・タブ（role=tablist/tab・バッジ aria）・通知バー（role=status/aria-live=polite）・ステータス（差分あり件数を aria-label）が辿れる | 要件11.5・design doc 17章・ui-design 9/13章（T-010） | [ ] 未実施（要実機ナレーター。role/aria は index.html＋ui/* 付与済み・status の aria-label は renderStatus 実装済み） |
+| TG2 | F6/Shift+F6 ペイン間フォーカス循環 | F6 で ツリー→タブ→エディタ→差分→プレビュー を順に、Shift+F6 で逆順に巡回（hidden ペインは飛ばす）。キーボードのみで「開く→プレビュー→差分→確認済み」が完走できる | 要件11.4/11.5・design doc 17章（T-010） | [ ] 未実施（要実機。a11y::initFocusCycling の cyclePane を capture フェーズで配線済み・型成立） |
+| TG3 | 通知バーキュー運用 | 4件以上同時でも最大3本＋「他N件」に収まる。優先順位 衝突＞設定エラー＞外部リソース＞JS検知＞巨大ファイル。同一ファイル/同一種別は1本に集約。タブ切替でタブ固有通知が切り替わる。設定エラーは解消で自動消滅・衝突は閉じるまで残る | 要件11.1/11.4・design doc 19章 通知バーキュー運用（T-010） | [ ] 未実施（要実機。NoticeQueue の resolve/集約/自動消滅は cargo test 11 件＋frontend 同規則実装済み・activateTab で setActiveTab 配線） |
+| TG4 | ビュー別5状態 | Ideal/Empty/Loading/Partial/Error が解決される。Empty 3分岐（フォルダ未オープン/検索0件/消化後）で文言が変わる。Partial（10MB超で差分自動オフ等）が理由＋手動再有効化を通知バーで提示。Error が機能縮退＋次の一手を提示しアプリ継続 | ui-design 15章・要件2.2/2.3/12章（T-010） | [ ] 未実施（要実機。resolve_view_state の優先順位/Empty3分岐/Partial理由は cargo test 9 件・frontend viewstate.ts 実装済み） |
+| TG5 | 画像簡易ビュー＋寸法プリチェック | 画像（png/jpg/gif/webp/bmp/ico）が簡易ビュー（フィット/等倍）で表示。総ピクセル数 6000万px 超はデコードせず「既定アプリで開く」へ誘導（デコード爆発で固まらない） | 要件12.2・design doc 8章/19章 非テキスト画像ビュー（T-010） | [ ] 未実施（要実機。classify_extension/decide_image_open は cargo test・image.ts 実装済み） |
+| TG6 | 非対応バイナリ・FSエッジ縮退 | 非対応バイナリは「対応していない形式」＋「既定アプリで開く」。読み取り専用/アクセス権なし/ネットワークドライブ/クラウドプレースホルダで機能を縮退してアプリ継続＋次の一手提示（クラッシュ/フリーズしない） | 要件12.1/12.2・design doc 8章/19章 FSエッジ（T-010） | [ ] 未実施（要実機。degrade_for_edge は cargo test 済み・縮退方針を決定論で算定） |
+| TG7 | 診断ログ | error/warn/info（既定 warn 以上）がデータルート配下 `logs/pika.log` に記録される。ユーザーのファイル内容を書かない（パス・操作・要約のみ）。1ファイル5MB×3世代でローテーション。メニューからログフォルダを開ける | 要件12.3・design doc 19章 診断ログ（T-010） | [ ] 未実施（要実機。should_log/plan_rotation/LogLine.format は cargo test 7 件・diagnostic::record 配線済み（save/open 失敗時）・log_folder_path command＋ipc.ts 実装済み） |
+| TG8 | 主要ショートカット表 | Ctrl+E/Ctrl+\\/Ctrl+Shift+D/F8系（Alt+Down/Up 代替）・Ctrl+Enter（差分/プレビュー時のみ＝誤爆防止）・Ctrl+Shift+Enter（フォーカス非依存）・Ctrl+Alt+Enter（一括）が表どおり発火する | 要件11.2・design doc 19章 主要ショートカット表（T-010） | [ ] 未実施（要実機。shortcuts::resolve の誤爆防止/代替割当は cargo test 11 件） |
+| TG9 | forced-colors/テキストスケール | `forced-colors:active`/`prefers-contrast` で独自トークンが降格し OS の system-color へ委ねる。差分は記号(+/-)＋下線で色非依存に判読できる。寸法が rem/em 基準で WebView2 ズーム/DPI に連動 | 要件11.5・design doc 10章/17章（T-010） | [ ] 未実施（要実機。@media (forced-colors: active) を app.css に追加済み） |
+| TG10 | Tauri bundler 配布 | ユーザー単位インストーラー（管理者不要）＋ポータブル zip。エクスプローラー統合（HKCU・ポータブルは非登録）。アンインストール時 snapshots はユーザー選択（既定残す）。同梱 OSS ライセンス文を installer/zip と About に同梱 | 要件13・design doc 9章（T-010） | [ ] 未実施（リリース準備・系統C。bundler 設定/エクスプローラー統合は別途・本スプリントは決定論部分とコア配線） |
+
 ## TB. 各スプリント末の性能計測（要件2.1・design doc 12章）
 
 | # | 指標 | 上限 | 結果 |
@@ -285,5 +305,6 @@ CLI パース・役割決定の判断は系統A（core/ipc・controller/app_cont
 | TB4 | 外部変更反映 | 500 ms | [ ] |
 | TB5 | メモリ各上限 / IPC ラウンドトリップ / 常駐リーク（18時間ソーク） | 要件2.1 | [ ] |
 
-> 後続スプリントで watcher オーバーフロー・CM6 巨大ファイル体感・a11y 実機・プレビュー内検索・
-> requirements 各章受け入れ基準の写経を本表へ追加する（各項目に節番号を併記する方針を継続）。
+> 旧 wx 前提の A〜K 表は新スタックで再検証扱い（手動チェック項目自体は流用・design doc 16章）。
+> sprint 7 で a11y 実機・通知バーキュー・5状態・診断ログ・WebView2 不在時・requirements 各章受け入れ基準の
+> 写経を本表（TG / 各 T 節）へ集約した（各項目に requirements/design doc 節番号を併記する方針を継続）。

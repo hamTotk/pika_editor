@@ -978,3 +978,65 @@
   npm typecheck 成立。**要件 2.2/5.4/9.2 の TBD を CM6 実測値（第2段階 50MB・上限 500MB・第1段階 10MB 維持）で確定し
   requirements.md を改訂済み（design doc 16章）**。上記 L1〜L7 と実 GUI 反映（仮想化ビューア描画・検索バー・エンコーディング
   メニュー・保存中断ダイアログ）は系統C（Windows 実機）で確認する。
+
+---
+
+## T-010 a11y 全Web再構築・エッジケース・配布（sprint 7・design doc 17章/18章/19章／系統C）
+
+- **重大度**: 中（a11y は初期版の受け入れ基準＝要件11.5・キーボードのみ完走／通知バーキュー運用＝要件11.1／
+  非テキスト・FSエッジの縮退でアプリ継続＝要件12.1/12.2／診断ログ＝要件12.3）。データ損失系として保存前の
+  incoming 退避漏れ・atomic_write の非アトミック窓は **高**として本スプリントで是正（下記）。
+- **対応章**: 要件11.1（通知バーキュー）・11.2（主要ショートカット）・11.5（ARIA/F6/forced-colors）・12.1（FSエッジ）・
+  12.2（画像簡易ビュー/寸法プリチェック/非対応バイナリ）・12.3（診断ログ）・13（配布）・design doc 17章/18章/19章・
+  ui-design 15章（5状態）。acceptance.md TG1〜TG10。
+- **決定論側（cargo test 済み・pika-core・新規 49 件）**:
+  - **notify_queue** — `pika-core::notify_queue`。通知バーキュー運用（要件11.1）。`NoticeKind`（優先順位
+    **衝突＞設定エラー＞外部リソース＞JS検知＞巨大ファイル制限**・`auto_dismiss`＝衝突だけ閉じるまで残す）・
+    `NoticeQueue::push`（**同一ファイル/同一種別を最新へ合体**）・`resolve`（タブ固有はアクティブタブ・グローバルは
+    常時・**優先順位→新しさ順で最大3本＋他N件**）・`dismiss`/`dismiss_tab`（自動消滅条件の発火）。要件11.4 の
+    「4件以上→3本＋他N件」「同一ファイル衝突は1本」「タブ切替で表示切替」を cargo test で観測（11 件）。
+  - **diagnostic** — `pika-core::diagnostic`。診断ログ方針（要件12.3）。`should_log`（**既定 warn 以上**・Info は記録
+    しない）・`log_dir`/`current_log_path`（`<data_root>/logs/pika.log`）・`LogLine`（**type に本文フィールドを持たず**
+    level/category/op/path/summary のみ＝ユーザー内容を構造的に書けない・`format` は summary 内改行を1行へ畳む）・
+    `plan_rotation`（**5MB 超で 3世代ローテーション**＝pika.log→.1→.2・最古削除）。7 件。
+  - **nontext** — `pika-core::nontext`。非テキスト/FSエッジ縮退（要件12.1/12.2）。`classify_extension`（画像/テキスト/
+    未知は安全側で非対応バイナリ）・`decide_image_open`（**総ピクセル 6000万px 超はデコードせず外部誘導**・寸法不明も
+    安全側で外部誘導＝デコード爆発で固まらない）・`degrade_for_edge`（読み取り専用/アクセス権なし/ネットワークドライブ/
+    クラウドプレースホルダ/ワークスペース消失の縮退方針を決定論で算定＝機能を縮退してアプリ継続）。10 件。
+  - **view_state** — `pika-core::view_state`。ビュー別5状態（ui-design 15章）。`resolve_view_state`（**優先順位
+    Error＞Loading＞Partial＞Empty＞Ideal**）・`EmptyReason`（**Empty 3分岐**＝フォルダ未オープン/検索0件/消化後で
+    文言が変わる）・`DegradeReason`（Partial の縮退理由＋`can_reenable`＝読み取り専用ビューアのみ再有効化不可）・
+    `degrade_reasons`（huge::DegradeFlags から組立）。9 件。
+  - **shortcuts** — `pika-core::shortcuts`。主要ショートカット表（要件11.2）。`resolve`（**Ctrl+Enter は差分/プレビュー
+    フォーカス時のみ確認済みを発火＝誤爆防止**・Ctrl+Shift+Enter はフォーカス非依存・Ctrl+Alt+Enter は一括・F8系は
+    Alt+Down/Up 代替・Ctrl+\\ は Ctrl+Shift+E 代替）。11 件。
+- **データ損失系の是正（eval high data 対応・src-tauri）**:
+  - **atomic_write の単一アトミック置換化**: 旧実装の Windows フォールバックが `remove_file→rename` の2段で、間で
+    クラッシュ/電源断すると元ファイル消失・新ファイル未配置の窓があった。**`MoveFileExW(MOVEFILE_REPLACE_EXISTING |
+    MOVEFILE_WRITE_THROUGH)` の1呼び出し**で置換へ変更（`src-tauri/src/document.rs::replace_atomically`）。置換失敗時は
+    一時ファイルを後始末し元ファイルは触らない。
+  - **保存前の incoming 退避**: `save_document` が破壊的上書きの前に、ディスク上の現内容に未確認の外部変更があれば
+    **incoming 退避してから上書き**する（`SnapshotService::stash_incoming_before_overwrite`）。退避が取れなければ保存を
+    中断する（退避が先＝CLAUDE.md 判断ガイド・データを失わない）。ベースライン一致/保存内容一致/内容非保存方針は退避不要。
+- **配線（cargo build＋npm typecheck 成立）**:
+  - 診断ログ: `src-tauri/src/diagnostic.rs`（`record`＝データルート解決→`pika_core::diagnostic` でレベル判定/ローテーション
+    計画/整形→FS 追記・`log_folder_path` command＝ログフォルダを作成しパスを返す＝「メニューからログフォルダを開ける」）。
+    save/open の失敗経路から `record` を呼び実使用（要件12.3）。
+  - frontend: `src/a11y/index.ts`（`initFocusCycling`＝F6/Shift+F6 をペイン間循環・`initLandmarks`＝role/aria-live 確実化）・
+    `src/ui/notifications.ts`（NoticeQueue を pika-core 同規則で実装・actions/閉じる/他N件描画・activateTab で setActiveTab）・
+    `src/ui/status.ts`（`renderStatus`＝差分あり件数を aria-label 化）・`src/ui/viewstate.ts`（5状態文言・degradeReasonsFromFlags）・
+    `src/ui/image.ts`（画像簡易ビュー fit/actual・「既定アプリで開く」誘導）・`src/styles/app.css`（通知 actions・画像/誘導・
+    `@media (forced-colors: active)` でトークン降格）・`src/ipc.ts`（logFolderPath）。
+- **本スプリントで系統C（Windows 実機）に残す確認**（acceptance.md TG1〜TG10）:
+  - TG1: ナレーター/UIA でツリー/タブ/通知/ステータスの aria が辿れる（design doc 15章 Open 4＝プレビュー別WebView 内本文
+    の読み上げ可否も実機検証）。TG2: F6/Shift+F6 のペイン循環でキーボードのみ中心体験完走。
+  - TG3: 通知4件以上で3本＋他N件・タブ切替で切替・自動消滅。TG4: 5状態遷移と Empty 3分岐・Partial 通知。
+  - TG5/TG6: 画像簡易ビュー・寸法プリチェックで巨大画像を外部誘導・非対応バイナリ/FSエッジ縮退でアプリ継続。
+  - TG7: 診断ログの実出力（warn 以上・本文非記録・5MB×3世代ローテーション・ログフォルダを開く）。
+  - TG8: ショートカットが表どおり発火（誤爆防止/代替割当）。TG9: forced-colors/テキストスケール追従。TG10: bundler 配布。
+- **未対応（リリース準備・系統C／別途）**: Tauri bundler の実インストーラー・エクスプローラー統合（HKCU 登録/解除）・
+  ジャンプリスト実機表示・About のライセンス同梱・診断ログのメニュー導線の GUI 結線（command は実装済み）。
+  `cargo audit` は本環境に未導入（sprint 7 verify は `cargo test`/`cargo build`）。安定実行できる段で CI ゲートに載せる。
+- **状態（sprint 7・iteration1）**: 決定論ゲート（cargo test pika-core **317 件**〔T-009 比 +49＝notify_queue 11・
+  diagnostic 7・nontext 10・view_state 9・shortcuts 11・他+1〕＋pika-cli 11・pika-app 5）PASS・cargo build（crates＋
+  src-tauri・警告エラー扱い・exit 0）／npm typecheck 成立。上記 TG1〜TG10 の実 GUI 反映は系統C（Windows 実機）で確認する。

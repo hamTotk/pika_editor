@@ -105,6 +105,60 @@ impl SnapshotService {
             }
         }
     }
+
+    /// 破壊的上書き保存の**前に**、ディスク上の現内容を incoming 退避する（要件7.3・最上位原則）。
+    ///
+    /// CLAUDE.md 判断ガイド「上書きする→退避が先（確認ダイアログより退避が先）」を保存経路でも守る。
+    /// 外部変更（未確認）状態のまま保存すると、その外部変更が無退避で失われうる（eval high data 対応）。
+    /// ここで現ディスク内容を退避してから呼び出し側が `atomic_write` で上書きする。
+    ///
+    /// 退避要否の判定（無駄退避を避ける）:
+    /// - ディスク内容がベースラインと一致（外部変更なし）なら退避不要＝`Ok(false)`。
+    /// - ディスク内容が保存しようとしている内容と一致（自分が書いた内容で実質変化なし）なら退避不要。
+    /// - それ以外（ディスクに未確認の外部変更がある）は incoming 退避してから `Ok(true)`。
+    ///   内容を保存できない方針（機密/10MB以上/画像）はハッシュのみで退避対象 object を持てないため
+    ///   退避をスキップする（要件9.1/9.2・差分/巻き戻し非対象と整合）。
+    ///
+    /// 退避（object 登録＋索引追加）に失敗したら `Err` を返し、呼び出し側は**保存を中断**する
+    /// （退避が取れないまま破壊的上書きをしない＝データを失わない）。
+    pub fn stash_incoming_before_overwrite(
+        &self,
+        path: &str,
+        disk_content: &str,
+        incoming_content: &str,
+    ) -> Result<bool, String> {
+        let mut inner = self.inner.lock().map_err(|_| "snapshot ロック失敗")?;
+        let key = normalize_path_key(path);
+        let disk_hash = hash_normalized(disk_content);
+
+        // 保存しようとしている内容と同じなら実質変化なし＝退避不要。
+        if disk_hash == hash_normalized(incoming_content) {
+            return Ok(false);
+        }
+        // ベースラインと一致（外部変更なし）なら退避不要。
+        if let Some(baseline) = inner.store.baseline(&key) {
+            if baseline.content_hash == disk_hash {
+                return Ok(false);
+            }
+        }
+        // 内容を保存できない方針（機密/10MB以上/画像）は退避対象 object を持てない（要件9.1/9.2）。
+        if !baseline_policy(path, disk_content.len() as u64).stores_content() {
+            return Ok(false);
+        }
+
+        // 未確認の外部変更がディスクにある。incoming として退避してから上書きを許す。
+        let normalized = pika_core::diff::normalize_lf(disk_content);
+        inner.objects.insert(disk_hash.clone(), normalized);
+        let stashed =
+            inner
+                .store
+                .add_stash(&key, StashKind::Incoming, disk_hash.clone(), now_ms(), true);
+        // 索引へ退避が入ったことを確認（入らなければ退避を握り潰さず中断＝データを失わない）。
+        if stashed.stashed_object != disk_hash {
+            return Err("incoming 退避を索引へ登録できませんでした（保存を中断）".into());
+        }
+        Ok(true)
+    }
 }
 
 /// 索引キー用にパス区切りを正規化する（`\` → `/`）。

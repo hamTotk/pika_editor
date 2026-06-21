@@ -41,6 +41,15 @@ pub const MAX_OPEN_BYTES: u64 = 500 * 1024 * 1024;
 /// AI 出力の単一行巨大 JSON/JSONL 対策（要件2.2 行長ガード）。[`crate::render::guard`] と同値。
 pub const LONG_LINE_CHARS: usize = 100_000;
 
+// 10MB 閾値の三者一致を**コンパイル時**に担保する（eval low data: 単一源化）。
+// 段階制境界（[`STAGE1_THRESHOLD_BYTES`]）・内容保存境界（[`crate::snapshot::policy::DEFAULT_CONTENT_LIMIT_BYTES`]）・
+// 未読ハッシュ閾値（[`crate::hashing::HUGE_FILE_THRESHOLD_BYTES`]）が同値でないと、段階制と内容保存と未読判定が
+// ズレてデータ整合（要件9.2「10MB未満のみ内容保存」と 2.2 第1段階）が壊れる。片方だけ変えたらビルドが落ちる。
+const _: () = {
+    assert!(STAGE1_THRESHOLD_BYTES == crate::snapshot::policy::DEFAULT_CONTENT_LIMIT_BYTES);
+    assert!(STAGE1_THRESHOLD_BYTES == crate::hashing::HUGE_FILE_THRESHOLD_BYTES);
+};
+
 /// 巨大ファイル段階（要件2.2 の表に対応・観測可能にしてテストで分岐を検証する）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileStage {

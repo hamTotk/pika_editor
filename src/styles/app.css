@@ -303,8 +303,71 @@ body {
   max-width: 520px;
 }
 
+/* 衝突は最優先・赤枠で弁別（記号/文言と併用＝色だけに依存しない）。 */
+#notifications .notice[data-kind="conflict"],
 #notifications .notice[data-kind="error"] {
   border-color: var(--alert);
+}
+
+/* 通知内のアクションボタン（［差分を見る］［既定のブラウザで開く］等・要件11.1）。 */
+#notifications .notice button {
+  font: inherit;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-1);
+  cursor: pointer;
+}
+
+#notifications .notice button.notice-close {
+  margin-left: 6px;
+  padding: 0 6px;
+  border: none;
+  color: var(--text-3);
+}
+
+/* 「他N件」集約バッジ（要件11.1 最大3本＋他N件）。 */
+#notifications .notice-overflow {
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* 非テキスト: 画像簡易ビュー（表示のみ・ウィンドウフィット/等倍＝要件12.2）。 */
+#preview-host .image-fit,
+#editor-host .image-fit {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+  margin: auto;
+}
+
+#preview-host .image-actual,
+#editor-host .image-actual {
+  display: block;
+}
+
+/* 「既定のアプリで開く」誘導（巨大画像・非対応バイナリ＝要件12.2・行き止まりにしない）。 */
+.open-externally {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 24px;
+  color: var(--text-2);
+}
+
+.open-externally button {
+  font: inherit;
+  padding: 6px 14px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-1);
+  cursor: pointer;
 }
 
 /* ステータスは右下固定・表示専用（ui-design §9）。クリック透過。 */
@@ -316,4 +379,28 @@ body {
   font-size: 12px;
   pointer-events: none;
   user-select: none;
+}
+
+/* ハイコントラスト/強制配色（要件11.5・design doc 10章/17章）。
+   forced-colors:active では独自トークンを降格し OS の system-color に委ねる
+   （トークンがハイコントラストを上書きしない）。差分は color 非依存の記号/下線が効くので保持。 */
+@media (forced-colors: active) {
+  #toolbar button,
+  #tabs [role="tab"],
+  #tree [role="treeitem"],
+  #notifications .notice,
+  .open-externally button {
+    border-color: ButtonText;
+    background: ButtonFace;
+    color: ButtonText;
+  }
+  #notifications .notice[data-kind="conflict"],
+  #notifications .notice[data-kind="error"] {
+    border-color: Highlight;
+  }
+  /* 差分の追加/削除は記号(+/-)＋下線で弁別（色に依存しない＝要件11.5）。 */
+  .diff-seg-changed {
+    text-decoration: underline;
+    font-weight: 700;
+  }
 }

@@ -1,0 +1,45 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 7,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "critical",
+      "area": "a11y / キーボード操作",
+      "message": "ファイルツリーがキーボードのみで操作できず、ファイルを開く起点に到達不能。tree.ts の treeitem は role=treeitem を持つが tabIndex=-1 で click ハンドラのみ。矢印キー/Enter/Space のキーハンドラが全く無く、<ul role=tree> 自体にも tabindex が無いため Tab でツリーへ入れない。a11y/index.ts の F6 で focusPane が treeitem に programmatic フォーカスを当てても、その先で項目移動も openFile 発火もできず行き止まりになる。openFile を起動できる UI 経路はツリー項目クリックのみ（openPath は単一インスタンス転送/起動復元の programmatic 経路でユーザー操作ではない）。結果としてキーボードのみでは『ファイルを開く→プレビュー→差分→確認済み』の中心フローに入れない。これは本スプリント sprint 7 の must『ARIA 全Web再構築（ツリー role=tree/treeitem）』と req 11.4/11.5『マウスを使わずキーボードのみで「ファイルを開く→プレビュー→差分→確認済み」が完了でき』『ファイルツリー…をマウスなしで操作でき』に正面から反する。ref-dev frontend-ui critical 定義『キーボードで主要機能に到達不能』に該当。",
+      "location": "src/ui/tree.ts:29-55, src/index.html:33, src/a11y/index.ts:15-31"
+    },
+    {
+      "severity": "high",
+      "area": "ショートカット配線",
+      "message": "shortcuts.rs（resolve/Action）が主要ショートカット表として実装・テスト済みだが、フロントエンドに一切配線されていない。main.ts は独自のインライン keydown を持ち（F5/Ctrl+\/Ctrl+E/F8 のみ）、resolve は TS から import すらされていない。このため req 11.2 表の Ctrl+O/Ctrl+Shift+O（ファイル/フォルダを開く）・Ctrl+S（保存）・Ctrl+W（タブを閉じる）・Ctrl+F/Ctrl+H（検索/置換）・Ctrl+Shift+D（差分）・Ctrl+Enter〔誤爆防止付き〕/Ctrl+Shift+Enter/Ctrl+Alt+Enter（確認系）が全てキーボードから発火不能。should『主要ショートカット表をフロントのキーディスパッチ表として実装』が core 側だけで止まっており、UI 操作性に直結する欠落（Ctrl+O 不在は上記 critical のキーボード起点欠如も悪化させる）。",
+      "location": "src/main.ts:809-836, crates/pika-core/src/shortcuts.rs:105-171"
+    },
+    {
+      "severity": "medium",
+      "area": "ARIA 属性",
+      "message": "ディレクトリの treeitem に aria-expanded が付与されていない。sprint 7 must は『ツリー(role=tree/treeitem・aria-expanded/selected…)』を明示要求しているが、tree.ts はフラットな直下エントリのみ描画し、is_dir 項目にも aria-expanded を設定しない。現状ツリーが展開不可なので実害は限定的だが、role=tree のセマンティクスとして screen reader が折りたたみ状態を判別できず criterion の文言を満たしていない。",
+      "location": "src/ui/tree.ts:28-46"
+    },
+    {
+      "severity": "medium",
+      "area": "ARIA ライブ通知",
+      "message": "ステータスの『差分あり件数』を非対話・非ライブの <div id=status aria-live=off> に aria-label として載せているが、フォーカス不能・aria-live=off の静的 div の aria-label は多くの screen reader で読み上げられない。criterion『ステータス=表示専用で差分あり件数を aria-label』の文言は満たすが、実際にナレーターへ件数が届く保証が弱い。差分あり件数の能動的読み上げが要るなら別途 aria-live 領域（polite）か可視ステータスの role 検討が必要（実機読み上げは系統C 検証だが、設計上は届かない可能性が高い）。",
+      "location": "src/ui/status.ts:26-40, src/index.html:49, src/a11y/index.ts:80-84"
+    },
+    {
+      "severity": "medium",
+      "area": "tablist 操作",
+      "message": "タブ（role=tab）に WAI-ARIA tablist パターンの roving tabindex / 矢印キー移動が無い。タブは <button> なので Tab/Enter での個別到達・発火は可能だが、tablist 内での ArrowLeft/ArrowRight 移動が実装されておらず、req 11.2 の Ctrl+Tab タブ切替もフロントに配線されていない（前述の shortcuts 未配線と同根）。キーボードでのタブ間移動が冗長になる。",
+      "location": "src/ui/tabs.ts:22-36"
+    },
+    {
+      "severity": "low",
+      "area": "モーション配慮",
+      "message": "prefers-reduced-motion を尊重する分岐が無い。diff/index.ts の scrollIntoView や状態遷移でアニメーション抑制が考慮されていない（現状アニメーションは軽微なので影響小）。perspective チェックリストの reduced-motion 項目として記録。",
+      "location": "src/diff/index.ts:83, src/styles/app.css"
+    }
+  ],
+  "has_critical": true,
+  "summary": "sprint 7 は a11y 全Web再構築が goal だが、最重要の『キーボードのみで中心フローを完走』が破れている。ファイルツリーが treeitem に tabIndex=-1＋click のみで矢印/Enter ハンドラも tree への Tab 経路も無く、キーボードのみではファイルを開けない＝中心体験の起点に到達不能（critical・req 11.4/11.5 とこのスプリント must に正面から反する）。加えて shortcuts.rs の主要ショートカット表が core 側に実装済みなのにフロントへ未配線で Ctrl+O/S/W/F/H/確認系が全て無効（high）。ARIA は role/aria-selected の土台と forced-colors 降格は入っており、diff 面・通知バー・トグル系ボタンのキーボード到達と色非依存弁別は良好。ツリーの aria-expanded 欠落・静的 div への aria-label 依存・tablist の矢印移動欠如が medium。critical を 1 件返す（d_review ゲートをブロック）。"
+}
