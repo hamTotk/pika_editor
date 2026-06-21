@@ -23,7 +23,10 @@ pub use guard::{
     GuardDecision, DEFAULT_HTML_TIMEOUT_MS, DEFAULT_IMAGE_MAX_PIXELS, DEFAULT_LONG_LINE_CHARS,
     DEFAULT_SVG_MAX_ELEMENTS, DEFAULT_SVG_MAX_PIXELS,
 };
-pub use path::{confine_under, join_under, resolve_local_ref, LocalRefDecision, RejectReason};
+pub use path::{
+    confine_under, join_under, resolve_local_ref, rewrite_local_image_refs, LocalRefDecision,
+    RejectReason,
+};
 pub use sanitize::{markdown_to_unsafe_html, sanitize_html, PreviewFlavor};
 
 /// custom protocol が別WebView へ直配信する 1 レスポンス分（要件6・design doc 6章）。
