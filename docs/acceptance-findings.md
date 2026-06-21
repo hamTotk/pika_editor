@@ -884,3 +884,40 @@
   path_verify 12・state 14〕＋pika-cli 11・pika-app 5）PASS・cargo build（crates＋src-tauri・警告エラー扱い）／
   npm typecheck 成立。**単一インスタンス転送の実機挙動（H1/H2/H4・即終了/前面化/終了コード0）・named pipe の
   DACL/リモート拒否の実効・state.json 復元の実 GUI 反映は未実施（要 Windows 実機）**。
+- **iteration2 で追加（状態復元の実体化・最近使った項目・回復導線・eval feedback 反映）**:
+  - **content_hash 実体化**（eval high）: フロントが開く/保存/外部リロード/巻き戻し時に backend
+    `hash_content`（`pika-core::hashing::hash_normalized_lf`＝自己保存抑制/復元別物判定と同一規則）でタブの
+    内容ハッシュを実値で詰めるようにした。これにより復元3分岐の **別物=未読復元** が production で発火する
+    （従来は content_hash 空固定で probe が常に Same を返す死に枝だった）。**カーソル/スクロールも CM6 の
+    `getCursor`/`getScrollTop` から実値を収集**して state.json へ保存し、復元時に `gotoPosition`/`scrollToLine`
+    で戻す。→ H8（系統C）: タブを途中行で開いた状態で終了→再起動で同じ行・スクロールへ復帰すること。
+  - **active_tab 往復**（eval high）: `RestoreOutcomeDto.active_path`（`active_tab` インデックスをパスへ解決）を
+    追加し、復元時はタブを全部開いたあと**パスで**再アクティブ化する。→ H9（系統C）: 終了時に見ていたタブが
+    再起動後もアクティブで復元されること（最後に開いたタブに引きずられない）。
+  - **削除済みタブの回復導線**（eval high・旧 wx F-017 同質の行き止まり防止）: 起動復元で外部削除されていた
+    タブを**取消線＋× の削除済みタブとして残し**、空エディタを出して「確認済み時点に戻す（rollback）」へ到達
+    可能にした。退避/ベースラインは snapshot に残るので削除済みタブから復元できる。→ H10（系統C）: 開いていた
+    ファイルを外部削除→再起動→削除済みタブが残り rollback で退避内容へ戻せること。
+  - **起動復元の巨大ファイルガード**（eval high/performance）: `probe_path` を metadata len 先読みにし、
+    **10MB 以上は全量読込せず Same 扱い**（起動ホットパス保護・spec「10MB 以上はハッシュのみ」と整合）。
+    → H11（系統C）: 10MB 級テキストを複数タブで開いた状態で再起動しても起動 0.5 秒ゲート内であること。
+  - **最近使った項目＋ジャンプリスト**（should・要件10.2）: `pika-core::recent::RecentList`（LRU・大文字小文字
+    無視の重複排除・各20件上限。cargo test 6 件）を state.json へ保持。`note_recent` command が read-modify-write
+    （未知/破損時は保全して何もしない）で更新し、`src-tauri/src/jumplist.rs` の `SHAddToRecentDocs(SHARD_PATHW)`
+    で **OS の Recent ジャンプリストへ登録**する（`ICustomDestinationList` のカスタムカテゴリは要件外＝足さない）。
+    → H12（系統C）: ファイル/フォルダを開くとタスクバー右クリックの「最近使ったもの」に出ること（実描画は実機）。
+  - **フォルダ切替＋未保存確認**（should・要件3.2）: 起動中に別フォルダを指定すると、未保存タブがあれば破棄確認を
+    挟んでから前フォルダのタブ/未読/エディタを畳んで切り替える（複数フォルダ同時オープンはしない＝要件14章）。
+  - **存在しないパスの扱い**（should・要件3.2）: `path_kind` command で種別判定し、**存在しないファイルパスは
+    「保存時に作成される新規タブ」として空タブで開き**、フォルダは切替、存在しないフォルダはエラーにする。
+  - **eval medium 反映**: 破損/未知バージョンの空起動を通知バーで明示（前回状態を読めず空起動・既存は保全の旨）／
+    複数パス + `-g` 併用時のカーソルを paths 先頭タブへ結びつけ／一括確認の差分先読みを `Promise.all` で並行化
+    （N+1 IPC の直列線形劣化を解消）／`persistAppState` を 400ms デバウンス（終了時は即時 flush）。
+  - **eval low 反映**: state.json アトミック書込で rename 前に `sync_all`（fsync）し、一時ファイル名に PID
+    サフィックスを付けて同居プロセスの tmp 競合を構造的に排除。
+  - **ウィンドウ前面化の責務分担（系統C 検証項目）**: 前面化は backend（`single_instance::bring_to_front` の
+    `unminimize`/`show`/`set_focus`）が本筋。フロントは `open-request` でファイルを開くのみ（前面化はしない）。
+    開いた結果がユーザーに見える保証（アクティブタブへフォーカス移動等）は H1 と併せて実機で確認する。
+  - **状態（sprint 5・iteration2）**: 決定論ゲート（cargo test pika-core 207 件〔iteration1 比 +14＝hashing 6・
+    recent 6・state +2〕＋pika-cli 11・pika-app 5）PASS・cargo build（警告エラー扱い・exit 0）／npm typecheck
+    成立・cargo fmt --check クリーン。上記 H8〜H12 と H1〜H7 は引き続き系統C（Windows 実機）で確認する。

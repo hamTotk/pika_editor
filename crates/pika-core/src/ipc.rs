@@ -76,9 +76,7 @@ pub fn decide_role(pipe_created: bool) -> InstanceRole {
 /// SID 文字列が空・不正（パイプ名に使えない文字）なら拒否する（注入防止）。
 pub fn build_pipe_name(user_sid: &str) -> Result<String> {
     if user_sid.is_empty() {
-        return Err(PikaError::InvalidArgument(
-            "パイプ名の SID が空".into(),
-        ));
+        return Err(PikaError::InvalidArgument("パイプ名の SID が空".into()));
     }
     // SID 文字列は `S-1-5-...` 形式（英数字とハイフンのみ）。それ以外はパイプ名注入を防ぐため拒否。
     if !user_sid
@@ -199,9 +197,11 @@ mod tests {
 
     #[test]
     fn 転送時に空パスを除去する() {
-        let json =
-            build_forward_message(&["".to_string(), "  ".to_string(), r"C:\a.md".to_string()], None)
-                .unwrap();
+        let json = build_forward_message(
+            &["".to_string(), "  ".to_string(), r"C:\a.md".to_string()],
+            None,
+        )
+        .unwrap();
         let req = parse_incoming_message(json.as_bytes()).unwrap();
         assert_eq!(req.paths, vec![r"C:\a.md".to_string()]);
     }

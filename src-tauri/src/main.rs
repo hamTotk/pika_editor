@@ -13,6 +13,7 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod commands;
+mod jumplist;
 mod preview;
 mod single_instance;
 mod snapshot;
@@ -51,6 +52,9 @@ fn run() {
             commands::f5_resync,
             commands::save_app_state,
             commands::restore_app_state,
+            commands::hash_content,
+            commands::note_recent,
+            commands::path_kind,
             snapshot::compute_file_diff,
             snapshot::confirm_file,
             snapshot::confirm_all,

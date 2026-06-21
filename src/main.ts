@@ -4,6 +4,7 @@
 import {
   openWorkspace,
   readFile,
+  pathKind,
   saveFile,
   f5Resync,
   computeFileDiff,
@@ -15,6 +16,8 @@ import {
   onOpenRequest,
   restoreAppState,
   saveAppState,
+  hashContent,
+  noteRecent,
   type TreeEntry,
   type OpenRequestPayload,
   type AppState,
@@ -37,6 +40,24 @@ import {
 
 interface OpenTab extends TabModel {
   dirty: boolean;
+  /**
+   * このタブの直近既知内容ハッシュ（LF 正規化・backend と同一規則）。
+   * 開く/保存/外部リロード時に backend(hash_content)で実値を詰め、終了時 collectAppState で
+   * state.json の content_hash として保存する。これにより復元の「別物=未読復元」分岐が
+   * production で発火する（eval high: ダミー値固定の解消）。
+   */
+  contentHash: string;
+  /** 1 始まりカーソル位置（非アクティブタブの復元用に最後に見えた位置を保持）。 */
+  cursorLine: number;
+  cursorColumn: number;
+  /** スクロール最上部の行番号（1 始まり近似・復元用）。 */
+  scrollTop: number;
+  /**
+   * 起動復元時に外部削除されていたタブ（取消線＋× 表示で残す）。退避/ベースラインは snapshot に
+   * 残るので、削除済みタブから「確認済み時点に戻す（rollback）」へ到達できる回復導線を保つ
+   * （eval high: 削除済みタブの回復導線欠落＝旧 wx 版 F-017 と同質の行き止まり防止）。
+   */
+  deleted: boolean;
 }
 
 const state = {
@@ -123,17 +144,58 @@ function setMutatingButtonsDisabled(disabled: boolean): void {
 }
 
 async function activateTab(path: string): Promise<void> {
+  // 切替前に現在タブの位置を退避しておく（後でこのタブへ戻ったとき位置を復元するため）。
+  captureActivePosition();
   state.active = path;
+  const tab = state.tabs.find((t) => t.path === path);
+  // 削除済みタブはディスクから読めない。退避/ベースラインは snapshot に残るので、
+  // 直近内容を空にしてエディタを出し「確認済み時点に戻す（rollback）」導線を保つ（eval high）。
+  if (tab?.deleted) {
+    state.editor?.destroy();
+    state.editor = createEditor(editorHost(), "", () => markDirty(path));
+    refreshTabs();
+    setStatus(`削除済み: ${path}（［確認済み時点に戻す］で退避から復元できます）`);
+    return;
+  }
   try {
     const content = await readFile(path);
     state.editor?.destroy();
     state.editor = createEditor(editorHost(), content, () => markDirty(path));
+    // 開いた内容の実ハッシュを記録する（復元の別物=未読判定に使う・eval high）。
+    void captureTabHash(path, content);
+    // タブに保持した位置（復元/前回アクティブ時）へカーソル/スクロールを戻す（要件10.1）。
+    if (tab && (tab.cursorLine > 1 || tab.cursorColumn > 1 || tab.scrollTop > 1)) {
+      state.editor.gotoPosition(tab.cursorLine, tab.cursorColumn);
+      state.editor.scrollToLine(tab.scrollTop);
+    }
     refreshTabs();
     // 差分トグル ON のままタブを切替えたら新しいアクティブタブの差分を再描画する。
     if (state.diffOn) await renderActiveDiff();
   } catch (e) {
     notify(`開けませんでした: ${String(e)}`, "error");
   }
+}
+
+/** タブの直近内容ハッシュを backend(hash_content)で算出して記録する（state.json 復元の素・eval high）。 */
+async function captureTabHash(path: string, content: string): Promise<void> {
+  const tab = state.tabs.find((t) => t.path === path);
+  if (!tab) return;
+  try {
+    tab.contentHash = await hashContent(content);
+  } catch {
+    // ハッシュ取得失敗は致命でない（content_hash 空＝復元時は安全側で一致扱い）。
+  }
+}
+
+/** アクティブエディタのカーソル/スクロールを現在タブへ写す（保存前に呼ぶ・要件10.1）。 */
+function captureActivePosition(): void {
+  if (!state.active || !state.editor) return;
+  const tab = state.tabs.find((t) => t.path === state.active);
+  if (!tab) return;
+  const cur = state.editor.getCursor();
+  tab.cursorLine = cur.line;
+  tab.cursorColumn = cur.column;
+  tab.scrollTop = state.editor.getScrollTop();
 }
 
 function markDirty(path: string): void {
@@ -146,10 +208,26 @@ function markDirty(path: string): void {
 
 async function openFile(entry: TreeEntry): Promise<void> {
   if (!state.tabs.some((t) => t.path === entry.path)) {
-    state.tabs.push({ path: entry.path, title: entry.name, dirty: false });
+    state.tabs.push(newTab(entry.path, entry.name));
   }
   await activateTab(entry.path);
+  // 最近使ったファイルへ記録（要件10.2・ジャンプリスト反映は backend）。
+  void noteRecent("file", entry.path).catch(() => undefined);
   void persistAppState();
+}
+
+/** 既定値で OpenTab を作る（content_hash/位置は開いた後に実値で埋める）。 */
+function newTab(path: string, title: string): OpenTab {
+  return {
+    path,
+    title,
+    dirty: false,
+    contentHash: "",
+    cursorLine: 1,
+    cursorColumn: 1,
+    scrollTop: 1,
+    deleted: false,
+  };
 }
 
 async function onOpenFolder(): Promise<void> {
@@ -160,16 +238,42 @@ async function onOpenFolder(): Promise<void> {
     notify("フォルダのパスを入力してください", "warn");
     return;
   }
+  await switchFolder(dir);
+}
+
+/**
+ * フォルダを開く/切り替える（要件3.2）。起動中に別フォルダを指定した場合（フォルダ切替）は、
+ * 未保存タブがあれば確認を挟んでから切り替える（should: フォルダ切替＋未保存確認）。
+ * 存在しないフォルダはエラーにする（should: 存在しないフォルダはエラー）。
+ */
+async function switchFolder(dir: string): Promise<void> {
+  // 別フォルダへ切り替えるとき、未保存タブがあれば破棄確認を挟む（データを失わない）。
+  const switching = state.folder !== null && state.folder !== dir;
+  if (switching && state.tabs.some((t) => t.dirty)) {
+    const ok = window.confirm("未保存の変更があります。フォルダを切り替えると破棄されます。続けますか？");
+    if (!ok) return;
+  }
   try {
     const entries = await openWorkspace(dir);
+    if (switching) {
+      // 切替時は前フォルダのタブ/未読/エディタを畳む（複数フォルダ同時オープンはしない＝要件14章）。
+      state.editor?.destroy();
+      state.editor = null;
+      state.tabs = [];
+      state.active = null;
+    }
     state.folder = dir;
     state.treeEntries = entries;
     // 初回オープンは全既読スタート（要件8.1）。未読は外部変更（fs-changed）で付く。
     state.unread = new UnreadStore();
     refreshTree();
+    refreshTabs();
     setStatus(`${dir}（${entries.length} 件）`);
+    // 最近使ったフォルダへ記録（要件10.2・ジャンプリスト反映は backend）。
+    void noteRecent("folder", dir).catch(() => undefined);
     void persistAppState();
   } catch (e) {
+    // 存在しないフォルダ等はエラー（要件3.2）。前フォルダはそのまま維持する。
     notify(`フォルダを開けませんでした: ${String(e)}`, "error");
   }
 }
@@ -184,7 +288,11 @@ async function onSave(): Promise<void> {
       const tab = state.tabs.find((t) => t.path === path);
       if (tab) {
         tab.dirty = false;
+        // 保存内容を以後の復元基準にする（このセッションで開き直す/復元時の別物判定の素・eval high）。
+        // 削除済みタブを保存し直したら実体が復活したので削除フラグを解除する。
+        tab.deleted = false;
       }
+      void captureTabHash(path, content);
       // 自身の保存では未読を付けない（backend のハッシュ一致抑制と二重で担保）。
       state.unread.clearFile(path);
       refreshTabs();
@@ -341,15 +449,18 @@ async function onConfirmAll(): Promise<void> {
   await withBusy(async () => {
     try {
       // 各対象の差分を先に提示して backend に diff_snapshot を作らせる（確定直前の再照合基準）。
-      // 内容を読んで diff を計算（タブで開いていなければディスク内容を渡す）。
-      for (const path of targets) {
-        const tab = state.tabs.find((t) => t.path === path);
-        const current =
-          tab && state.active === path && state.editor
-            ? state.editor.getContent()
-            : await readFile(path);
-        await computeFileDiff(path, current);
-      }
+      // 内容を読んで diff を計算（タブで開いていなければディスク内容を渡す）。各 target は独立なので
+      // 並行化して IPC ラウンドトリップの直列線形劣化を避ける（eval medium: N+1 IPC）。
+      await Promise.all(
+        targets.map(async (path) => {
+          const tab = state.tabs.find((t) => t.path === path);
+          const current =
+            tab && state.active === path && state.editor
+              ? state.editor.getContent()
+              : await readFile(path);
+          await computeFileDiff(path, current);
+        }),
+      );
       const result = await confirmAll(targets);
       // 確認済みになったものを未読から外す（スキップ分は未読維持＝要件8.3）。
       // backend がスキップしたファイルは差分時点と変わっているので再差分が必要。
@@ -388,6 +499,10 @@ async function onRollback(): Promise<void> {
       const baselineContent = await rollbackFile(path);
       // バッファをベースライン内容で上書き（外部リロード扱い＝単一トランザクション/非dirty）。
       editor.reloadExternal(baselineContent);
+      void captureTabHash(path, baselineContent);
+      // 削除済みタブから戻したら実体が（保存により）復元される導線なので削除フラグを解除する。
+      const tab = state.tabs.find((t) => t.path === path);
+      if (tab) tab.deleted = false;
       state.unread.clearFile(path);
       refreshTree();
       refreshTabs();
@@ -424,6 +539,8 @@ async function autoReloadCleanTabs(changes: import("./ipc").FsChange[]): Promise
   try {
     const content = await readFile(state.active);
     state.editor.reloadExternal(content);
+    // 反映後の内容を復元基準ハッシュとして更新（次回起動の別物判定の素・eval high）。
+    void captureTabHash(state.active, content);
     // 自動リロードで現在タブを見たので未読は解除（外部変更を反映済み）。
     state.unread.clearFile(state.active);
     refreshTabs();
@@ -450,41 +567,110 @@ async function onF5(): Promise<void> {
  */
 async function onOpenRequestEvent(payload: OpenRequestPayload): Promise<void> {
   for (const path of payload.paths) {
-    const name = path.split(/[\\/]/).pop() ?? path;
-    await openFile({ name, path, is_dir: false });
+    await openPath(path);
   }
-  if (payload.goto && state.editor) {
-    // -g 位置へカーソルを置く（行・桁は 1 始まり）。実カーソル移動は editor が担う。
-    state.editor.gotoPosition(payload.goto.line, payload.goto.column ?? 1);
+  // -g カーソル位置は paths 先頭ファイルに対応する規約（ipc.rs OpenRequest）。
+  // 複数パス時はループ末尾でなく先頭タブをアクティブにしてからカーソルを置く（eval medium）。
+  if (payload.goto && payload.paths.length > 0) {
+    const first = payload.paths[0];
+    await openPath(first);
+    if (state.editor) {
+      state.editor.gotoPosition(payload.goto.line, payload.goto.column ?? 1);
+    }
   }
+}
+
+/**
+ * 転送/起動パスを種別に応じて開く（要件3.2）。
+ * - フォルダ → フォルダ切替（未保存確認込み）。
+ * - 既存ファイル → タブで開く。
+ * - 存在しないパス → 「保存時に作成される新規タブ」として空タブで開く（should: 存在しないファイルパス）。
+ */
+async function openPath(path: string): Promise<void> {
+  const name = path.split(/[\\/]/).pop() ?? path;
+  let kind: "file" | "dir" | "missing";
+  try {
+    kind = await pathKind(path);
+  } catch {
+    kind = "missing";
+  }
+  if (kind === "dir") {
+    await switchFolder(path);
+    return;
+  }
+  if (kind === "missing") {
+    openNewFileTab(path, name);
+    return;
+  }
+  await openFile({ name, path, is_dir: false });
+}
+
+/** 存在しないファイルパスを「保存時に作成される新規タブ」として空タブで開く（要件3.2）。 */
+function openNewFileTab(path: string, name: string): void {
+  if (!state.tabs.some((t) => t.path === path)) {
+    const tab = newTab(path, name);
+    // 新規（未保存）なのでタブを dirty にせず、保存で実体を作る。空内容の hash を記録しておく。
+    state.tabs.push(tab);
+  }
+  state.active = path;
+  state.editor?.destroy();
+  state.editor = createEditor(editorHost(), "", () => markDirty(path));
+  void captureTabHash(path, "");
+  refreshTabs();
+  setStatus(`新規ファイル（保存で作成）: ${path}`);
+  persistAppState();
 }
 
 /** 現在の UI 状態を AppState へ写す（state.json 保存用・要件10.1）。 */
 function collectAppState(): AppState {
+  // アクティブタブのカーソル/スクロールを最新化してから収集する（実値で保存・eval high）。
+  captureActivePosition();
   const activeIdx = state.tabs.findIndex((t) => t.path === state.active);
   return {
     version: 1,
     workspace: state.folder ?? undefined,
+    // 各タブの実カーソル/スクロール/content_hash を保存する（ダミー値固定の解消・eval high）。
+    // diff_on/view_mode はアプリ全体で 1 つ（ソース/プレビューと差分トグルは現状グローバル）なので
+    // 現在の表示状態を全タブに反映する。content_hash は開く/保存/外部リロード時に実値で埋めている。
     tabs: state.tabs.map((t) => ({
       path: t.path,
-      cursor_line: 1,
-      cursor_column: 1,
-      scroll_top: 0,
+      cursor_line: t.cursorLine,
+      cursor_column: t.cursorColumn,
+      scroll_top: t.scrollTop,
       view_mode: state.viewMode,
       diff_on: state.diffOn,
-      content_hash: "",
+      content_hash: t.contentHash,
     })),
     active_tab: activeIdx < 0 ? 0 : activeIdx,
     expanded_dirs: [],
     window: { x: 0, y: 0, width: 0, height: 0, maximized: false },
+    // recent は backend(note_recent)が read-modify-write で別管理するため空で送る
+    // （save_app_state が recent を上書きしないよう backend 側で保つ。下記コメント参照）。
+    recent: { files: [], folders: [] },
   };
 }
+
+/** persistAppState のデバウンスタイマー（連続操作で書込が積み重なるのを抑える・eval medium）。 */
+let persistTimer: number | null = null;
 
 /**
  * アプリ状態をアトミック保存する（要件10.1）。未知バージョン/破損で空起動した（safeEmpty）間は
  * 保存しない＝読めない state.json を上書きしない（最上位原則「データを失わない」）。
+ *
+ * 連続でタブ/フォルダを開く操作で都度アトミック書込（同期 FS I/O）が積み重なるため、
+ * 短時間デバウンス（合体）する（eval medium）。終了時（beforeunload）は flush で確実に書く。
  */
-async function persistAppState(): Promise<void> {
+function persistAppState(): void {
+  if (state.safeEmpty) return;
+  if (persistTimer !== null) window.clearTimeout(persistTimer);
+  persistTimer = window.setTimeout(() => {
+    persistTimer = null;
+    void persistAppStateNow();
+  }, 400);
+}
+
+/** デバウンスせず即座に state.json を保存する（終了時 flush 用）。 */
+async function persistAppStateNow(): Promise<void> {
   if (state.safeEmpty) return;
   try {
     await saveAppState(collectAppState());
@@ -507,6 +693,14 @@ async function restoreOnStartup(): Promise<void> {
   }
   // 未知バージョン/破損は上書き禁止フラグを立てて以後の保存を控える。
   state.safeEmpty = outcome.safe_empty;
+  if (state.safeEmpty) {
+    // 前回状態を読めなかったため空で起動した／元の state.json は保全し上書きしない旨を伝える
+    // （eval medium: 破損空起動の可視化。回復の手掛かりに触れる）。
+    notify(
+      "前回の状態を読み込めなかったため空の状態で起動しました（元の設定は保全し上書きしません）",
+      "warn",
+    );
+  }
   if (outcome.workspace_status === "restore" && outcome.workspace_path) {
     try {
       const entries = await openWorkspace(outcome.workspace_path);
@@ -519,15 +713,25 @@ async function restoreOnStartup(): Promise<void> {
       // ワークスペースが開けなければ空状態へ落とす（安全遷移）。
     }
   }
-  // タブ復元（消失=削除済み表示は開かず通知、別物=未読復元、正常=開く）。
+  // タブ復元（消失=削除済みタブとして残す・別物=未読復元・正常=位置復元して開く）。
   for (const rt of outcome.tabs) {
+    const name = rt.tab.path.split(/[\\/]/).pop() ?? rt.tab.path;
     if (rt.status === "deleted") {
-      notify(`削除済み: ${rt.tab.path}`, "info");
+      // 外部削除されたタブを取消線タブとして残す（退避から「確認済み時点に戻す」へ到達可能・eval high）。
+      const tab = newTab(rt.tab.path, name);
+      tab.deleted = true;
+      tab.cursorLine = rt.tab.cursor_line || 1;
+      tab.cursorColumn = rt.tab.cursor_column || 1;
+      tab.scrollTop = rt.tab.scroll_top || 1;
+      tab.contentHash = rt.tab.content_hash;
+      state.unread.apply([{ kind: "removed", path: rt.tab.path }]);
+      if (!state.tabs.some((t) => t.path === tab.path)) state.tabs.push(tab);
       continue;
     }
-    const name = rt.tab.path.split(/[\\/]/).pop() ?? rt.tab.path;
     try {
       await openFile({ name, path: rt.tab.path, is_dir: false });
+      // 保存時の位置を復元する（カーソル/スクロール・eval high の実値復元）。
+      restoreTabPosition(rt.tab.path, rt.tab.cursor_line, rt.tab.cursor_column, rt.tab.scroll_top);
       if (rt.status === "unread") {
         // 別物（外部変更）＝未読として復元（差分マークを付ける）。
         state.unread.apply([{ kind: "modified", path: rt.tab.path }]);
@@ -536,8 +740,27 @@ async function restoreOnStartup(): Promise<void> {
       // 個別タブが開けなくても他タブの復元は続ける。
     }
   }
+  // 保存時のアクティブタブをパスで再アクティブ化する（復元順に依らない・eval high）。
+  if (outcome.active_path && state.tabs.some((t) => t.path === outcome.active_path)) {
+    await activateTab(outcome.active_path);
+  }
   refreshTabs();
   refreshTree();
+}
+
+/** 復元したタブの保存時カーソル/スクロールをエディタへ反映する（アクティブタブのみ即時・要件10.1）。 */
+function restoreTabPosition(path: string, line: number, column: number, scrollTop: number): void {
+  const tab = state.tabs.find((t) => t.path === path);
+  if (tab) {
+    tab.cursorLine = line || 1;
+    tab.cursorColumn = column || 1;
+    tab.scrollTop = scrollTop || 1;
+  }
+  // 現在エディタに乗っているタブなら即座に位置を反映する（非アクティブタブは activate 時に反映）。
+  if (state.active === path && state.editor) {
+    state.editor.gotoPosition(line || 1, column || 1);
+    state.editor.scrollToLine(scrollTop || 1);
+  }
 }
 
 async function main(): Promise<void> {
@@ -592,8 +815,8 @@ async function main(): Promise<void> {
   await onWatchMode((message) => notify(message, "info"));
   // 単一インスタンス転送（要件3.4）: 既存インスタンスへ後続プロセスが投げたパスを開く。
   await onOpenRequest((payload) => void onOpenRequestEvent(payload));
-  // 終了直前にアプリ状態を保存（要件10.1。アトミック書込は backend）。
-  window.addEventListener("beforeunload", () => void persistAppState());
+  // 終了直前にアプリ状態を保存（要件10.1。アトミック書込は backend）。デバウンス待ちでなく即時 flush。
+  window.addEventListener("beforeunload", () => void persistAppStateNow());
   // 起動時に state.json を復元（version 安全側・復元3分岐は backend が判定）。
   await restoreOnStartup();
   if (!state.folder) setStatus("フォルダを開いてください");

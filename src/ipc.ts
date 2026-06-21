@@ -35,6 +35,11 @@ export function readFile(path: string): Promise<string> {
   return invoke<string>("read_file", { path });
 }
 
+/** パスの種別を返す（存在しないファイルを新規タブで開く判断に使う・要件3.2）。 */
+export function pathKind(path: string): Promise<"file" | "dir" | "missing"> {
+  return invoke<"file" | "dir" | "missing">("path_kind", { path });
+}
+
 /** ファイルを保存する。保存後ハッシュで自己保存を抑制する（backend 側・要件7.1）。 */
 export function saveFile(path: string, content: string): Promise<void> {
   return invoke<void>("save_file", { path, content });
@@ -183,6 +188,12 @@ export interface WindowState {
   maximized: boolean;
 }
 
+/** 最近使った項目（pika-core::recent::RecentList と対応・要件10.2）。 */
+export interface RecentList {
+  files: string[];
+  folders: string[];
+}
+
 /** アプリ状態（pika-core::state::AppState と対応・要件10.1）。 */
 export interface AppState {
   version: number;
@@ -191,6 +202,7 @@ export interface AppState {
   active_tab: number;
   expanded_dirs: string[];
   window: WindowState;
+  recent: RecentList;
 }
 
 /** 復元したタブ 1 件（src-tauri commands::RestoredTabDto と対応・状態復元3分岐）。 */
@@ -206,6 +218,8 @@ export interface RestoreOutcome {
   workspace_status: "restore" | "empty-state" | "no-workspace";
   workspace_path?: string;
   tabs: RestoredTab[];
+  /** 復元後にアクティブ化すべきタブの絶対パス（active_tab を解決した値・無ければ未設定）。 */
+  active_path?: string;
   /** 未知バージョン/破損で空起動した（このセッションは上書き保存を控える）。 */
   safe_empty: boolean;
 }
@@ -218,6 +232,22 @@ export function saveAppState(state: AppState): Promise<void> {
 /** アプリ状態を state.json から復元する（version 安全側・復元3分岐は backend が判定）。 */
 export function restoreAppState(): Promise<RestoreOutcome> {
   return invoke<RestoreOutcome>("restore_app_state");
+}
+
+/**
+ * 内容の LF 正規化ハッシュを得る（state.json のタブ content_hash 算出・要件10.1）。
+ * 自己保存抑制/復元の別物判定と同一規則（pika_core::hashing）。改行のみの差は同値。
+ */
+export function hashContent(content: string): Promise<string> {
+  return invoke<string>("hash_content", { content });
+}
+
+/**
+ * 最近使った項目（ファイル/フォルダ）を追記し更新後リストを得る（要件10.2・ジャンプリスト）。
+ * LRU・重複排除・上限20件は backend(pika-core::recent)。未知バージョン/破損時は空を返す（保全）。
+ */
+export function noteRecent(kind: "file" | "folder", path: string): Promise<RecentList> {
+  return invoke<RecentList>("note_recent", { kind, path });
 }
 
 /** 単一インスタンス転送の「これを開け」イベント（src-tauri single_instance::OpenRequestPayload と対応）。 */

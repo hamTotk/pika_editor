@@ -9,6 +9,7 @@
 //! （最上位原則「データを失わない」）。**未知バージョン/破損時は上書きしない**（読めない状態を保全）。
 
 use pika_core::data_root::{resolve_data_root, DataRoot};
+use pika_core::hashing::{hash_normalized_lf, HUGE_FILE_THRESHOLD_BYTES};
 use pika_core::state::{
     load_state, restore_tab, restore_workspace, AppState, PathProbe, StateLoad, TabRestore,
     TabState, WorkspaceRestore,
@@ -25,6 +26,9 @@ pub struct RestoreOutcome {
     pub workspace: WorkspaceRestore,
     /// タブごとの復元3分岐。
     pub tabs: Vec<TabRestore>,
+    /// 復元後にアクティブ化すべきタブの絶対パス（`active_tab` インデックスを解決した値）。
+    /// タブを復元順に開いたあと**パスで**アクティブを指定し直すため（eval high: active_tab 往復）。
+    pub active_path: Option<String>,
     /// 未知バージョン/破損で空状態起動になったか（上書き禁止フラグ）。
     pub safe_empty: bool,
 }
@@ -49,19 +53,62 @@ fn state_path(root: &DataRoot) -> PathBuf {
 }
 
 /// AppState をアトミックに書き込む（一時ファイル→rename。途中クラッシュで旧版を壊さない）。
+///
+/// 完全化（eval low）:
+/// - 一時ファイル名に **PID サフィックス**を付け、SID 取得失敗などで複数プロセスが同居した
+///   稀なケースでも同一 tmp への同時書込・相互上書きを構造的に避ける。
+/// - rename 前に **fsync（sync_all）** して、OS クラッシュ/電源断時にゼロ長/部分書込の
+///   tmp が残ったまま rename される理論リスクを減らす。
 pub fn save(root: &DataRoot, state: &AppState) -> Result<(), String> {
     std::fs::create_dir_all(&root.path).map_err(|e| format!("データルート作成に失敗: {e}"))?;
     let json = state.to_json().map_err(|e| format!("{e}"))?;
     let target = state_path(root);
-    // 一時ファイルへ書いてから rename（同一ボリュームのアトミック置換・要件12.1）。
-    let tmp = target.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| format!("一時ファイル書込に失敗: {e}"))?;
+    // 一時ファイルは PID 固有名（同居プロセスの tmp 競合を構造的に排除）。
+    let tmp = target.with_extension(format!("json.{}.tmp", std::process::id()));
+    write_synced(&tmp, json.as_bytes()).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("一時ファイル書込に失敗: {e}")
+    })?;
     std::fs::rename(&tmp, &target).map_err(|e| {
         // 置換に失敗したら一時ファイルを残さない（クリーンアップ）。
         let _ = std::fs::remove_file(&tmp);
         format!("state.json 置換に失敗: {e}")
     })?;
     Ok(())
+}
+
+/// 一時ファイルへ書き込み、fsync してからクローズする（rename 前にディスクへ落とす）。
+fn write_synced(tmp: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
+
+/// `note_recent` 等の read-modify-write 用に state.json を読んだ結果。
+pub enum LoadForUpdate {
+    /// 既知バージョン or 初回（ファイル無し＝空状態）。安全に追記・保存してよい。
+    Editable(AppState),
+    /// 未知バージョン/破損。**上書きしてはならない**（既存状態を保全＝データを失わない）。
+    Preserve,
+}
+
+/// state.json を read-modify-write 用に読む（version 安全側）。
+///
+/// - ファイル不在 → 初回扱いで `Editable(空状態)`（追記して新規作成してよい）。
+/// - 既知バージョン → `Editable(読めた状態)`。
+/// - 未知バージョン/破損 → `Preserve`（読めない状態を上書きしない）。
+pub fn load_for_update(root: &DataRoot) -> LoadForUpdate {
+    let path = state_path(root);
+    let json = match std::fs::read_to_string(&path) {
+        Ok(j) => j,
+        Err(_) => return LoadForUpdate::Editable(AppState::empty()),
+    };
+    match load_state(&json) {
+        StateLoad::Ok(state) => LoadForUpdate::Editable(state),
+        StateLoad::UnknownVersion(_) | StateLoad::Corrupt(_) => LoadForUpdate::Preserve,
+    }
 }
 
 /// state.json を読み、core の復元判定（version 安全側・3分岐）を適用する。
@@ -78,6 +125,7 @@ pub fn restore(root: &DataRoot) -> RestoreOutcome {
             return RestoreOutcome {
                 workspace: WorkspaceRestore::NoWorkspace,
                 tabs: Vec::new(),
+                active_path: None,
                 safe_empty: false,
             };
         }
@@ -90,6 +138,7 @@ pub fn restore(root: &DataRoot) -> RestoreOutcome {
             RestoreOutcome {
                 workspace: WorkspaceRestore::NoWorkspace,
                 tabs: Vec::new(),
+                active_path: None,
                 safe_empty: true,
             }
         }
@@ -106,10 +155,13 @@ fn apply_restore(state: &AppState) -> RestoreOutcome {
             .map(|p| Path::new(p).is_dir())
             .unwrap_or(false),
     );
-    let tabs = state.tabs.iter().map(|t| restore_one_tab(t)).collect();
+    let tabs = state.tabs.iter().map(restore_one_tab).collect();
+    // active_tab インデックスをパスへ解決（復元順がずれてもパスで再アクティブ化できる）。
+    let active_path = state.active_tab_path().map(|s| s.to_string());
     RestoreOutcome {
         workspace,
         tabs,
+        active_path,
         safe_empty: false,
     }
 }
@@ -121,8 +173,23 @@ fn restore_one_tab(tab: &TabState) -> TabRestore {
 }
 
 /// FS を見てタブのパス状態を判定する（消失/別物/一致）。
+///
+/// 起動0.5秒ゲートのホットパス（復元タブ分だけ直列に走る）なので、
+/// **10MB 以上のファイルは全量を読み直さず一致扱い**にする（eval high/performance:
+/// probe_path の巨大ファイルガード）。spec「10MB 以上はハッシュのみ・内容保存しない」と整合し、
+/// 巨大テキストを複数タブ復元しても起動を全量読込でブロックしない。
 fn probe_path(tab: &TabState) -> PathProbe {
     let path = Path::new(&tab.path);
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        // メタも取れない＝存在しない/権限なし。存在判定は exists() に委ねる。
+        Err(_) => {
+            if path.exists() {
+                return PathProbe::Same; // 権限等で読めないだけなら未読を立てない（安全側）。
+            }
+            return PathProbe::Missing;
+        }
+    };
     if !path.exists() {
         return PathProbe::Missing;
     }
@@ -130,9 +197,13 @@ fn probe_path(tab: &TabState) -> PathProbe {
     if tab.content_hash.is_empty() {
         return PathProbe::Same;
     }
+    // 巨大ファイルは全量読込せず一致扱い（起動ホットパスを保護＝spec 10MB ハッシュのみ）。
+    if meta.len() >= HUGE_FILE_THRESHOLD_BYTES {
+        return PathProbe::Same;
+    }
     match std::fs::read(path) {
         Ok(bytes) => {
-            let now = hash_normalized(&bytes);
+            let now = hash_normalized_lf(&bytes);
             if now == tab.content_hash {
                 PathProbe::Same
             } else {
@@ -142,27 +213,4 @@ fn probe_path(tab: &TabState) -> PathProbe {
         // 読めない（権限等）は安全側で「別物」とせず一致扱い（誤って未読を立てない）。
         Err(_) => PathProbe::Same,
     }
-}
-
-/// 内容を LF 正規化してハッシュ化する（保存時ハッシュと同じ規則＝改行のみ差は無視）。
-/// commands.rs の hash_normalized と同一規則（自己保存抑制/未読判定の照合と整合）。
-fn hash_normalized(bytes: &[u8]) -> String {
-    use std::hash::Hasher;
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\r' => {
-                out.push(b'\n');
-                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                    i += 1;
-                }
-            }
-            b => out.push(b),
-        }
-        i += 1;
-    }
-    let mut h = twox_hash::XxHash64::with_seed(0);
-    h.write(&out);
-    format!("{:016x}", h.finish())
 }
