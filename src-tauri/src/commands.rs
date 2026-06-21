@@ -91,7 +91,8 @@ pub fn save_file(
     // 保存後ハッシュを先に算出して登録（watcher イベントより先に勝つ必要があるため保存前に登録）。
     let saved_hash = hash_normalized_lf(content.as_bytes());
     watcher.register_self_save(&path, &saved_hash);
-    std::fs::write(&path, content).map_err(|e| format!("保存に失敗: {e}"))
+    // エラーは素の原因（OS エラー等）を返し、文脈の接頭辞は frontend で一元的に付ける（F-027 二重接頭辞回避）。
+    std::fs::write(&path, content).map_err(|e| e.to_string())
 }
 
 /// 最近使った項目の種別（ファイル/フォルダ）。

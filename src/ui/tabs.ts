@@ -32,12 +32,32 @@ export function renderTabs(
     btn.dataset.path = tab.path;
 
     const badge = tabBadge(tab.path, tab.dirty ?? false, unread);
-    btn.textContent = `${badge.prefix}${stripPrefix(tab.title)}${badge.suffix}`;
-    // 状態（未保存/未読/削除済み）を aria-label にテキスト化して読み上げ到達を確実にする（要件11.5）。
-    btn.setAttribute("aria-label", tabAriaLabel(stripPrefix(tab.title), tab.dirty ?? false, badge));
-    if (badge.removed) {
-      btn.style.textDecoration = "line-through"; // 削除済みは取り消し線（要件7.2）。
+    const title = stripPrefix(tab.title);
+    // ラベルを部品ごとに分ける（F-028: 取り消し線をタイトルだけに限定し、未保存印 ● や削除記号 × は
+    // 装飾対象から外す）。色のみに依存しない記号表現（要件11.5）は span 構成でもそのまま維持する。
+    if (badge.prefix) {
+      const prefixSpan = document.createElement("span");
+      prefixSpan.className = "tab-prefix";
+      prefixSpan.setAttribute("aria-hidden", "true"); // 状態は aria-label に集約する。
+      prefixSpan.textContent = badge.prefix.trimEnd();
+      btn.appendChild(prefixSpan);
     }
+    const titleSpan = document.createElement("span");
+    titleSpan.className = "tab-title";
+    titleSpan.textContent = title;
+    if (badge.removed) {
+      titleSpan.classList.add("removed"); // 削除済みは取り消し線（要件7.2）。タイトル span のみに限定。
+    }
+    btn.appendChild(titleSpan);
+    if (badge.suffix) {
+      const suffixSpan = document.createElement("span");
+      suffixSpan.className = "tab-suffix";
+      suffixSpan.setAttribute("aria-hidden", "true"); // 状態は aria-label に集約する。
+      suffixSpan.textContent = badge.suffix.trimStart();
+      btn.appendChild(suffixSpan);
+    }
+    // 状態（未保存/未読/削除済み）を aria-label にテキスト化して読み上げ到達を確実にする（要件11.5）。
+    btn.setAttribute("aria-label", tabAriaLabel(title, tab.dirty ?? false, badge));
     btn.addEventListener("click", () => onActivate(tab.path));
     btn.addEventListener("keydown", (e) => onTabKeydown(e, btn, onActivate));
     el.appendChild(btn);

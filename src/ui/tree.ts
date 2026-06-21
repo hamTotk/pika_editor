@@ -47,12 +47,21 @@ function makeItem(
 
   const icon = entry.is_dir ? "📁" : "📄";
   const mark = stateMark(entry, unread);
+  // アイコンと名前は別要素にする（F-028: 取り消し線をアイコンまで横切らせない）。
+  // 取り消し線はファイル名 span にだけ掛け、アイコン/状態記号は装飾対象から外す。
+  const iconSpan = document.createElement("span");
+  iconSpan.className = "tree-icon";
+  iconSpan.setAttribute("aria-hidden", "true"); // 状態はファイル名側 aria-label に集約する。
+  iconSpan.textContent = icon;
+  const nameSpan = document.createElement("span");
+  nameSpan.className = "tree-name";
   // 状態マークは色だけに依存しない記号（要件11.5）。読み上げ用に aria-label へも集約する。
-  li.textContent = `${icon} ${entry.name}${mark.suffix}`;
-  applyAriaLabel(li, entry, mark);
+  nameSpan.textContent = `${entry.name}${mark.suffix}`;
   if (mark.removed) {
-    li.style.textDecoration = "line-through"; // 削除済みは取り消し線（ui-design 5章）。
+    nameSpan.classList.add("removed"); // 削除済みは取り消し線（ui-design 5章）。span のみに限定。
   }
+  li.append(iconSpan, nameSpan);
+  applyAriaLabel(li, entry, mark);
   if (mark.propagated) {
     li.dataset.unread = "propagated"; // 伝播マーク（淡 ±）。視覚は CSS で淡色化。
   } else if (mark.suffix) {

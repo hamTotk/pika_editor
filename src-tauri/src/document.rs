@@ -241,7 +241,8 @@ pub fn save_document(
             Some(&path),
             &format!("アトミック書込に失敗: {e}"),
         );
-        format!("保存に失敗: {e}")
+        // エラーは素の原因を返し、文脈の接頭辞は frontend で一元的に付ける（F-027 二重接頭辞回避）。
+        e.to_string()
     })?;
     Ok(SaveResultDto {
         status: "saved".into(),
