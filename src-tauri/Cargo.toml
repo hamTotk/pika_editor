@@ -30,12 +30,19 @@ notify = { workspace = true }
 twox-hash = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-# WebView2 Runtime 不在検出（レジストリ読取）と最小ネイティブ MessageBox（design doc 18章）に使う。
+# WebView2 Runtime 不在検出（レジストリ読取）・最小ネイティブ MessageBox（design doc 18章）、
+# および単一インスタンスの自前 named pipe（CreateNamedPipe/DACL/PIPE_REJECT_REMOTE_CLIENTS・SID 取得）に使う。
 # proc-macro 不要の軽量 FFI バインディング。Tauri も同系列を使うため追加コストは小さい。
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_System_Registry",
   "Win32_UI_WindowsAndMessaging",
+  "Win32_System_Pipes",
+  "Win32_System_IO",
+  "Win32_Storage_FileSystem",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Threading",
 ] }
 
 [features]

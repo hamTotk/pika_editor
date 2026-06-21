@@ -12,7 +12,12 @@ import {
   rollbackFile,
   onFsChanged,
   onWatchMode,
+  onOpenRequest,
+  restoreAppState,
+  saveAppState,
   type TreeEntry,
+  type OpenRequestPayload,
+  type AppState,
 } from "./ipc";
 import { initTheme } from "./theme";
 import { renderTree } from "./ui/tree";
@@ -55,6 +60,9 @@ const state = {
   // 退避＋ベースライン更新を伴う重い操作（確認/一括確認/巻き戻し/保存）の多重実行防止フラグ。
   // 連打で confirm_all/rollback_file が並行発火しデータ操作が重複するのを抑止する（最上位原則）。
   busy: false,
+  // state.json が未知バージョン/破損で空起動したか（要件13）。true の間は保存を控える
+  // ＝読めない状態を上書きしない（データを失わない）。復元判定は backend(pika-core)が下す。
+  safeEmpty: false,
 };
 
 const saveBtn = () => document.getElementById("save-file") as HTMLButtonElement;
@@ -141,6 +149,7 @@ async function openFile(entry: TreeEntry): Promise<void> {
     state.tabs.push({ path: entry.path, title: entry.name, dirty: false });
   }
   await activateTab(entry.path);
+  void persistAppState();
 }
 
 async function onOpenFolder(): Promise<void> {
@@ -159,6 +168,7 @@ async function onOpenFolder(): Promise<void> {
     state.unread = new UnreadStore();
     refreshTree();
     setStatus(`${dir}（${entries.length} 件）`);
+    void persistAppState();
   } catch (e) {
     notify(`フォルダを開けませんでした: ${String(e)}`, "error");
   }
@@ -433,6 +443,103 @@ async function onF5(): Promise<void> {
   }
 }
 
+/**
+ * 単一インスタンス転送（要件3.4）。既に起動済みの pika に別プロセスが `pika <path>` を投げると
+ * backend が named pipe で受け取り core 再検証した絶対パスを `open-request` で送ってくる。
+ * 受理操作=パスオープン限定なので、ここでは「ファイルを開く（あれば -g 位置へ）」だけを行う。
+ */
+async function onOpenRequestEvent(payload: OpenRequestPayload): Promise<void> {
+  for (const path of payload.paths) {
+    const name = path.split(/[\\/]/).pop() ?? path;
+    await openFile({ name, path, is_dir: false });
+  }
+  if (payload.goto && state.editor) {
+    // -g 位置へカーソルを置く（行・桁は 1 始まり）。実カーソル移動は editor が担う。
+    state.editor.gotoPosition(payload.goto.line, payload.goto.column ?? 1);
+  }
+}
+
+/** 現在の UI 状態を AppState へ写す（state.json 保存用・要件10.1）。 */
+function collectAppState(): AppState {
+  const activeIdx = state.tabs.findIndex((t) => t.path === state.active);
+  return {
+    version: 1,
+    workspace: state.folder ?? undefined,
+    tabs: state.tabs.map((t) => ({
+      path: t.path,
+      cursor_line: 1,
+      cursor_column: 1,
+      scroll_top: 0,
+      view_mode: state.viewMode,
+      diff_on: state.diffOn,
+      content_hash: "",
+    })),
+    active_tab: activeIdx < 0 ? 0 : activeIdx,
+    expanded_dirs: [],
+    window: { x: 0, y: 0, width: 0, height: 0, maximized: false },
+  };
+}
+
+/**
+ * アプリ状態をアトミック保存する（要件10.1）。未知バージョン/破損で空起動した（safeEmpty）間は
+ * 保存しない＝読めない state.json を上書きしない（最上位原則「データを失わない」）。
+ */
+async function persistAppState(): Promise<void> {
+  if (state.safeEmpty) return;
+  try {
+    await saveAppState(collectAppState());
+  } catch (e) {
+    // 保存失敗は通知のみ（状態保存はベストエフォート・データ本体は失わない）。
+    notify(`状態の保存に失敗: ${String(e)}`, "warn");
+  }
+}
+
+/**
+ * 起動時に state.json を復元する（要件10.1/13）。version 安全側・復元3分岐の判定は backend(pika-core)。
+ * ワークスペース消失=空状態、タブ消失=削除済み表示、別物=未読復元、を status で受けて反映する。
+ */
+async function restoreOnStartup(): Promise<void> {
+  let outcome;
+  try {
+    outcome = await restoreAppState();
+  } catch {
+    return; // 復元できなくても空状態で起動する（クラッシュさせない）。
+  }
+  // 未知バージョン/破損は上書き禁止フラグを立てて以後の保存を控える。
+  state.safeEmpty = outcome.safe_empty;
+  if (outcome.workspace_status === "restore" && outcome.workspace_path) {
+    try {
+      const entries = await openWorkspace(outcome.workspace_path);
+      state.folder = outcome.workspace_path;
+      state.treeEntries = entries;
+      state.unread = new UnreadStore();
+      refreshTree();
+      setStatus(`${outcome.workspace_path}（${entries.length} 件）`);
+    } catch {
+      // ワークスペースが開けなければ空状態へ落とす（安全遷移）。
+    }
+  }
+  // タブ復元（消失=削除済み表示は開かず通知、別物=未読復元、正常=開く）。
+  for (const rt of outcome.tabs) {
+    if (rt.status === "deleted") {
+      notify(`削除済み: ${rt.tab.path}`, "info");
+      continue;
+    }
+    const name = rt.tab.path.split(/[\\/]/).pop() ?? rt.tab.path;
+    try {
+      await openFile({ name, path: rt.tab.path, is_dir: false });
+      if (rt.status === "unread") {
+        // 別物（外部変更）＝未読として復元（差分マークを付ける）。
+        state.unread.apply([{ kind: "modified", path: rt.tab.path }]);
+      }
+    } catch {
+      // 個別タブが開けなくても他タブの復元は続ける。
+    }
+  }
+  refreshTabs();
+  refreshTree();
+}
+
 async function main(): Promise<void> {
   initTheme();
   document.getElementById("open-folder")?.addEventListener("click", () => void onOpenFolder());
@@ -483,7 +590,13 @@ async function main(): Promise<void> {
   // 外部変更/監視モードの購読（backend の emit を受ける）。
   await onFsChanged((payload) => onExternalChange(payload.changes));
   await onWatchMode((message) => notify(message, "info"));
-  setStatus("フォルダを開いてください");
+  // 単一インスタンス転送（要件3.4）: 既存インスタンスへ後続プロセスが投げたパスを開く。
+  await onOpenRequest((payload) => void onOpenRequestEvent(payload));
+  // 終了直前にアプリ状態を保存（要件10.1。アトミック書込は backend）。
+  window.addEventListener("beforeunload", () => void persistAppState());
+  // 起動時に state.json を復元（version 安全側・復元3分岐は backend が判定）。
+  await restoreOnStartup();
+  if (!state.folder) setStatus("フォルダを開いてください");
 }
 
 void main();

@@ -9,9 +9,12 @@ pub mod cli;
 pub mod data_root;
 pub mod diff;
 pub mod error;
+pub mod ipc;
+pub mod path_verify;
 pub mod render;
 pub mod review;
 pub mod snapshot;
+pub mod state;
 pub mod watcher;
 
 pub use error::{PikaError, Result};

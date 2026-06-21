@@ -14,7 +14,9 @@
 
 mod commands;
 mod preview;
+mod single_instance;
 mod snapshot;
+mod state_store;
 mod watcher;
 mod webview2;
 
@@ -47,6 +49,8 @@ fn run() {
             commands::read_file,
             commands::save_file,
             commands::f5_resync,
+            commands::save_app_state,
+            commands::restore_app_state,
             snapshot::compute_file_diff,
             snapshot::confirm_file,
             snapshot::confirm_all,
@@ -54,8 +58,20 @@ fn run() {
             preview::prepare_preview,
         ])
         .setup(|app| {
-            // 起動時にメインウィンドウを表示（visible:false で生成し、初期化後に出す）。
             use tauri::Manager;
+
+            // 単一インスタンス（design doc 15章-9）。CreateNamedPipe の成否を原子的ロックとし、
+            // **ウィンドウ表示前に**サーバー公開（or 既存サーバーへの転送）を完了する。
+            // クライアント（既に起動済み）なら引数を転送して即終了する（呼出プロセスは終了コード0）。
+            let forward: Vec<String> = std::env::args().skip(1).collect();
+            if let pika_core::ipc::InstanceRole::Client =
+                single_instance::acquire_or_forward(app.handle(), &forward)
+            {
+                // 既存インスタンスへ転送済み。この後発プロセスは即終了する。
+                app.handle().exit(0);
+                return Ok(());
+            }
+
             // 監視サービスを managed state として登録（command から State で取得する）。
             // 監視スレッドはここでは起動せず、open_workspace でルート確定時に開始する
             // （フォルダ未オープン時は監視コストゼロ＝軽い）。

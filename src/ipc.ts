@@ -159,6 +159,82 @@ export function preparePreview(
   });
 }
 
+/** 表示モード（state.json の ViewMode と対応・ui-design 8章）。 */
+export type ViewMode = "source" | "preview" | "split";
+
+/** 1 タブ分の永続状態（pika-core::state::TabState と対応・要件10.1）。 */
+export interface TabState {
+  path: string;
+  cursor_line: number;
+  cursor_column: number;
+  scroll_top: number;
+  view_mode: ViewMode;
+  diff_on: boolean;
+  /** 保存時点の LF 正規化内容ハッシュ（復元時の別物=未読判定に使う）。 */
+  content_hash: string;
+}
+
+/** ウィンドウ状態（pika-core::state::WindowState と対応）。 */
+export interface WindowState {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  maximized: boolean;
+}
+
+/** アプリ状態（pika-core::state::AppState と対応・要件10.1）。 */
+export interface AppState {
+  version: number;
+  workspace?: string;
+  tabs: TabState[];
+  active_tab: number;
+  expanded_dirs: string[];
+  window: WindowState;
+}
+
+/** 復元したタブ 1 件（src-tauri commands::RestoredTabDto と対応・状態復元3分岐）。 */
+export interface RestoredTab {
+  /** "restore"（正常）| "deleted"（消失=削除済み表示）| "unread"（別物=未読復元） */
+  status: "restore" | "deleted" | "unread";
+  tab: TabState;
+}
+
+/** 復元結果（src-tauri commands::RestoreOutcomeDto と対応・要件10.1/13）。 */
+export interface RestoreOutcome {
+  /** "restore" | "empty-state"（ワークスペース消失）| "no-workspace"（単体ファイルのみ） */
+  workspace_status: "restore" | "empty-state" | "no-workspace";
+  workspace_path?: string;
+  tabs: RestoredTab[];
+  /** 未知バージョン/破損で空起動した（このセッションは上書き保存を控える）。 */
+  safe_empty: boolean;
+}
+
+/** アプリ状態を state.json へアトミック保存する（要件10.1・design doc 9章）。 */
+export function saveAppState(state: AppState): Promise<void> {
+  return invoke<void>("save_app_state", { state });
+}
+
+/** アプリ状態を state.json から復元する（version 安全側・復元3分岐は backend が判定）。 */
+export function restoreAppState(): Promise<RestoreOutcome> {
+  return invoke<RestoreOutcome>("restore_app_state");
+}
+
+/** 単一インスタンス転送の「これを開け」イベント（src-tauri single_instance::OpenRequestPayload と対応）。 */
+export interface OpenRequestPayload {
+  /** 再検証済み絶対パス群（受理操作=パスオープン限定）。 */
+  paths: string[];
+  /** `-g` カーソル位置（任意）。 */
+  goto?: { line: number; column?: number };
+}
+
+/** 単一インスタンス転送（pika <path> を再実行）で送られる「開け」要求の購読（要件3.4）。 */
+export function onOpenRequest(
+  handler: (payload: OpenRequestPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<OpenRequestPayload>("open-request", (e) => handler(e.payload));
+}
+
 /** 外部変更（合成結果）の購読。返り値の関数で購読解除する。 */
 export function onFsChanged(
   handler: (payload: FsChangedPayload) => void,
