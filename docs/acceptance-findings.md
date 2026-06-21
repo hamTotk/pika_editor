@@ -1199,3 +1199,25 @@
 - **繰り越し**: 権限ゼロ実証（JS 実行による形式検証）／Stage ③（テーマ CSS 変数・失敗件数 Tauri event 化・
   プレビュー＋差分の左右並置）／Stage ④（HTML 系統B・外部 opt-in・暴走ガード実機）。
 - **状態**: Stage ② 完了（4ゲート緑＋実機目視 OK・Mermaid/KaTeX/highlight 描画確認）。ローカル画像は次対応。
+
+## F-029（重大・修正済み）プレビュー別WebView から自前 command が到達可能だった（権限ゼロ破れ）
+
+- **重大度**: 高（セキュリティ・最重要境界の破れ。任意ファイル読取/書込に到達し得た）。
+- **対応章**: 要件6・design doc 6章/9章（権限ゼロ別WebView・Tauri API 到達不能）・CVE-2024-35222 級。
+- **現象（実機プローブで証明）**: プレビュー別WebView（未信頼文書を描画）から
+  `window.__TAURI_INTERNALS__.invoke('read_file', {path:'C:/Windows/win.ini'})` が**成功**した
+  （プローブ表示: `__TAURI_INTERNALS__=object __TAURI__=undefined INVOKE_OK(LEAK!)`）。
+- **根本原因**: 「capability ファイルを置かない＝権限ゼロ」という当初設計の前提が**自前 app command には効かない**。
+  Tauri v2 は plugin/core command を ACL でゲートするが、`generate_handler!` 登録の自前 command は**既定で全 WebView
+  から呼べる**。custom protocol `pika-preview.localhost` はアプリ登録スキームのため「remote 扱いで自動拒否」も成立せず。
+  文書スクリプトは ammonia 除去で通常は未信頼 JS が走らないが、**多層防御の最後の砦が無い**（サニタイザ/CSP の
+  万一の隙・Mermaid/KaTeX 脆弱性・将来拡張で未信頼 JS が走れば即 read_file/save_file 等に到達）。
+- **修正**: `src-tauri/src/main.rs` の `invoke_handler` 前段に **IPC 境界ガード**を追加し、発信元 WebView の
+  ラベルが `preview` の invoke を command ディスパッチ前に一律 `reject` する（`preview::is_blocked_invoke_origin`
+  に純粋判定を分離・回帰テスト追加）。メイン窓（`main`）の invoke は従来どおり全通過。`__TAURI_INTERNALS__` の
+  注入自体は Tauri 2.11 が全 WebView へ無条件注入し公開オプションで無効化不可のため残すが、**invoke を境界で
+  止める**ことで command 実行を不能にする（本質的防御）。
+- **修正後の実機再確認**: 同プローブが `… invoke_rejected` を表示＝`read_file` 不能。**権限ゼロ実証 OK**。
+- **状態**: 修正済み（4ゲート緑＋実機プローブで before=INVOKE_OK→after=invoke_rejected を確認）。design doc の
+  「capability 不在＝権限ゼロ」記述は誤解を生むため、要件/設計改訂時に「自前 command は IPC 境界ガードで遮断」へ
+  追記すべき（canon 改訂は別タスク）。
