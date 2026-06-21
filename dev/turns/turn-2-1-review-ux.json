@@ -1,0 +1,40 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 2,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "フィードバック/エラー回復",
+      "message": "dirty（未保存）タブのファイルが外部変更されても、編集中のユーザーに何も伝わらない。main.ts の autoReloadCleanTabs() は activeTab.dirty なら早期 return し（データ保護として正しく自動リロードはしない＝OK）、しかし notify を一切出さない。結果、ツリー/タブに未読バッジは付くが、まさに編集している当人は『今いじっている文書がディスク上で書き換わった＝衝突が起きている』ことに気づけない。Nielsen #1(状態可視化)/#9(回復支援)に該当。衝突処理本実装は sprint 3 だが、せめて『このファイルは外部で変更されました（保存時に退避します）』程度の通知バーを出さないと、AI伴走ツールの中心シナリオ（人が直しつつAIも書く）でユーザーが衝突に無自覚なまま上書き保存へ進む。データ損失そのものは退避（sprint3）で防がれる想定のため critical ではない。",
+      "location": "src/main.ts:131-147"
+    },
+    {
+      "severity": "medium",
+      "area": "エラー文言",
+      "message": "frontend のエラー通知が backend の生エラー文字列を String(e) でそのまま埋め込む（保存に失敗しました: <生エラー>／読み込みに失敗: <生エラー>／フォルダを開けませんでした: <生エラー>）。backend(commands.rs)側は『保存に失敗: {e}』等の日本語接頭辞を付けるが、{e} は std::io::Error の Display（OS のエラーテキスト＝環境により英語・絶対パス露出）であり、ux.md チェックリストの『何が起きたか＋なぜ＋どうすればよいか（次の一手）』のうち“次の一手”が欠ける。例: 読み取り専用や権限不足で保存失敗しても、ユーザーが取るべき行動（属性解除/別名保存）が示されない。個人ローカルツールゆえスタックトレース露出はなく critical ではないが、回復導線として弱い。",
+      "location": "src/main.ts:57,93,110,145; src-tauri/src/commands.rs:37,59,76"
+    },
+    {
+      "severity": "low",
+      "area": "情報設計/状態可視化",
+      "message": "外部変更時のステータス文言が『<folder>（未読 N 件）』に置き換わると、open 時に出していた『<folder>（M 件）』（エントリ総数）が消える。右下固定ステータスは表示専用の最小情報のため許容範囲だが、未読 0 件に戻った際（全クリア時）の文言遷移が onExternalChange でしか更新されず、確認済み解除（clearFile）後に setStatus が呼ばれない経路（保存時 onSave 等）ではステータスの未読件数が古いまま残りうる。sprint7 の aria-label 化と合わせ、未読件数表示の単一更新点を整理すると良い。",
+      "location": "src/main.ts:97-113,124-128"
+    },
+    {
+      "severity": "low",
+      "area": "状態可視化（監視モード）",
+      "message": "ポーリング縮退・再同期中・オーバーフロー再同期中は watch-mode イベント→notify('info') で通知バーに出る（should『監視/ポーリング/F5 実行中はその旨と進捗を表示』を満たす）。一方で通知は 5 秒で自動消滅する暫定実装のため、『監視不能のためポーリングに切替』のような継続的な縮退状態（解消するまで続く）も 5 秒で消えてしまい、後からツールを見たユーザーは“今ポーリングモードか raw 監視か”を判別できない。継続状態はステータス右下の常設表示向き。通知バーキュー運用本実装は sprint7 のため low。",
+      "location": "src/main.ts:172; src/ui/notifications.ts:9-17; src-tauri/src/watcher.rs:157-162"
+    },
+    {
+      "severity": "low",
+      "area": "タスク完了導線（空状態/初回案内）",
+      "message": "フォルダを開くのがパス手入力欄（onOpenFolder）で、空入力時は『フォルダのパスを入力してください』と案内が出る（OK）。ただし起動直後の初期メッセージは『フォルダを開いてください』のみで、どこに何を入力すればよいか（このテキスト欄に絶対パスを入れる）への結びつきが弱い。ネイティブ選択ダイアログは capability 増を避けて後続スプリント送りという判断は妥当なので、本スプリントでは low。入力欄に placeholder で例示パスを置くだけで初回の迷いが減る。",
+      "location": "src/main.ts:76-95,173; src/index.html:16"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 2（watcher 外部変更反映）の UX 観点レビュー。中心タスク（フォルダを開く→外部変更を未読バッジで気づく→クリーンタブは自動リロードで反映→F5 で取りこぼし回収）の導線は完成しており、行き止まりや完了不能はない。最重要のデータ保護導線（dirty タブは自動リロードせず編集を守る・自己保存はハッシュ一致で未読化しない）は正しく実装されており、誤操作によるデータ喪失は観測されないため critical はゼロ。F5/ポーリング縮退/再同期はフィードバック（通知）が結線済み。改善余地は (1) dirty タブ外部変更時の無通知＝編集中ユーザーが衝突に無自覚（medium・衝突本実装は sprint3）、(2) エラー通知が生エラー文字列で“次の一手”を欠く（medium）、(3) 未読件数ステータスの更新点の散らばり・継続的縮退状態が 5 秒で消える・初回パス入力の手掛かり不足（いずれも low、通知/ステータス本実装は sprint7）。いずれも d_review をブロックしない high 以下。",
+  "reviewer_note": "use_playwright=false かつ ux 観点のため Playwright MCP は呼ばず、コード Read（main.ts/ipc.ts/tree.ts/tabs.ts/unread.ts/editor/index.ts/notifications.ts/status.ts・src-tauri commands.rs/main.rs/watcher.rs・index.html）と docs/acceptance-findings.md(T-005) の精読で評価した。系統C(実機)項目は acceptance-findings に『要実機』として適切に切り出されており UX 上の指摘対象外とした。"
+}

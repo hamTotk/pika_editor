@@ -24,6 +24,10 @@ pika-core = { path = "../crates/pika-core" }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 監視スレッド: OS の raw event 供給（notify）と内容ハッシュ（twox-hash）。
+# 合成ロジック（デバウンス/rename/自己保存抑制/オーバーフロー）は pika-core::watcher。
+notify = { workspace = true }
+twox-hash = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # WebView2 Runtime 不在検出（レジストリ読取）と最小ネイティブ MessageBox（design doc 18章）に使う。

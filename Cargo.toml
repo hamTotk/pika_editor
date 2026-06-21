@@ -21,6 +21,12 @@ warnings = "deny"
 # コア層が使う Tauri 非依存クレート（バージョンは workspace で一元管理）。
 # 本スプリントでは最小限のみ宣言し、各機能スプリントで追加する。
 thiserror = "1"
+# ファイル監視の raw event 供給（src-tauri の監視スレッドのみが使う。pika-core は依存しない）。
+# 自前合成層（デバウンス/rename/自己保存抑制/オーバーフロー）は pika-core::watcher が担う（design doc 4章）。
+notify = "6"
+# 内容ハッシュ（自己保存抑制・オーバーフロー再同期のプレスクリーン後の最終照合）。
+# 暗号用途ではなく重複/同一性判定用の高速ハッシュ（design doc 11章 twox-hash 方針と整合）。
+twox-hash = "1"
 
 [profile.release]
 # 軽量配布（design doc 1章「軽い」）。LTO とサイズ最適化でバイナリを絞る。

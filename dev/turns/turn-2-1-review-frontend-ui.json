@@ -1,0 +1,33 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 2,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "ビジュアル一貫性 / 状態表現",
+      "message": "tree.ts が li.dataset.unread に 'propagated'(淡 ±) / 'self' を設定し『視覚は CSS で淡色化』とコメントしているが、src/styles/app.css にも dist の生成 CSS(index-BZbG_Our.css) にも [data-unread] を対象とする規則が一切存在しない。結果としてフォルダ伝播マークと自身の未読マークが視覚的に区別されず、ui-design 5章が要求する『伝播は淡い ±』の見た目が未実装。記号(±/◆)自体はテキストで出るため情報は失われず色のみ依存でもない(=critical ではない)が、デザイントークンに沿った視覚レイヤが欠落している。propagated 用の淡色トークン(例 --text-3/--text-faint)を [data-unread=\"propagated\"] に当てる規則を追加すべき。",
+      "location": "src/ui/tree.ts:41-45 (data-unread 設定) / src/styles/app.css (規則欠落)"
+    },
+    {
+      "severity": "medium",
+      "area": "状態の網羅 (empty 状態)",
+      "message": "空フォルダを開いた場合(entries.length===0)、renderTree が replaceChildren() で空にするだけでツリーペインが完全な空白になり、『このフォルダは空です』等の empty 文言が無い。ステータス行に『(0 件)』は出るが、ツリー領域自体には何も提示されない。frontend-ui チェックリストの empty 状態要件に対する部分的欠落。最薄ループの段階としては許容範囲だが、Ideal/Empty/Loading/Partial/Error の5状態は sprint 7 must なので、ツリーの empty 文言はそこで確実に拾うこと。",
+      "location": "src/ui/tree.ts:16-21 / src/main.ts:84-94 (onOpenFolder)"
+    },
+    {
+      "severity": "low",
+      "area": "アクセシビリティ (キーボード操作・focus 可視化)",
+      "message": "ツリー項目は <li role=\"treeitem\"> に tabIndex=-1 を付けクリックリスナのみで開く構造で、キーボード(矢印/Enter)では到達・選択不能。また :focus-visible / focus outline の規則がスタイルに無く(textarea の outline:none のみ)、フォーカス可視化が無い。ただし tree.ts 冒頭と a11y/index.ts が『role=tree のキーボードナビ・F6 フォーカス循環・ARIA 全Web再構築は sprint 7(design doc 17章)で本実装』と明示しており、sprint 2 のスコープ外として意図的に段階化されている(タブとツールバーは <button>/<input> でキーボード到達可能なため、主要操作=フォルダを開く/保存/タブ切替の到達不能には至っていない)。critical 化はしないが、sprint 7 で treeitem のキーボード操作と focus-visible を必ず実装すること。",
+      "location": "src/ui/tree.ts:31,47-55 / src/styles/app.css (focus 規則欠落)"
+    },
+    {
+      "severity": "low",
+      "area": "外部変更の反映 (clean タブの描画)",
+      "message": "autoReloadCleanTabs は state.active(現在タブ)が modified の場合のみ CM6 へ内容反映し未読解除する。開いているが非アクティブなクリーンタブは未読バッジは付くが内容は再読込されず、アクティブ化時に readFile で取り直す挙動(activateTab 経由)に依存する。要件7.2『クリーンタブへの外部変更を反映』は満たす方向だが、非アクティブタブの反映タイミングが暗黙(切替時)である点はコメントで明示しておくと UI 挙動の予測性が上がる。衝突処理本実装は sprint 3 のため致命ではない。",
+      "location": "src/main.ts:131-147 (autoReloadCleanTabs)"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 2(watcher)のフロント観点。主要操作(フォルダを開く/保存/タブ切替)は <input>/<button> でキーボード到達可能、未読バッジ(±/◆/取消線)は UnreadStore を単一源にツリー/タブへ正しく写され、色のみに依存せずテキスト記号で弁別している(要件11.5 と整合)ため critical なし。指摘は (1)propagated/self の data-unread に対する CSS が src/dist とも欠落し伝播マークの『淡色化』が未実装(medium)、(2)空フォルダの empty 文言欠如(medium)、(3)treeitem のキーボード操作と focus-visible 欠如(ただし sprint 7 へ意図的に段階化済み・low)、(4)非アクティブ クリーンタブの反映タイミングが暗黙(low)。いずれもリリースを妨げず、(1)(2)は次ターン、(3)は ARIA 全Web再構築の sprint 7 で確実に回収すべき。"
+}

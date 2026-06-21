@@ -8,5 +8,6 @@
 pub mod cli;
 pub mod data_root;
 pub mod error;
+pub mod watcher;
 
 pub use error::{PikaError, Result};

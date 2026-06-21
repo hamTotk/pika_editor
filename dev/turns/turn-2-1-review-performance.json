@@ -1,0 +1,39 @@
+{
+  "reviewer": "performance",
+  "sprint_id": 2,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "ホットパスのファイル読込/ハッシュ",
+      "message": "自己保存抑制が raw notify イベントごとにファイル全体を読んでハッシュしている。handle_notify_event は Modified/Created の raw event を受けるたび hash_file(path)=std::fs::read 全読み + normalize_lf でのフルコピー + XxHash を実行し、その後で debouncer.feed する。デバウンス/合体層(debounce.rs)の存在意義は『エージェントのストリーム書き込み』を1件に畳んで確定後に1回だけ読むこと(debounce.rs 1-9行のコメント)なのに、自己保存判定がその前段で raw event 1件ごとにフル read+hash してしまい合体の利点を打ち消す。pika の主用途は AI エージェントの出力物の確認(CLAUDE.md)で、エージェントが数MBのファイルをストリーム書き込みすると1保存バーストあたり read+hash が N 回走る。これは監視スレッドの処理だが要件2.1『外部変更反映500ms』予算に直接乗り、acceptance must『監視スレッドは重い処理をせずイベントをキューに積むだけ(UI を200ms超ブロックしない)』(sprints.json sprint2 must5)とも構造的に衝突する。本来 disk_hash の算出は debouncer.drain_settled で確定した1パスに対して drain_and_emit 内で1回だけ行うべき(確定読みの後)。なお save_tokens.decide はハッシュ一致時のみ Suppress を返すので、ハッシュ算出を確定後段へ移しても抑制の正しさは保てる。",
+      "location": "src-tauri/src/watcher.rs:322-334"
+    },
+    {
+      "severity": "medium",
+      "area": "ロック保持中のI/O(全ツリー走査)",
+      "message": "resync_now(F5) が inner ミューテックスを保持したまま enumerate_fingerprints(&root)=walk による全再帰列挙 + ファイルごと metadata stat を実行している。inner.lock() で取得した guard を drop する前に enumerate_fingerprints と resync_against_baseline を回しているため(186-200行)、ツリー走査の全所要時間にわたって watcher ミューテックスが占有される。このミューテックスは save_file が呼ぶ register_self_save(168行)と監視イベントループの drain_and_emit のベースライン前進(364行)が共有するので、大きなフォルダで F5 を押すと走査完了まで保存処理と外部変更反映がブロックされる。do_overflow_resync(385-393行)は走査をロック外で行い比較段だけロックを取る正しいパターンになっているので、resync_now も同じく『root をロック下でクローン → 走査はロック外 → 再ロックして baseline と比較』へ揃えるべき。",
+      "location": "src-tauri/src/watcher.rs:186-205"
+    },
+    {
+      "severity": "medium",
+      "area": "オープン経路の同期ハッシュストーム",
+      "message": "enumerate_baseline(初回オープン)が監視ルート配下の全ファイルを同期で hash_file している。walk が返す fingerprint は content_hash=None なので、enumerate_baseline は各ファイルに対し hash_file(全 read + LF 正規化 + XxHash)を強制する(422-424行)。この enumerate_baseline は watch_root から呼ばれ(130行)、watch_root は open_workspace コマンド(commands.rs:52)から同期で呼ばれるため、フォルダを開く IPC コマンドスレッド上で『全ファイル読み込み+ハッシュ』が直列に走る。大きめのワークスペースを開くと開くまでの待ち時間が増え、設計原則『固まらない(200ms)』(spec.md 15行)に触れる。オーバーフロー再同期/ポーリングは mtime/サイズのプレスクリーンで疑わしいファイルだけハッシュする軽い経路になっている(overflow.rs 73-77行)のに、初回ベースラインだけが全件強制ハッシュという非対称がある。初回ベースラインを別スレッドへ逃がす、または初回は mtime/サイズだけ記録し内容ハッシュは遅延算出(差分/確認時に必要になった時)にできないか検討の余地がある。",
+      "location": "src-tauri/src/watcher.rs:418-435"
+    },
+    {
+      "severity": "low",
+      "area": "rename 正規化の計算量",
+      "message": "normalize_renames は From ごとに find_matching_to で全 To を線形走査する O(F×T) のネストループ(rename.rs 88-112行)。ただし対象は『時間窓(200ms)内に溜まった rename raw event』のみで、現実の同時 rename 件数は通常少数のため小さい n の n^2 で実害は見えない。要件7.4 の100件同時変更はオーバーフロー再同期(全再列挙)経路で扱われ rename 経路には乗らない。早すぎる最適化を避ける観点で現時点では指摘止まり(可読性優先で現状維持で良い)。将来 rename_buf がフレームをまたいで大量に溜まる設計変更が入ったら HashMap<FileId,_> / 窓のスライス化を検討。",
+      "location": "crates/pika-core/src/watcher/rename.rs:73-131"
+    },
+    {
+      "severity": "low",
+      "area": "フロント再描画(全DOM再構築)",
+      "message": "fs-changed を受けるたび onExternalChange が refreshTree() + refreshTabs() を呼び、どちらも replaceChildren() でツリー/タブ DOM を全破棄→全再構築する(main.ts:122-123, tree.ts:16-21, tabs.ts:21-22)。本スプリントのツリーは直下1段のみ描画で件数も限定的、タブも少数なので現状は実害なし。ただし emit は drain_and_emit/poll/overflow から繰り返し飛ぶため、将来ツリーが多段・大量エントリ・仮想化対象になった時点で差分パッチ(変更パスのノードだけ更新)へ移行する必要がある。現スプリントでは可読性優先で許容、スケール時の見直し項目として記録。",
+      "location": "src/main.ts:115-128"
+    }
+  ],
+  "has_critical": false,
+  "summary": "watcher 自前合成層のコアロジック(pika-core: debounce/overflow/rename/self_save)はアルゴリズム的に妥当で、特にオーバーフロー再同期は mtime/サイズのプレスクリーン後に疑わしいファイルだけハッシュする軽い設計になっており要件7.4の100件同時変更にも O(n) で耐える。critical(criteria のレイテンシ/スループット要件を構造的に満たせない実装)は無し。一方で src-tauri 側の監視配線に性能上の懸念が集中する。最大の問題(high)は自己保存抑制が raw notify イベントごとにファイル全体を read+hash しており、デバウンス合体の利点を前段で打ち消す点。エージェントの大ファイルストリーム書き込みで1保存あたり N 回のフル読込が監視スレッドの500ms予算に乗り、acceptance must『監視スレッドは重い処理をしない』とも構造的に衝突するため、ハッシュ算出を debouncer 確定後の1パス1回へ移すべき。medium は2件: F5(resync_now)がミューテックス保持中に全ツリー走査して保存/反映をブロックする点(overflow 経路の正しいパターンへ揃える)と、初回ベースラインが open コマンドスレッド上で全ファイルを同期ハッシュする非対称な負荷。low の rename O(F×T) と全DOM再構築は小規模ゆえ現状許容でスケール時の見直し項目。"
+}

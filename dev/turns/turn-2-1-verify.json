@@ -1,0 +1,17 @@
+[
+  {
+    "command": "cargo test",
+    "exit_code": 0,
+    "tail": "watcher::debounce(連続イベントが1件に合成/静穏期間内は確定しない/メタ安定まで中途内容で確定しない)・watcher::self_save(ハッシュ一致主条件・ワンショット・窓超過でも一致なら抑制・窓内でも相違なら外部変更)・watcher::rename(相互スワップを2本に正規化/往復a-b-aは変更なし/クロスディレクトリfileid/from単独=削除/to単独=新規/fileidなし時間窓ペア化)・watcher::overflow(百件同時新規を全件取りこぼさない/mtime動いても内容同一は未変更)。test result: ok. 42 passed; 0 failed (pika-core 42〔watcher 28〕+ pika-cli 4)。EXIT: 0"
+  },
+  {
+    "command": "cargo build",
+    "exit_code": 0,
+    "tail": "Finished `dev` profile in 0.27s。crates/* と src-tauri 全体が warnings=deny で exit 0・警告ゼロ。EXIT: 0"
+  },
+  {
+    "command": "npm run typecheck",
+    "exit_code": 0,
+    "tail": "> tsc -p tsconfig.app.json (出力なし=型エラーゼロ・strict)。EXIT: 0"
+  }
+]

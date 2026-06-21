@@ -1,0 +1,21 @@
+{
+  "reviewer": "security",
+  "sprint_id": 2,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "パス封じ込め(信頼境界)",
+      "message": "read_file/save_file は frontend から渡る path を canonicalize/ワークスペース封じ込めなしで std::fs::read_to_string / std::fs::write に渡す(sprint1 から carry)。本スプリント(sprint2 watcher)が新規導入したものではなく、spec 上もパス封じ込めは sprint4(custom protocol)/5(受信引数再検証)/6 へ委譲済み。frontend が唯一の呼び出し元で外部到達経路は無く、ローカル単一ユーザーツールのため実害は薄い。後続スプリントで core 検証層に集約される予定であることを確認した(critical 該当せず=injection/RCE/認可バイパスのいずれにも至らない)。",
+      "location": "src-tauri/src/commands.rs:58"
+    },
+    {
+      "severity": "low",
+      "area": "依存の既知脆弱性",
+      "message": "本スプリントで notify=6 と twox-hash=1 を依存追加(workspace でバージョン一元管理・SHA 相当の固定は Cargo.lock)。notify 6.x に本レビュー時点で既知の重大 CVE は確認できず、cargo audit の CVE ゲート組み込みは spec 上 sprint7 に明示委譲されている(WebSearch/外部照会は本レビューの規約外のため Cargo.toml/Cargo.lock のバージョン妥当性のみで判断)。twox-hash は重複排除/同一性判定の非暗号用途に限定使用されており(self_save/overflow のハッシュ照合)、暗号強度を要する箇所には使われていない=暗号強度の誤用ではない。high 以下。",
+      "location": "src-tauri/Cargo.toml:29"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint2(watcher 自前合成層: デバウンス/rename正規化/自己保存抑制/オーバーフロー再同期＋監視スレッド配線＋fs-changed emit)を security 観点でレビューした。critical はゼロ。(1)信頼境界=FS raw event の path/metadata が emit 経由で frontend DOM へ届く経路は、tree.ts/tabs.ts/notifications.ts すべて textContent・dataset への代入のみで innerHTML 等の HTML sink が無く DOM XSS 不成立。(2)新規 command f5_resync は generate_handler! 登録＋capabilities/main.json(windows=[main] のみ)で認可され、プレビュー別WebView の権限ゼロ隔離(capability ファイル不在)も維持されている=認可バイパス無し。(3)watcher 層に shell/exec・SQL・URL fetch(SSRF)・eval などの injection sink は無く、twox-hash は非暗号の同一性判定用途で正しく使われ機密のハードコードも無い。(4)自己保存抑制はハッシュ一致を必須条件・ワンショット消費で、改竄(tampering)に対し『内容相違は窓内でも外部変更扱い』と安全側=未読を握り潰さない。残課題は low2件(read_file/save_file のパス未封じ込め=sprint1 carry で後続委譲済み、依存追加の CVE ゲートは sprint7 委譲)で、いずれも ref-dev の critical 定義(機密ハードコード/未検証入力→injection・RCE/認可バイパス)に該当しない。"
+}

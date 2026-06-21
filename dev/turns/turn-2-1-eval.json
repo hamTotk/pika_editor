@@ -1,0 +1,100 @@
+{
+  "score": 92,
+  "plan_implementation": {
+    "overall": 92,
+    "notes": "sprint2 must 8件すべて充足。watcher 自前合成層(debounce 合体/確定読み・self_save ハッシュ一致主条件ワンショット・rename スワップ/往復/クロスdir/片側欠落・overflow 100件取りこぼし無し)は pika-core(Tauri/notify 非依存)に集約され cargo test 28件で観測可能。監視スレッド配線(spawn_event_loop)+emit(fs-changed)+ツリー/タブ未読バッジ更新、ポーリングフォールバック(spawn_polling_loop 5秒)+F5(f5_resync/keydown)+watch-mode 進捗表示、design doc 15章-2 系統C は acceptance-findings T-005 に notify 表面化判定・握り潰し時の windows crate 直叩き切替・100件決定論側 cargo test 済みとして記録。should: #1 外部変更反映(clean タブ単一トランザクション=1Undo境界=ExternalReload 注釈・非dirty・scroll/cursor 維持)=充足、#2 FSエッジ(symlink 循環検出 walk()/OneDrive プレースホルダ除外 is_placeholder=充足だが 読み取り専用属性誘導 のみ未実装で部分)、#3 監視/F5 進捗表示=充足。テスト改竄なし(緩和/skip/犠牲的期待値なし・must を観測可能挙動で検証)。"
+  },
+  "quality": {
+    "overall": 92,
+    "breakdown": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 84
+    },
+    "dimension_thresholds": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 80
+    }
+  },
+  "all_dimensions_passed": true,
+  "feedback": "sprint2(watcher 自前合成層)合格。d_verify=100(cargo test 42件 watcher28/cargo build warnings=deny exit0/npm run typecheck exit0 すべて exit0)、d_accept=100(must 8件全充足)、d_review=100(security/performance/data/frontend-ui/ux 全 reviewer has_critical=false)、d_quality=84。score=92(>=90)で passed=true。コアロジックはモジュール責務分離が明快で(pika-core=純粋ロジック・src-tauri=薄い配線)、テストは must を観測可能挙動で検証し改竄なし。次ターンで対応すべき high が2件: (1)[performance] 自己保存抑制が raw notify イベントごとにファイル全読+ハッシュ(watcher.rs:322-334)し、デバウンス合体の利点を前段で打ち消す→確定後の1パス1回へ移すべき(acceptance must 監視スレッドは重い処理をしない と構造的に衝突)。(2)[data] Debouncer の単発メタ付き Modified が永久に確定しないスタール経路(debounce.rs:148)で notify 駆動時に外部変更を取りこぼし自動回復しない=中心体験2の取りこぼし+ベースライン前進の監視/再同期経路の非対称で重複未読化。medium/low は feedback_structured 参照。",
+  "feedback_structured": {
+    "high": [
+      {
+        "area": "performance / ホットパスのファイル読込",
+        "message": "自己保存抑制が raw notify イベントごとに hash_file(全read+LF正規化+XxHash)を実行(src-tauri/src/watcher.rs:322-334)。デバウンス/合体層(debounce.rs)の確定後に1回だけ読む設計を前段で打ち消す。エージェントの大ファイルストリーム書き込みで1保存バーストあたり read+hash が N 回走り、要件2.1 外部変更反映500ms 予算・acceptance must 監視スレッドは重い処理をせずキューに積むだけ と構造的に衝突。disk_hash の算出を debouncer.drain_settled で確定した1パスに対し drain_and_emit 内で1回だけ行うよう移すべき(save_tokens.decide はハッシュ一致時のみ Suppress なので確定後段へ移しても抑制の正しさは保てる)。"
+      },
+      {
+        "area": "data / 状態整合(未読ロスト・ベースライン非対称)",
+        "message": "(1)Debouncer.is_settled が メタ観測済みだが prev_meta=None で常に false を返す(debounce.rs:148-152)。単発メタ付き Modified が永久に確定せず drain_settled から出力されない=外部変更が未読化されず emit(fs-changed)が飛ばない。watch_root は notify 駆動時 polling=false のため自動回復経路は F5/オーバーフローのみ=中心体験2の取りこぼし。prev_meta 欠如時も静穏期間超過なら last_meta 単独で確定させる救済が要る。(2)drain_and_emit が Modified/Created でベースラインを前進させず(watcher.rs:363-378)、register_self_save/Removed/Renamed では前進させる非対称により、外部 Modified を emit 後もベースラインが旧値のまま残り再同期(overflow/poll/F5)で同一ファイルが二重未読化されうる。監視経路と再同期経路でベースライン台帳の前進タイミングを一本化する設計判断が要る。"
+      }
+    ],
+    "medium": [
+      {
+        "area": "data / 保存トランザクションの非原子性",
+        "message": "save_file が register_self_save→std::fs::write の順(commands.rs:75-76)。register 内 fingerprint(path)採取時はディスクが旧内容で、旧mtime+旧size+新hash という不整合ベースラインエントリを作る(watcher.rs:172-181)。新旧サイズ一致かつ mtime 解像度が崩れた場合に未検証 hash でプレスクリーンが未変更と誤判定しうる。baseline.insert は write 完了後に(または fingerprint を write 後に)行うべき。"
+      },
+      {
+        "area": "data / rename FileId 不在時の誤ペア",
+        "message": "windows 安定版で file_id_of が常に None を返す(watcher.rs:562-571)ため rename 段2(パスベース・先頭一致)が主経路。同一200ms窓内に独立 rename(A->B と C->D)が並ぶと From=A が To=D と誤ペア化されうる(rename.rs:99-112・窓内一意性チェックなし)。誤ペアは別ファイルのベースライン/退避を取り違える(要件4.2)。FileId 不在かつ窓内に複数 From/To が並ぶ場合は一意でない限りペア化せず削除+新規へ安全側に倒すべき。"
+      },
+      {
+        "area": "data / 上書き rename の取りこぼし",
+        "message": "push_pair が常に overwrote_existing=false を返し上書き確定を上位層へ委ねる(rename.rs:150-163)が、sprint2 の drain_and_emit はベースライン引き継ぎ時に移動先 from の既存エントリを単に上書き挿入するだけ(watcher.rs:370-373)で、上書きされた移動先の既読/退避基準が黙って失われる。要件4.2 リネーム先に既存エントリ=上書き=内容変更 が未配線である旨を turn report に明記し sprint3 以降で確実に拾う TODO を残すべき。"
+      },
+      {
+        "area": "performance / ロック保持中のI/O",
+        "message": "resync_now(F5)が inner ミューテックス保持中に enumerate_fingerprints(全再帰列挙)+resync_against_baseline を実行(watcher.rs:186-205)。走査完了まで save_file の register_self_save と監視ループのベースライン前進がブロックされる。do_overflow_resync(385-393)の root をロック下でクローン→走査はロック外→再ロックで比較 の正しいパターンへ揃えるべき。"
+      },
+      {
+        "area": "performance / オープン経路の同期ハッシュストーム",
+        "message": "enumerate_baseline(初回オープン)が監視ルート配下の全ファイルを同期で hash_file する(watcher.rs:418-435)。watch_root→open_workspace コマンドスレッド上で 全read+ハッシュ が直列に走り、大きめワークスペースで開く待ち時間が増え設計原則 固まらない(200ms) に触れる。オーバーフロー/ポーリングは mtime/サイズプレスクリーンで疑わしいファイルだけハッシュする軽い経路なのに初回だけ全件強制ハッシュという非対称。別スレッド退避 or 遅延算出を検討。"
+      },
+      {
+        "area": "frontend-ui / ビジュアル一貫性",
+        "message": "tree.ts が li.dataset.unread に propagated(淡プラスマイナス)/self を設定するが src/styles/app.css にも生成 CSS にも data-unread 規則が無く、伝播マークの淡色化(ui-design 5章)が未実装(記号自体はテキストで出るため critical ではない)。propagated 用の淡色トークンを data-unread=propagated に当てる規則を追加すべき。"
+      },
+      {
+        "area": "frontend-ui / empty 状態",
+        "message": "空フォルダ(entries.length===0)で renderTree が replaceChildren()で空にするだけでツリー領域が完全な空白(このフォルダは空です等の文言なし)。Ideal/Empty/Loading/Partial/Error の5状態は sprint7 must なのでツリー empty 文言はそこで確実に拾うこと。"
+      },
+      {
+        "area": "ux / フィードバック(dirty タブ衝突無通知)",
+        "message": "dirty タブのファイルが外部変更されても autoReloadCleanTabs() が早期 return し(データ保護=OK)通知を一切出さない(main.ts:131-147)。編集中の当人が衝突に無自覚なまま上書き保存へ進みうる。せめて このファイルは外部で変更されました(保存時に退避します) 程度の通知バーを出すべき(衝突本実装は sprint3 だがデータ損失そのものは退避で防がれるため critical ではない)。"
+      },
+      {
+        "area": "ux / エラー文言",
+        "message": "frontend のエラー通知が backend の生エラー(String(e)=std::io::Error Display・環境により英語/絶対パス露出)をそのまま埋め込む(main.ts:57,93,110,145)。次の一手(属性解除/別名保存等)が欠ける。回復導線として弱い。"
+      }
+    ],
+    "low": [
+      {
+        "area": "data / 自己保存抑制の内容同一衝突",
+        "message": "SaveTokenStore.decide はハッシュ一致を必須・ワンショットで抑制(self_save.rs:97-116)。保存トークン登録後に外部プロセスが保存内容と同一内容へ書き換えた場合、その外部変更が自己保存として1回吸収され未読化されない。設計上の許容トレードオフだが 内容同一の外部変更は1回抑制されうる とコメント明記すると後続の差分/退避判定の前提が読み手に伝わる。"
+      },
+      {
+        "area": "performance / rename 計算量",
+        "message": "normalize_renames が From ごとに find_matching_to で全 To を線形走査する O(F x T)(rename.rs:73-131)。対象は200ms窓内の rename raw event のみで実害は見えない。将来 rename_buf がフレームをまたいで大量に溜まる設計変更が入ったら HashMap<FileId> /窓スライス化を検討。"
+      },
+      {
+        "area": "performance / フロント全DOM再構築",
+        "message": "fs-changed のたび onExternalChange が refreshTree()+refreshTabs()で replaceChildren()による全破棄→全再構築(main.ts:115-128)。現スプリントは直下1段・少数で実害なし。ツリー多段/大量/仮想化時に差分パッチへ移行が要る。"
+      },
+      {
+        "area": "security / パス封じ込め(sprint1 carry)",
+        "message": "read_file/save_file が path を canonicalize/封じ込めなしで std::fs に渡す(commands.rs:58)。sprint2 新規ではなく spec 上 sprint4/5/6 へ委譲済み、frontend が唯一の呼出元で外部到達経路なし=critical 該当せず。後続で core 検証層に集約予定。"
+      },
+      {
+        "area": "frontend-ui / treeitem キーボード操作",
+        "message": "li role=treeitem が tabIndex=-1+クリックのみで矢印/Enter 到達不能・focus-visible 規則なし。tree.ts/a11y で sprint7(design doc 17章)へ意図的に段階化済み(主要操作=フォルダ開く/保存/タブ切替は button/input でキーボード到達可能)。sprint7 で treeitem キーボード操作と focus-visible を必ず実装すること。"
+      },
+      {
+        "area": "ux / 監視モードの継続表示",
+        "message": "ポーリング縮退/再同期中/オーバーフロー再同期中が watch-mode→notify(info)で出る(should 充足)が通知が5秒で自動消滅する暫定実装のため、継続的な縮退状態(ポーリング切替)も5秒で消え後から判別できない。継続状態はステータス右下の常設表示向き(通知バーキュー運用本実装は sprint7)。"
+      }
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

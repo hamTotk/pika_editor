@@ -1,0 +1,45 @@
+{
+  "reviewer": "data",
+  "sprint_id": 2,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "状態整合（未読ロスト）",
+      "message": "Debouncer の確定読み判定にスタール経路がある。is_settled は『メタを観測したが prev_meta が無い』場合に常に false を返す（debounce.rs:148-152 の `_ => false`）。実環境で 1 つの Modified raw event だけが届きメタ付きで合体すると、prev_meta は永久に None のままになり、その変更は drain_settled から決して出力されない＝外部変更が未読化されず emit('fs-changed') が飛ばない。ベースライン（=ユーザーに見える既読状態）とディスク実体が乖離し、ユーザーは外部変更に気づけない。watch_root は notify 駆動時 polling=false にする（watcher.rs:145）ため、この乖離の回復経路は F5 手動再同期かオーバーフロー再同期のみで、通常のローカルドライブでは自動回復しない。中心体験②『外部変更を反映』の取りこぼしに直結する。単発メタ付き Modified を別途タイマー（静穏期間×n 超で安定とみなす等）で確定させるか、prev_meta 欠如時も静穏期間超過なら last_meta 単独で確定させる救済が要る。",
+      "location": "crates/pika-core/src/watcher/debounce.rs:148"
+    },
+    {
+      "severity": "high",
+      "area": "ベースライン前進の非対称（重複未読）",
+      "message": "drain_and_emit はベースライン台帳を Removed/Renamed でのみ前進させ、Modified/Created では据え置く（watcher.rs:363-378）。一方 register_self_save は自己保存時にベースラインを前進させる（watcher.rs:172-181）。この非対称により、外部 Modified を一度 emit した後もベースラインは旧 mtime/size/hash のまま残り、次の F5/ポーリング/オーバーフロー再同期で resync_against_baseline が同一ファイルを再び modified として検出・再 emit する（overflow.rs:90-99 はベースライン比較のみで『emit 済み』状態を持たない）。同じ外部変更が監視経路と再同期経路から二重に未読化されうる。resync_now のコメント（watcher.rs:194-196）は『ベースライン更新は確認済み操作=sprint3 に委ねる』としているが、それなら監視経路の drain_and_emit も Modified/Created でベースラインを前進させてはならず、整合させるべき（現状は Removed/Renamed だけ前進させており方針が割れている）。どちらの経路でも『未読として算定する集合』と『ベースライン台帳』の更新タイミングを一本化する設計判断が要る。",
+      "location": "src-tauri/src/watcher.rs:363"
+    },
+    {
+      "severity": "medium",
+      "area": "保存トランザクションの非原子性（fingerprint 不整合）",
+      "message": "save_file は register_self_save→std::fs::write の順で実行する（commands.rs:75-76）。register_self_save 内で fingerprint(path) を呼ぶ時点ではディスクはまだ旧内容（新規ファイルなら未作成）であり、そこで採取した旧 mtime/size を新 saved_hash と組にしてベースラインへ insert する（watcher.rs:172-181）。結果ベースラインエントリが {旧 mtime, 旧 size, 新 hash} という不整合な組になる。後続再同期のプレスクリーン（overflow.rs:90）が mtime/size 不一致を検知しハッシュで最終判定するため通常は救済されるが、新旧でサイズが一致し mtime 解像度が崩れた場合、検証されていない hash でプレスクリーンが『未変更』と誤判定しうる。register の baseline.insert は write 完了後に行う（または fingerprint を write 後に取る）べき。register（トークン）と baseline 前進を別タイミングに分けると、この保存『トランザクション』の途中状態が観測されうる点が data 観点の懸念。",
+      "location": "src-tauri/src/commands.rs:75"
+    },
+    {
+      "severity": "medium",
+      "area": "rename 状態引き継ぎ（FileId 不在時の誤ペア）",
+      "message": "rename 正規化の段2（rename.rs:99-112）は FileId が取れないとき、時間窓内で『最初に見つかった』未使用 To をパスベースでペア化する（find_matching_to は最初の一致を返す）。windows 安定版では file_id_of が常に None を返す（watcher.rs:562-571）ため、本番ではこの段2が主経路になる。同一 200ms 窓内に複数の独立 rename（A→B と C→D）が起きると、From=A が To=D と誤ペア化されうる（窓内一意性はチェックしておらず、複数候補でも先頭を取る）。rename ペアは未読・ベースライン・退避を旧→新へ引き継ぐ対象を決める（要件4.2）ため、誤ペアは別ファイルのベースライン/退避を取り違える＝状態の取り違えになる。FileId 不在かつ窓内に複数 From/To が並ぶ場合は一意でない限りペア化せず片側欠落（削除＋新規）へ安全側に倒す判定を入れるべき。drain_and_emit の Renamed ベースライン引き継ぎ（watcher.rs:370-373）も誤った from で entry を移す。",
+      "location": "crates/pika-core/src/watcher/rename.rs:99"
+    },
+    {
+      "severity": "medium",
+      "area": "上書き rename の取りこぼし（overwrote_existing 常に false）",
+      "message": "push_pair は常に overwrote_existing=false を返し、上書き rename（移動先に既存エントリがある）の確定を上位層 WorkspaceController へ委ねるとコメントしている（rename.rs:150-163）。しかし sprint2 の配線 drain_and_emit はベースライン引き継ぎ時に『移動先 from の既存エントリ』を単に上書き挿入するだけで（watcher.rs:370-373）、上書きされた移動先の既存ベースラインが消える＝そのファイルの既読/退避基準が黙って失われる。上書き rename を内容変更として表面化する経路が sprint2 時点で存在しない。要件4.2『リネーム先に既存エントリがある場合は上書き＝内容変更』が未配線である旨を turn report に明記し、委ねた上位層（sprint3 以降）で確実に拾う TODO を残すべき。",
+      "location": "crates/pika-core/src/watcher/rename.rs:150"
+    },
+    {
+      "severity": "low",
+      "area": "自己保存抑制の内容同一衝突",
+      "message": "SaveTokenStore.decide はハッシュ一致を必須・ワンショットで抑制する（self_save.rs:97-116）。保存トークン登録後、実際には外部プロセスが保存内容と同一内容に書き換えた場合（hash 衝突ではなく内容同一）、その外部変更が自己保存として 1 回吸収され未読化されない。設計上は許容トレードオフ（同一内容なら差分ゼロでユーザー影響は小さい）だが、ワンショット消費後に同内容の真の外部変更が続けて来ると 2 回目以降は通る一方、1 回目だけ取りこぼす。仕様として意図的ならコメントに『内容同一の外部変更は 1 回抑制されうる』と明記しておくと、後続の差分/退避判定の前提が読み手に伝わる。",
+      "location": "crates/pika-core/src/watcher/self_save.rs:97"
+    }
+  ],
+  "has_critical": false,
+  "summary": "本スプリントの『データ層』は SQL スキーマではなく、外部変更の未読/既読を決める in-memory ベースライン台帳（BTreeMap）＋自己保存トークン台帳が実質のデータストア。純粋ロジック（debounce/rename/overflow/self_save）は cargo test で厚く検証され決定論性は良好で、critical（データ破損・不可逆損失・回復不能な不整合）に該当する欠陥は無い。ただし状態整合の観点で high が 2 件: (1) Debouncer の単発メタ付き Modified が永久に確定しないスタール経路により外部変更が未読化されず、notify 駆動時は自動回復しない（中心体験②の取りこぼし）。(2) Modified/Created でベースラインを前進させない監視経路と、自己保存/Removed/Renamed で前進させる経路が割れており、再同期で同一変更が重複未読化されうる。加えて保存の register+baseline 前進が非原子で旧 mtime と新 hash の不整合エントリを作る点（medium）、windows 安定版で FileId が常に None のため rename の窓内複数ペアが誤ペア化しうる点（medium）、上書き rename がベースラインを黙って失う点（medium）がある。いずれも再同期や hash 照合で部分的に緩和されるため critical には至らないが、ベースライン台帳の前進タイミングを監視経路と再同期経路で一本化する設計整理を次ターンで行うべき。"
+}
