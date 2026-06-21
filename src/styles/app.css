@@ -142,6 +142,46 @@ body {
   display: none;
 }
 
+/* プレビュー占有領域（要件6.1・ui-design 8章）。エディタ/差分と同じグリッドセル（grid-row:2）を占有し、
+   トグルで hidden を切替える。実体は権限ゼロ別WebView でここはその配置先（design doc 6章）。 */
+#preview-host {
+  grid-row: 2;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-raised);
+  position: relative;
+}
+
+#preview-host[hidden] {
+  display: none;
+}
+
+/* プレビューの 5状態（ui-design 15章）。別WebView の実描画前/失敗時のプレースホルダを
+   data-state で出し分け、切替直後の無表示（壊れて見える）を防ぐ。 */
+#preview-host[data-state="loading"]::before {
+  content: "プレビューを準備しています…";
+  display: block;
+  padding: 12px 16px;
+  color: var(--text-3);
+  font-family: var(--font-ui);
+}
+
+#preview-host[data-state="error"]::before {
+  content: "プレビューを表示できませんでした（既定のアプリで開けます）";
+  display: block;
+  padding: 12px 16px;
+  color: var(--alert);
+  font-family: var(--font-ui);
+}
+
+#preview-host[data-state="empty"]::before {
+  content: "プレビューする内容がありません";
+  display: block;
+  padding: 12px 16px;
+  color: var(--text-3);
+  font-family: var(--font-ui);
+}
+
 #editor-host textarea {
   width: 100%;
   height: 100%;

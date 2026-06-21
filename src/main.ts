@@ -24,8 +24,7 @@ import { createEditor, type EditorHandle } from "./editor";
 import { renderDiff, type DiffHandle } from "./diff";
 import {
   buildPreview,
-  detectHtmlHazards,
-  previewModeForPath,
+  parsePreviewFailureMessage,
   resolveOccupancy,
   PreviewSerializer,
   type ViewMode,
@@ -53,6 +52,9 @@ const state = {
   viewMode: "source" as ViewMode,
   // 系統A/B 切替の直列化（最新世代の load のみ採用し前モード残留を防ぐ＝design doc 6章）。
   previewSerializer: new PreviewSerializer(),
+  // 退避＋ベースライン更新を伴う重い操作（確認/一括確認/巻き戻し/保存）の多重実行防止フラグ。
+  // 連打で confirm_all/rollback_file が並行発火しデータ操作が重複するのを抑止する（最上位原則）。
+  busy: false,
 };
 
 const saveBtn = () => document.getElementById("save-file") as HTMLButtonElement;
@@ -68,15 +70,48 @@ const rollbackBtn = () => document.getElementById("rollback-file") as HTMLButton
 function refreshTabs(): void {
   renderTabs(state.tabs, state.active, activateTab, state.unread);
   const hasActive = !!state.active;
-  saveBtn().disabled = !hasActive;
   togglePreviewBtn().disabled = !hasActive;
   toggleDiffBtn().disabled = !hasActive;
-  confirmBtn().disabled = !hasActive;
-  rollbackBtn().disabled = !hasActive;
+  // 退避＋ベースライン更新を伴う操作（保存/確認/巻き戻し）は in-flight 中（busy）は無効に保つ
+  // （内部 refreshTabs で再有効化して二重送信を許してしまわないため）。
+  saveBtn().disabled = !hasActive || state.busy;
+  confirmBtn().disabled = !hasActive || state.busy;
+  rollbackBtn().disabled = !hasActive || state.busy;
+  // すべて確認済みはタブ非依存（フォルダ全体の未読集合に対する操作）。退避を伴うため
+  // busy 中のみ無効化し、それ以外は常時有効（refreshTabs が in-flight 後の再有効化点）。
+  confirmAllBtn().disabled = state.busy;
 }
 
 function refreshTree(): void {
   renderTree(state.treeEntries, (entry) => void openFile(entry), state.unread);
+}
+
+/**
+ * 退避＋ベースライン更新を伴う操作を多重実行から守る（最上位原則「データを失わない」の UI 側ガード）。
+ *
+ * 確認/一括確認/巻き戻し/保存は非同期。処理中に同種ボタンを再度押せると confirm_all/rollback_file が
+ * 並行発火しデータ操作が重複しうる（eval high 指摘）。即座にフラグと該当ボタンを disabled にし、
+ * 完了後に必ず解除する。プレビュー系は PreviewSerializer 世代で stale 破棄するので対象外。
+ */
+async function withBusy(run: () => Promise<void>): Promise<void> {
+  if (state.busy) return; // in-flight 中の二重送信を破棄。
+  state.busy = true;
+  setMutatingButtonsDisabled(true);
+  try {
+    await run();
+  } finally {
+    state.busy = false;
+    // 完了後はタブ状態に応じて再有効化する（refreshTabs と同じ条件）。
+    refreshTabs();
+  }
+}
+
+/** 退避を伴う操作ボタンをまとめて in-flight 抑止する（withBusy 用）。 */
+function setMutatingButtonsDisabled(disabled: boolean): void {
+  saveBtn().disabled = disabled;
+  confirmBtn().disabled = disabled;
+  confirmAllBtn().disabled = disabled;
+  rollbackBtn().disabled = disabled;
 }
 
 async function activateTab(path: string): Promise<void> {
@@ -131,20 +166,24 @@ async function onOpenFolder(): Promise<void> {
 
 async function onSave(): Promise<void> {
   if (!state.active || !state.editor) return;
-  try {
-    await saveFile(state.active, state.editor.getContent());
-    const tab = state.tabs.find((t) => t.path === state.active);
-    if (tab) {
-      tab.dirty = false;
+  const path = state.active;
+  const content = state.editor.getContent();
+  await withBusy(async () => {
+    try {
+      await saveFile(path, content);
+      const tab = state.tabs.find((t) => t.path === path);
+      if (tab) {
+        tab.dirty = false;
+      }
+      // 自身の保存では未読を付けない（backend のハッシュ一致抑制と二重で担保）。
+      state.unread.clearFile(path);
+      refreshTabs();
+      refreshTree();
+      notify("保存しました");
+    } catch (e) {
+      notify(`保存に失敗しました: ${String(e)}`, "error");
     }
-    // 自身の保存では未読を付けない（backend のハッシュ一致抑制と二重で担保）。
-    state.unread.clearFile(state.active);
-    refreshTabs();
-    refreshTree();
-    notify("保存しました");
-  } catch (e) {
-    notify(`保存に失敗しました: ${String(e)}`, "error");
-  }
+  });
 }
 
 /** 差分トグル（Ctrl+\・要件8.2）。ON でアクティブタブの差分を読み取り専用表示する。 */
@@ -218,53 +257,67 @@ async function renderActivePreview(): Promise<void> {
   const content = state.editor ? state.editor.getContent() : await readFile(path);
   // 占有世代を発番（最新世代の load のみ採用＝前モード残留防止）。
   const gen = state.previewSerializer.next();
+  // 5状態の Loading（ui-design 15章）。準備中であることを可視化する（系統C で実描画と結線）。
+  setPreviewState("loading");
   try {
-    // 系統B（HTML）は危険検知して通知バー導線を出す（要件6.3）。
-    if (previewModeForPath(path) === "html") {
-      const hz = await detectHtmlHazards(content);
-      if (hz.hasScript) {
-        notify("JS を使うHTMLのため表示が崩れる可能性があります（既定のブラウザで開けます）", "warn");
-      }
-      if (hz.hasExternalRef) {
-        notify("この文書は外部リソースを参照しています（既定で遮断・許可は設定）", "info");
-      }
-    }
+    // content は 1 回だけ invoke で送る（hazards も同じ戻りに同梱＝IPC 二重転送回避）。
     const ready = await buildPreview(path, content);
     // 古い世代（素早い切替で後着）なら破棄して前モード残留を防ぐ（design doc 6章 直列化）。
     if (!state.previewSerializer.isCurrent(gen)) return;
+    // 系統B（HTML）の危険検知を通知バー導線に出す（要件6.3）。has_meta_refresh も伝える。
+    const hz = ready.hazards;
+    if (hz.has_script) {
+      notify("JS を使うHTMLのため表示が崩れる可能性があります（既定のブラウザで開けます）", "warn");
+    }
+    if (hz.has_external_ref) {
+      notify("この文書は外部リソースを参照しています（既定で遮断・許可は設定）", "info");
+    }
+    if (hz.has_meta_refresh) {
+      // meta refresh は ammonia で除去されるため自動遷移しない＝挙動が変わる旨を伝える（medium 指摘）。
+      notify("自動リダイレクト（meta refresh）は無効化して表示しています", "info");
+    }
     // 別WebView の src を ready.url へ設定するのは系統C（GUI 実機）の配線。ここでは占有領域へ
     // URL を data 属性で保持し、別WebView 生成/ナビゲートは backend 側で行う（HTML は非経由）。
     previewHost().setAttribute("data-preview-url", ready.url);
     previewHost().setAttribute("data-preview-flavor", ready.flavor);
+    setPreviewState("ready");
     setStatus(`プレビュー: ${path}`);
   } catch (e) {
+    setPreviewState("error");
     notify(`プレビューの準備に失敗: ${String(e)}`, "error");
   }
+}
+
+/** プレビューペインの 5状態（ui-design 15章）を data 属性で可視化する（CSS が状態別表示を担う）。 */
+function setPreviewState(s: "loading" | "ready" | "error" | "empty"): void {
+  previewHost().setAttribute("data-state", s);
 }
 
 /** 「確認済みにする」（要件8.3）。確定直前のディスク再照合は backend(pika-core)が担う。 */
 async function onConfirm(): Promise<void> {
   if (!state.active) return;
   const path = state.active;
-  // 差分を未表示なら先に計算（diff_snapshot を backend に作らせる＝確定直前の再照合基準）。
-  if (!state.diffOn) await renderActiveDiff();
-  try {
-    const confirmed = await confirmFile(path);
-    if (confirmed) {
-      // 未読解除・ツリー/タブのマーク解除（要件8.3）。
-      state.unread.clearFile(path);
-      refreshTree();
-      refreshTabs();
-      if (state.diffOn) await renderActiveDiff(); // 新ベースライン基準で再描画。
-      notify("確認済みにしました");
-    } else {
-      // 確定直前にディスクが変化＝中断して再差分（要件8.3）。
-      if (state.diffOn) await renderActiveDiff();
-      notify("確認中にファイルが変化したため再差分しました", "warn");
+  await withBusy(async () => {
+    // 差分を未表示なら先に計算（diff_snapshot を backend に作らせる＝確定直前の再照合基準）。
+    if (!state.diffOn) await renderActiveDiff();
+    try {
+      const confirmed = await confirmFile(path);
+      if (confirmed) {
+        // 未読解除・ツリー/タブのマーク解除（要件8.3）。
+        state.unread.clearFile(path);
+        refreshTree();
+        refreshTabs();
+        if (state.diffOn) await renderActiveDiff(); // 新ベースライン基準で再描画。
+        notify("確認済みにしました");
+      } else {
+        // 確定直前にディスクが変化＝中断して再差分（要件8.3）。
+        if (state.diffOn) await renderActiveDiff();
+        notify("確認中にファイルが変化したため再差分しました", "warn");
+      }
+    } catch (e) {
+      notify(`確認に失敗: ${String(e)}`, "error");
     }
-  } catch (e) {
-    notify(`確認に失敗: ${String(e)}`, "error");
-  }
+  });
 }
 
 /** 「すべて確認済みにする」（要件8.3）。実行開始時点の未読集合をフリーズして一括確定する。 */
@@ -275,55 +328,65 @@ async function onConfirmAll(): Promise<void> {
     notify("確認すべき未読はありません");
     return;
   }
-  try {
-    // 各対象の差分を先に提示して backend に diff_snapshot を作らせる（確定直前の再照合基準）。
-    // 内容を読んで diff を計算（タブで開いていなければディスク内容を渡す）。
-    for (const path of targets) {
-      const tab = state.tabs.find((t) => t.path === path);
-      const current =
-        tab && state.active === path && state.editor
-          ? state.editor.getContent()
-          : await readFile(path);
-      await computeFileDiff(path, current);
+  await withBusy(async () => {
+    try {
+      // 各対象の差分を先に提示して backend に diff_snapshot を作らせる（確定直前の再照合基準）。
+      // 内容を読んで diff を計算（タブで開いていなければディスク内容を渡す）。
+      for (const path of targets) {
+        const tab = state.tabs.find((t) => t.path === path);
+        const current =
+          tab && state.active === path && state.editor
+            ? state.editor.getContent()
+            : await readFile(path);
+        await computeFileDiff(path, current);
+      }
+      const result = await confirmAll(targets);
+      // 確認済みになったものを未読から外す（スキップ分は未読維持＝要件8.3）。
+      // backend がスキップしたファイルは差分時点と変わっているので再差分が必要。
+      if (result.skipped === 0) {
+        for (const path of targets) state.unread.clearFile(path);
+      }
+      // スキップがある場合は安全側で未確定を未読のまま残す（退避は取れているのでデータ喪失なし）。
+      refreshTree();
+      refreshTabs();
+      if (state.diffOn) await renderActiveDiff();
+      notify(
+        `すべて確認済み: ${result.updated} 件確定 / ${result.skipped} 件スキップ（更新前は一括退避済み）`,
+      );
+      // スキップは「処理中にファイルが変化した」ため。次の一手（F5 再同期→再確認）を明示する
+      // （回復導線＝ux 指摘の行き止まり感解消。スキップ分は未読のまま残る）。
+      if (result.skipped > 0) {
+        notify(
+          `${result.skipped} 件は確認中に変化したためスキップしました。F5 で再同期して再度ご確認ください`,
+          "warn",
+        );
+      }
+    } catch (e) {
+      notify(`一括確認に失敗: ${String(e)}`, "error");
     }
-    const result = await confirmAll(targets);
-    // 確認済みになったものを未読から外す（スキップ分は未読維持＝要件8.3）。
-    // backend がスキップしたファイルは差分時点と変わっているので再差分が必要。ここでは
-    // 確定件数のみ未読集合から外す簡易運用にし、スキップ分は次回の確認/F5 で再評価する。
-    if (result.skipped === 0) {
-      for (const path of targets) state.unread.clearFile(path);
-    } else {
-      // スキップがある場合は安全側で全再評価を促す（未確定を未読のまま残す）。
-      // 確定済みだけでも UI を進めるため、差分を取り直す F5 を案内する。
-    }
-    refreshTree();
-    refreshTabs();
-    if (state.diffOn) await renderActiveDiff();
-    notify(
-      `すべて確認済み: ${result.updated} 件確定 / ${result.skipped} 件スキップ（更新前は一括退避済み）`,
-    );
-  } catch (e) {
-    notify(`一括確認に失敗: ${String(e)}`, "error");
-  }
+  });
 }
 
 /** 「確認済み時点に戻す」（要件8.3/7.3）。退避不能はエラー通知（既定ブロック）。 */
 async function onRollback(): Promise<void> {
   if (!state.active || !state.editor) return;
   const path = state.active;
-  try {
-    // backend が現在内容を退避してからベースライン内容を返す（退避が最後の砦）。
-    const baselineContent = await rollbackFile(path);
-    // バッファをベースライン内容で上書き（外部リロード扱い＝単一トランザクション/非dirty）。
-    state.editor.reloadExternal(baselineContent);
-    state.unread.clearFile(path);
-    refreshTree();
-    refreshTabs();
-    if (state.diffOn) await renderActiveDiff();
-    notify("確認済み時点に戻しました（戻す前の内容は退避済み）");
-  } catch (e) {
-    notify(`巻き戻しできません: ${String(e)}`, "error");
-  }
+  const editor = state.editor;
+  await withBusy(async () => {
+    try {
+      // backend が現在内容を退避してからベースライン内容を返す（退避が最後の砦）。
+      const baselineContent = await rollbackFile(path);
+      // バッファをベースライン内容で上書き（外部リロード扱い＝単一トランザクション/非dirty）。
+      editor.reloadExternal(baselineContent);
+      state.unread.clearFile(path);
+      refreshTree();
+      refreshTabs();
+      if (state.diffOn) await renderActiveDiff();
+      notify("確認済み時点に戻しました（戻す前の内容は退避済み）");
+    } catch (e) {
+      notify(`巻き戻しできません: ${String(e)}`, "error");
+    }
+  });
 }
 
 /** 外部変更（fs-changed）を未読ストアへ適用し、ツリー/タブを再描画する（要件4.2/7.2）。 */
@@ -405,6 +468,16 @@ async function main(): Promise<void> {
       e.preventDefault();
       if (e.shiftKey) state.diff.jumpPrev();
       else state.diff.jumpNext();
+    }
+  });
+  // 信頼 JS（別WebView 内の Mermaid/KaTeX/highlight）描画失敗件数の受信導線（要件6.2）。
+  // 別WebView は独立 WebView のため window.parent では本体に届かず、本番（系統C 結線）では
+  // Tauri event/IPC 経路へ置換する（T-007/TE6）。ここでは受信→通知バー集計の片側配線を解消し、
+  // window message（将来 iframe 経路・テスト）でも parsePreviewFailureMessage で受理する。
+  window.addEventListener("message", (e: MessageEvent) => {
+    const failures = parsePreviewFailureMessage(e.data);
+    if (failures !== null) {
+      notify(`プレビューの一部ブロックを描画できませんでした（${failures} 件・元コード表示）`, "warn");
     }
   });
   // 外部変更/監視モードの購読（backend の emit を受ける）。

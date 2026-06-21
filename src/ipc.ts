@@ -117,6 +117,16 @@ export function rollbackFile(path: string): Promise<string> {
 /** プレビュー系統（src-tauri preview::PreviewMode と対応・要件6.1/6.3）。 */
 export type PreviewMode = "markdown" | "html";
 
+/** 系統B（HTML）プレビューの危険検知結果（src-tauri preview::HtmlHazards と対応・要件6.3）。 */
+export interface HtmlHazards {
+  /** `<script>` を含む（JS は無効化済みだが「表示が崩れる」通知）。 */
+  has_script: boolean;
+  /** 外部 http(s) リソース参照を含む（既定遮断・オプトイン許可導線）。 */
+  has_external_ref: boolean;
+  /** `<meta http-equiv="refresh">` を含む（除去済みだが通知）。 */
+  has_meta_refresh: boolean;
+}
+
 /** prepare_preview の戻り（src-tauri preview::PreparedPreview と対応・design doc 6章）。 */
 export interface PreparedPreview {
   /** 別WebView へナビゲートする URL（pika-preview:// 経由）。HTML 本体は乗らない。 */
@@ -127,6 +137,8 @@ export interface PreparedPreview {
   nonce: string;
   /** 系統（"markdown" | "html"）。 */
   flavor: string;
+  /** 系統B の危険検知（要件6.3・通知バー導線）。content の二重 invoke を避けここに同梱。系統A は全 false。 */
+  hazards: HtmlHazards;
 }
 
 /**
@@ -145,21 +157,6 @@ export function preparePreview(
     content,
     allowExternal: allowExternal ?? null,
   });
-}
-
-/** 系統B（HTML）プレビューの危険検知結果（src-tauri preview::HtmlHazards と対応・要件6.3）。 */
-export interface HtmlHazards {
-  /** `<script>` を含む（JS は無効化済みだが「表示が崩れる」通知）。 */
-  has_script: boolean;
-  /** 外部 http(s) リソース参照を含む（既定遮断・オプトイン許可導線）。 */
-  has_external_ref: boolean;
-  /** `<meta http-equiv="refresh">` を含む（除去済みだが通知）。 */
-  has_meta_refresh: boolean;
-}
-
-/** HTML プレビューの危険（script/外部参照/meta refresh）を検知する（要件6.3）。 */
-export function scanHtmlHazards(content: string): Promise<HtmlHazards> {
-  return invoke<HtmlHazards>("scan_html_hazards", { content });
 }
 
 /** 外部変更（合成結果）の購読。返り値の関数で購読解除する。 */

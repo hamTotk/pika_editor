@@ -796,11 +796,33 @@
   - protocol: `register_uri_scheme_protocol("pika-preview", handle_preview_request)`（src-tauri/src/preview.rs）。
     `/doc/<gen>` がサニタイズ済み HTML を CSP ヘッダ付きで配信・`/local/<gen>/<相対>` が封じ込め検証してローカル
     参照を配信。**prepare_preview は URL のみ返し HTML 本体を invoke に乗せない**（IPC 予算＋オリジン分離）。
-  - command: `prepare_preview`（系統 A/B 分岐＋ pika-core::render 委譲）・`scan_html_hazards`（要件6.3 危険検知）。
+  - command: `prepare_preview`（系統 A/B 分岐＋ pika-core::render 委譲・**系統B の危険検知 hazards を戻りに同梱**＝
+    content の二重 invoke を避ける）。要件6.3 の危険検知は prepare_preview の `hazards` フィールドで返す
+    （iteration2 で独立 `scan_html_hazards` command を廃し 1 invoke に統合）。
   - frontend: `src/preview/index.ts`（3モード×差分トグル直交占有・系統A/B 切替の世代直列化 PreviewSerializer・
     信頼 JS 注入スクリプト生成 buildTrustedJsInit〔Mermaid securityLevel:strict／KaTeX trust:false strict:true
-    maxExpand／per-block 描画＋約1秒タイムアウト＋失敗件数集計〕）。`src/main.ts`（プレビュー切替ボタン・占有適用）。
+    maxExpand／per-block 描画＋約1秒タイムアウト＋失敗件数集計〕・**失敗件数メッセージの受信検証
+    parsePreviewFailureMessage**）。`src/main.ts`（プレビュー切替ボタン・占有適用・**失敗件数 message リスナ→通知バー**・
+    プレビュー 5状態 data-state）。
   - capability: `capabilities/main.json` は `windows=["main"]` のみ＝**preview ラベルは未宣言で権限ゼロ**（design doc 6章）。
+- **iteration2 の修正（eval high/medium 反映）**:
+  - **暴走ガード結線（high・要件2.2）**: `preview.rs::local_resource_response` が配信前に `guard_local_resource`
+    →`pika-core::render::guard::check_image_bytes`/`check_svg_bytes` を呼び、巨大画像（ヘッダ寸法 6000万px 超）・
+    SVG（要素数 5万超 or 推定 8000万px 超）を **413 で配信拒否**する（WebView 任せにしない＝固まらない）。
+    画像ヘッダ寸法読取（PNG/GIF/JPEG/BMP/WebP）・SVG 要素数計数は pika-core（cargo test 済み）。配線テスト
+    `ローカル配信の暴走ガードが結線されている`（src-tauri）で観測。frontend は 413 をプレースホルダ/通知導線に。
+  - **CSP ディレクティブインジェクション対策（high・要件6.2）**: `pika-core::render::csp::validate_allow_hosts`
+    （https:// のみ・ホスト名/ポート文字種限定・空白/`;`/クォート/`*`/改行/パス/クエリ拒否）を新設。
+    `prepare_markdown_preview`/`prepare_html_preview` が **CSP 組立前に検証し、1 つでも不正なら外部許可を全破棄
+    （fail-closed＝既定遮断へ倒す）**。`build_csp` も防御的に不正ホストを連結しない（多層）。cargo test で
+    `https://evil.com; script-src *` 等が CSP に漏れないことを観測。
+  - **失敗件数の受信導線（high・要件6.2）**: メインWebView に `window.message` リスナを追加し
+    `parsePreviewFailureMessage` で型検証して通知バーへ集計。**別WebView は独立 WebView のため window.parent では
+    本体に届かず、本番（系統C 結線）では Tauri event/IPC 経路へ置換が必要**（TE6 で追跡）。
+  - **退避操作の二重送信防止（high）**: 保存/確認/一括確認/巻き戻しを `withBusy` で in-flight 抑止
+    （即時 disabled＋busy フラグ）。連打で confirm_all/rollback_file が並行発火しデータ操作が重複するのを防ぐ。
+  - **medium**: has_meta_refresh 通知導線追加・プレビュー 5状態（loading/ready/error）の data-state＋占有 CSS・
+    すべて確認済みスキップ時の F5 再同期案内・HTML hazards の IPC 二重転送解消（prepare_preview 戻りに同梱）。
 - **本スプリントの限定（系統C で確認）**:
   - 別WebView の実生成/ナビゲート（`ready.url` を別WebView src へ設定）と権限ゼロ隔離の実証（TE2・必達）は
     **Windows 実機 Release**（design doc 15章-3）。本スプリントは protocol/コマンド/サニタイズ/CSP/封じ込めの
@@ -808,6 +830,6 @@
     実アタッチは系統C で結線する。
   - 双方向スクロール同期（should・要件6.1）・プレビュー内検索（should・要件5.4）は注入土台（sourcepos data-line・
     nonce 注入経路）まで。実描画/実検索は系統C（design doc 15章-7）。
-- **状態**: 決定論ゲート（cargo test 132 件・うち render 40 件＋preview 配線 3 件）PASS・cargo build／
-  npm typecheck／vite build 成立。**別WebView の権限ゼロ到達不能（TE2 必達）・系統A/B 実描画・信頼 JS 注入の
-  実挙動・CSP の実効・暴走ガード実挙動は未実施（要 Windows 実機 Release）**。
+- **状態（iteration2）**: 決定論ゲート（cargo test pika-core 149 件・うち render 57 件〔csp/guard 強化〕＋preview 配線
+  5 件）PASS・cargo build／npm typecheck／vite build 成立。**別WebView の権限ゼロ到達不能（TE2 必達）・系統A/B 実描画・
+  信頼 JS 注入の実挙動・CSP の実効・暴走ガード実挙動・失敗件数の Tauri event 経路は未実施（要 Windows 実機 Release）**。

@@ -11,7 +11,7 @@
 //   ※ 実際の注入先は別WebView。本モジュールは「注入する信頼スクリプト文字列の生成」を担い、
 //      各ブロック個別描画・構文エラー/タイムアウト時の元コード復帰・失敗件数集計を実装する。
 
-import { preparePreview, scanHtmlHazards, type PreviewMode } from "../ipc";
+import { preparePreview, type HtmlHazards, type PreviewMode } from "../ipc";
 
 /** 表示モード（要件6.1）。差分トグルは別の直交フラグ（diffOn）。 */
 export type ViewMode = "source" | "split" | "preview";
@@ -70,6 +70,8 @@ export interface PreviewReady {
   nonce: string;
   /** 系統（"markdown" | "html"）。 */
   flavor: string;
+  /** 系統B の危険検知（要件6.3・通知バー導線）。系統A は全 false。 */
+  hazards: HtmlHazards;
 }
 
 /**
@@ -77,6 +79,7 @@ export interface PreviewReady {
  *
  * `content` は編集バッファ or ディスク内容。backend はこれを comrak→ammonia でサニタイズし
  * custom protocol のキャッシュに置く。**HTML 本体は戻り値に乗らない**（URL のみ）。
+ * 系統B の危険検知（要件6.3）も同じ 1 回の invoke の戻り（hazards）で受け取る（IPC 二重転送回避）。
  */
 export async function buildPreview(
   path: string,
@@ -90,24 +93,30 @@ export async function buildPreview(
     generation: prepared.generation,
     nonce: prepared.nonce,
     flavor: prepared.flavor,
+    hazards: prepared.hazards,
   };
 }
 
 /**
- * 系統B（HTML）プレビューの危険検知（要件6.3）。
- * `<script>` や外部参照・`<meta refresh>` を検知したら通知バーで「既定のブラウザで開く」へ誘導する。
+ * 信頼 JS 失敗件数メッセージ（別WebView → メインWebView）の型ガード（要件6.2・通知バー集計）。
+ *
+ * 別WebView 内の信頼 JS（[`buildTrustedJsInit`]）は描画失敗件数を `postMessage` で送る。
+ * メイン側はこの形のメッセージのみ受理し通知バーへ集計する（受信導線＝high 指摘の片側配線解消）。
+ * **別WebView は iframe でなく独立 WebView のため、本番（系統C 結線）では Tauri event/IPC 経路へ
+ * 置換が必要**（window.parent は本体に届かない）。本関数は受信側の純粋な検証ロジックを提供する。
  */
-export async function detectHtmlHazards(content: string): Promise<{
-  hasScript: boolean;
-  hasExternalRef: boolean;
-  hasMetaRefresh: boolean;
-}> {
-  const h = await scanHtmlHazards(content);
-  return {
-    hasScript: h.has_script,
-    hasExternalRef: h.has_external_ref,
-    hasMetaRefresh: h.has_meta_refresh,
-  };
+export function parsePreviewFailureMessage(data: unknown): number | null {
+  if (
+    typeof data === "object" &&
+    data !== null &&
+    (data as { type?: unknown }).type === "pika-preview-failures"
+  ) {
+    const count = (data as { count?: unknown }).count;
+    if (typeof count === "number" && Number.isFinite(count) && count > 0) {
+      return Math.floor(count);
+    }
+  }
+  return null;
 }
 
 /**
