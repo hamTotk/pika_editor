@@ -45,8 +45,12 @@
       </div>
       <!-- 通知バー（非モーダル・role=status は a11y スプリントで付与）。 -->
       <div id="notifications" role="status" aria-live="polite"></div>
-      <!-- ステータスは右下固定・表示専用（ui-design §9）。pointer-events:none は CSS 側。 -->
+      <!-- ステータスは右下固定・表示専用（ui-design §9）。pointer-events:none は CSS 側。
+           表示専用ゆえ aria-live=off。読み上げが要る差分あり件数は下の sr-live 領域へ announce する。 -->
       <div id="status" aria-live="off"></div>
+      <!-- スクリーンリーダー専用のライブ領域（視覚的に隠す）。差分あり件数など、表示専用ステータスでは
+           読み上げ到達が弱い情報を polite で announce する（要件11.5・eval medium: aria-label 依存の補強）。 -->
+      <div id="sr-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
     </div>
     <script type="module" src="./main.ts"></script>
   </body>

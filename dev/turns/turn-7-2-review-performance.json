@@ -1,0 +1,28 @@
+{
+  "reviewer": "performance",
+  "sprint_id": 7,
+  "iteration": 2,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "アルゴリズム計算量",
+      "message": "tree.ts の roving tabindex 実装で、treeitem へのキー操作/フォーカスのたびに treeItems() が querySelectorAll('[role=treeitem]') で全 treeitem を再列挙し、selectItem() が全 treeitem を走査して tabIndex/aria-selected をリセットする（O(n)・n=ツリー直下エントリ数）。さらに onItemKeydown は items.indexOf(li) で線形探索する。ただしこれらは『1キー入力＝1回』のユーザー操作駆動で、要件2.1 のレイテンシ予算（起動0.5秒/プレビュー2.0秒/外部変更反映500ms）が掛かるホットパスではなく、ツリーは現状『1段表示』のフラット構造（tree.ts 冒頭コメント・子の遅延展開未実装）で n も穏当。WAI-ARIA roving tabindex の素直な実装であり、可読性を優先して最適化は YAGNI。事実記録のみで対応不要。",
+      "location": "src/ui/tree.ts:98-114"
+    },
+    {
+      "severity": "low",
+      "area": "メモリ/IO",
+      "message": "diagnostic.rs に全書込を直列化する static Mutex<()> を追加し、log_with_min 全体（resolve→create_dir_all→metadata→rotation→OpenOptions::open→write_all）をロック区間にした。これは並行書込の torn write/世代ずれ防止という正しさ目的の変更で、診断ログは warn 以上のみ・低頻度・副次データ（失敗してもアプリを止めない＝固まらない優先）であり、ロック競合がレイテンシ予算に乗る経路ではない。トレードオフは妥当で対応不要。将来 watcher 等が info を高頻度ログ化したらバッファリング/非同期化を検討する余地のみメモ。",
+      "location": "src-tauri/src/diagnostic.rs:24-94"
+    },
+    {
+      "severity": "low",
+      "area": "フロントエンド",
+      "message": "main.ts の onExternalChange（要件7.2 外部変更反映=500ms 予算経路）が fs-changed バッチごとに refreshTree()+refreshTabs() を呼び、いずれも replaceChildren() で DOM を全再構築する（O(n)・n=ツリー直下エントリ/タブ数）。フラット 1 段ツリーかつ通常のバッチ頻度では問題なく、announce() 等も O(1)。差分パッチ（増分 DOM 更新）は将来 n が大きくなった場合の最適化余地だが、現状の要件規模（代表ワークロード1000ファイル/外部変更1000回は累積であり1バッチではない）では構造的破綻にならず、可読性優先で現状実装は妥当。性能ゲート（外部変更反映500ms・18時間ソーク）は系統C 実測で確認する設計と整合。対応不要。",
+      "location": "src/main.ts:665-680"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 7 iteration 2 の変更（a11y キーボード操作の本実装＝tree/tabs の roving tabindex・F6 フォーカス循環、ショートカット写し、diagnostic への直列化ロック追加、通知バーキュー）に performance 観点の critical・high は無い。iteration 2 の主変更はユーザー操作駆動（1キー入力=1回）の a11y 配線と、診断ログの正しさ目的の Mutex 追加であり、いずれも要件2.1 のレイテンシ/スループット予算が掛かるホットパスではない。tree/tabs の render・selectItem・notify_queue の resolve は O(n)〜O(n log n) だが n は小さく（フラット1段ツリー・最大表示3本の通知）、UnreadStore は Map ベースで apply/folderHasUnread が O(depth)/O(1)、huge.rs の行長ガードは前 iter 同様 early-return で巨大単一行も全走査しない。criteria を構造的に満たせない実装は見当たらず、性能の実測検証は設計どおり系統C へ寄せられている。指摘は low 3件（いずれも将来余地のメモ・対応不要）。",
+  "_note_use_playwright": "use_playwright=false かつ本観点は performance のため Playwright MCP は使用していない（規約どおり）。frontend 実描画・実レイテンシは系統C 実測領域でありコード Read で静的評価した。"
+}

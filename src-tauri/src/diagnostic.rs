@@ -12,7 +12,19 @@ use pika_core::diagnostic::{
 };
 use std::io::Write;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// 診断ログの書込を直列化する専用ロック（eval medium: 並行書込で世代ずれ/行取りこぼし/5MB超過 append を防ぐ）。
+///
+/// watcher/command/search の複数スレッドが同時に `record()` を呼ぶと、ローテーション判定
+/// （metadata→delete→rename）と append が交錯しうる。`log_with_min` 全体をこのロックで囲み、
+/// 「サイズ確認→ローテーション→追記」を 1 つの不可分区間にする。診断は副次データなので、
+/// 万一ロックが毒された（panic 跨ぎ）場合でも into_inner で続行しアプリを止めない（固まらない）。
+fn log_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// データルートを解決してから1行ログする（command 層からの簡便呼び出し）。
 ///
@@ -47,6 +59,9 @@ pub fn log_with_min(data_root: &Path, line: LogLine, min_level: LogLevel) {
     if !diagnostic::should_log(line.level, min_level) {
         return;
     }
+    // 「サイズ確認→ローテーション→追記」を 1 つの不可分区間にする（並行書込の交錯防止・eval medium）。
+    // ロックが毒されていても診断のためにアプリを止めない（into_inner で続行）。
+    let _guard = log_lock().lock().unwrap_or_else(|e| e.into_inner());
     // ログフォルダを用意（無ければ作る・ワークスペースは汚さずデータルート配下のみ＝要件13）。
     let dir = log_dir(data_root);
     if std::fs::create_dir_all(&dir).is_err() {

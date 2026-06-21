@@ -1,0 +1,36 @@
+{
+  "score": 94,
+  "plan_implementation": {
+    "overall": 94,
+    "notes": "sprint 7 iteration 2 は前ターン(turn-7-1・score 84・d_accept=0)のブロッカーを正面から解消した。must『ARIA 全Web再構築(design doc 17章)』が要求するキーボード操作性が iteration 1 で破れていた(tree.ts treeitem=tabIndex-1＋click のみで、キーボードのみでは『開く→プレビュー→差分→確認済み』の起点に到達不能=req 11.4/11.5 違反)が、本 iteration で tree.ts に roving tabindex(常に1つだけ tabIndex=0)・↑/↓/Home/End 移動・Enter/Space で openFile 発火・ディレクトリ aria-expanded・focus-visible を本実装し起点到達を担保した。should『主要ショートカット表』も pika-core::shortcuts::resolve の1:1写し shortcuts.ts を新設し main.ts の keydown を resolveShortcut→dispatchAction の決定論ディスパッチへ寄せ、dead code 化していた Ctrl+O/S/W/F/H/Ctrl+Enter 系をキーボードから発火させた(Rust resolve と TS resolveShortcut のキー/修飾/フォーカス分岐は逐一照合し完全一致を確認)。onSave を save_document へ寄せ Shift_JIS 等の暗黙 UTF-8 化を防ぎ表現不能文字で保存中断、switchFolder を三択化、diagnostic.rs を OnceLock<Mutex> で直列化、と前ターン medium も是正。他 must(通知バーキュー/5状態/非テキスト縮退/診断ログ/docs 整備)は iteration 1 で充足済み・本 iteration で非回帰(pika-core 317 テスト不変)。未充足の must は無し。残課題は high2件(外部変更再描画でツリー roving フォーカスが先頭へ巻き戻る操作一貫性・Ctrl+F/H が実在しない『表示メニュー』へ誘導する行き止まり)で、いずれもリリースをブロックせず次対応で解消可能。cargo audit は本環境に cargo-audit 未導入で未実行=環境制約(verify 配列は cargo test/build のみ・テスト緩和ではない)、T-011 にリリース前 CVE 照合として記録済み(low)。"
+  },
+  "quality": {
+    "overall": 94,
+    "breakdown": {"d_verify": 100, "d_accept": 100, "d_quality": 86, "d_review": 100},
+    "dimension_thresholds": {"d_verify": 100, "d_accept": 100, "d_quality": 80, "d_review": 100}
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[HIGH] frontend-ui: 外部変更(=中心体験の再描画)のたびに renderTree→initRovingTabindex が常に DOM 先頭 treeitem を tabIndex=0 にするため、ユーザーが矢印キーで n 行目を選択中に fs-changed が来ると roving の tabIndex=0 と aria-selected が先頭へ巻き戻り、Tab 再入で直前操作行に戻れない(WAI-ARIA tree『最後にフォーカスのあった行を保つ』が再描画で壊れる)。キーボード到達性自体は ↑↓ 再操作で確保され critical ではないが、外部変更が高頻度な本アプリでは操作一貫性を明確に損なう。renderTree に現在選択 path を渡して再描画後に復元すること。[HIGH] ux: Ctrl+F/Ctrl+H が dispatchAction で『検索バーは表示メニューから利用できます』と通知するだけだが、その表示メニュー/検索バー UI 自体がフロントに存在せず、案内に従っても検索へ到達できない行き止まり(Nielsen #9 違反)。文言を『検索バーは未実装(今後対応)』等の正直な表現にするか、最低限フォーカスをエディタへ戻す現実的な次の一手へ変えること。[MEDIUM] frontend-ui: tab↔tabpanel の ARIA 関連付け欠如(role=tab に aria-controls 無し・editor/diff/preview-host に role=tabpanel/aria-labelledby 無し)。[MEDIUM] frontend-ui: role=status/aria-live 領域が3つ(#notifications・#sr-live・#status)並存し polite 読み上げが競合・重複しうる。[MEDIUM] frontend-ui: 展開未実装フォルダに aria-expanded=false を一律付与し『展開可能』と誤読され実挙動と乖離。[MEDIUM] ux: 汎用 catch の通知が String(e) で内部エラー文字列をそのまま露出し『どうすればよいか』が欠ける。[MEDIUM] ux: 後方互換 notify のレベル→種別固定写像(info→file-removed/error→conflict)で一過性 error が最高優先 conflict 扱いになり自動消滅しない・優先度を奪う。[MEDIUM] frontend-ui: 削除済み取消線が li.style.textDecoration インライン適用でデザイントークン/forced-colors の単一源から外れる。[LOW] cargo audit 本環境未導入で未実行(環境制約・T-011 にリリース前 CVE 照合として記録)・snapshot 永続化インメモリ繰り越し(sprint3 からの意図的繰り越し・本スプリント非回帰)・空状態 search-no-results 分岐が検索未配線で未到達・絵文字アイコン aria-hidden 未付与・turn-7-2-changed.txt に target/ ビルド成果物が再混入(レビュー対象特定を妨げる・生成時除外推奨)。決定論ゲート(cargo test 317 pika-core/11 cli/5 app PASS・cargo build 警告エラー扱い exit 0・npm run typecheck exit 0)は全パス。本 iteration の Rust 変更は diagnostic.rs の Mutex 直列化(+15行)のみで #[test]/assert/#[ignore]/todo! の改竄は無く、pika-core 317 テストは iteration 1 から不変=テスト緩和/skip/犠牲的期待値変更は検出されず。3観点レビュワー(performance/frontend-ui/ux)とも critical=0。",
+  "feedback_structured": {
+    "high": [
+      {"area": "a11y / roving フォーカスの再描画喪失 (frontend-ui)", "message": "src/ui/tree.ts:27-29,89-95 — renderTree() 末尾の initRovingTabindex(ul) が常に DOM 先頭 treeitem を tabIndex=0 にする。一方 src/main.ts:672-673 の onExternalChange(fs-changed) が refreshTree()→renderTree() を再実行するため、矢印キーで n 行目選択中に外部変更が来ると roving の tabIndex=0 と aria-selected が先頭へ巻き戻り Tab 再入で直前操作行へ戻れない。外部変更=AIエージェント編集の即時反映が本アプリの中心体験で高頻度なため操作一貫性を明確に損なう。renderTree に現在選択 path を渡し再描画後に該当 path の treeitem を tabIndex=0/aria-selected へ復元すること。"},
+      {"area": "エラー回復・行き止まり (ux)", "message": "src/main.ts:981-988 — Ctrl+F/Ctrl+H が dispatchAction で『検索バーは表示メニューから利用できます』と通知するだけだが、その表示メニュー・検索バー UI 自体がフロントに存在せず、案内に従っても検索へ到達できない(指示先のない行き止まり=Nielsen #9 違反)。検索が系統C 後回しなのは spec 上妥当だが、実在しない導線を案内している点が欠陥。文言を『検索バーは未実装(今後対応)』等の正直な表現にするか、最低限フォーカスをエディタへ戻す現実的な次の一手へ変えること。"}
+    ],
+    "medium": [
+      {"area": "a11y / WAI-ARIA tablist パターン (frontend-ui)", "message": "src/index.html:36-44, src/ui/tabs.ts:24-44 — 各 role=tab に aria-controls が無く editor-host/diff-host/preview-host に role=tabpanel・aria-labelledby も無い。applyOccupancy() が hidden 属性で出し分けるがタブとパネルの対応がスクリーンリーダーに伝わらない。tab↔tabpanel を aria-controls/aria-labelledby で結ぶこと。"},
+      {"area": "a11y / aria-live の多重ライブ領域 (frontend-ui)", "message": "src/index.html:47,53, src/a11y/index.ts:74-101 — role=status/aria-live=polite 領域が3つ(#notifications・#sr-live・#status)並存し、同一操作で notify() と announce() がほぼ同時発火して冗長読み上げになる。通知(操作結果)と状態(差分件数)で読み上げ役割を分け片方を補助に限定すること。"},
+      {"area": "a11y / 展開未実装フォルダの aria-expanded 乖離 (frontend-ui)", "message": "src/ui/tree.ts:39-43,147-154 — 1段フラット表示でディレクトリに aria-expanded=false を一律付与するが展開導線が未実装で、スクリーンリーダーが『折りたたまれた、展開可能』と読み実挙動と乖離(Enter/Space もフォルダは無反応)。展開を結線するまではフォルダに aria-expanded を付けない/操作対象にしない方が読み上げと実挙動の齟齬を避けられる。"},
+      {"area": "エラー文言の平易さ (ux)", "message": "src/main.ts:204,479,552,634,659 — 汎用 catch の通知が `${String(e)}` で Rust/Tauri の Err 文字列をそのまま露出し『どうすればよいか(再試行/F5/別名保存 等)』が欠ける。保存失敗・confirm-all スキップの good 例に倣い簡潔な回復ヒントを添えること。"},
+      {"area": "通知種別の取り違え (ux)", "message": "src/ui/notifications.ts:156-163 — 後方互換 notify のレベル→種別固定写像(info→file-removed/warn→settings-error/error→conflict)で、一過性 error が最高優先・AUTO_DISMISS=false の conflict 扱いになり自動消滅せず表示順を奪う。汎用 notify 用の中立な kind を用意するかレベルに応じ auto-dismiss/優先度を分離すること。"},
+      {"area": "ビジュアル一貫性 / 状態表現のトークン非経由 (frontend-ui)", "message": "src/ui/tree.ts:53-55, src/ui/tabs.ts:38-40 — 削除済み取消線が li.style.textDecoration/btn.style.textDecoration のインライン適用で、@media(forced-colors:active) の単一源(app.css)から外れ強制配色下でも残る。他の状態表現(伝播マークは data-unread+CSS)とも適用経路が不統一。data 属性+CSS クラスへ寄せること。"}
+    ],
+    "low": [
+      {"area": "依存/CVE監査 (security)", "message": "sprint 7 must 末尾の『cargo audit が CVE ゲートとして通る』が本環境に cargo-audit 未導入で未実行。verify 配列は cargo test/build のみで環境制約(テスト緩和ではない)。comrak(unsafe_HTML)/ammonia/Mermaid/KaTeX/highlight の攻撃面依存があるためリリース前(系統C)に advisory DB 照合結果を記録すること(T-011 に記録済み)。"},
+      {"area": "スナップショット永続化 (data・非回帰)", "message": "SnapshotService の baseline/退避 object/diff がインメモリ HashMap でプロセス終了で消失(sprint3 からの意図的繰り越し・sprint7 acceptance 外)。退避が『最後の砦』である以上リリース前に index.json+content-addressed object+自己記述メタ復元の永続化が要る点を記録(T-011)。"},
+      {"area": "情報設計・空状態 (ux)", "message": "src/ui/viewstate.ts:5-12 — Empty 3分岐の search-no-results(検索0件)が検索機能未配線のため到達不能で実 UI 上は no-folder/all-consumed のみ体験可能。文言定義/決定論テストとしては must を満たすが、検索実装側で結線確認すること(TG4 で追跡)。"},
+      {"area": "アイコンの読み上げ / トレーサビリティ", "message": "(1) src/ui/tree.ts:48-52, src/ui/tabs.ts:34-37 — 装飾絵文字(📁/📄)に aria-hidden 相当が無くスクリーンリーダー設定によってはアイコン名が読まれうる(別 span 分離+aria-hidden=true 推奨)。(2) turn-7-2-changed.txt に target/ ビルド成果物が再混入しレビュー対象特定を妨げる(生成時に target/ 除外推奨)。"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

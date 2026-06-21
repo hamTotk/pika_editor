@@ -1,0 +1,45 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 7,
+  "iteration": 2,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "a11y / キーボード操作の状態保持",
+      "message": "ツリーの roving tabindex がフォーカス追従できず、外部変更のたびにキーボード選択が先頭へリセットされる。renderTree() は initRovingTabindex(ul) を末尾で呼び、常に DOM 先頭の treeitem を tabIndex=0 にする (tree.ts:90-95)。一方 onExternalChange (fs-changed) は refreshTree()→renderTree() を再実行する (main.ts:672-673)。AIエージェントの編集を即時反映する=本アプリの中心体験であり、ユーザーが矢印キーで n 行目の treeitem を選択中に外部変更が来ると、選択(aria-selected)も roving の tabIndex=0 も先頭へ巻き戻り、Tab で再入したとき直前操作行に戻れない。WAI-ARIA tree パターンの『最後にフォーカスのあった行を tabindex=0 に保つ』が再描画で壊れる。現在の選択パスを renderTree に渡して維持するか、再描画後に直前 tabIndex=0 の path を復元すべき。キーボードのみで中心フロー完走 (要件11.4/11.5) の到達性は ↑↓ 再操作で確保されるため critical ではないが、外部変更が高頻度な本アプリでは操作の一貫性を明確に損なう。",
+      "location": "src/ui/tree.ts:27-29,89-95"
+    },
+    {
+      "severity": "medium",
+      "area": "a11y / WAI-ARIA tablist パターン",
+      "message": "tablist と表示パネルが ARIA で関連付けられていない。各 role=tab に aria-controls が無く、editor-host/diff-host/preview-host のいずれにも role=tabpanel・aria-labelledby が無い (index.html:36-44, tabs.ts:24-44)。さらに表示中パネルは applyOccupancy() が hidden 属性で出し分けるが (main.ts:511-516)、タブとパネルの対応関係がスクリーンリーダーに伝わらないため、タブ移動時にどの領域が対応コンテンツかを辿れない。WAI-ARIA Authoring Practices の tablist では tab↔tabpanel を aria-controls/aria-labelledby で結ぶことが要求される。sprint 7 must『タブ(role=tablist/tab・バッジの aria 表現)』は満たすが、パネル側の関連付けが欠ける。",
+      "location": "src/index.html:36-44, src/ui/tabs.ts:24-44"
+    },
+    {
+      "severity": "medium",
+      "area": "a11y / aria-live の多重ライブ領域",
+      "message": "role=status / aria-live のライブ領域が 3 つ並存し読み上げが競合・重複しうる。#notifications(role=status aria-live=polite・index.html:47)、#sr-live(role=status aria-live=polite aria-atomic・index.html:53)、#status(aria-live=off だが initLandmarks で再保証・a11y/index.ts:80-85) が同居する。差分確認や一括確認のフローでは notify() が #notifications を更新しつつ announce() が #sr-live を更新するため (main.ts:475-477, 676-679)、同一操作で 2 つの polite ライブ領域がほぼ同時に発火し、スクリーンリーダーが冗長に読み上げる。通知(操作結果)と状態(差分件数)で読み上げ役割を分けるなら、片方を aria-live=polite、もう片方を補助に限定する等の整理が望ましい。",
+      "location": "src/index.html:47,53, src/a11y/index.ts:74-101"
+    },
+    {
+      "severity": "medium",
+      "area": "a11y / ツリー構造の ARIA メタデータ",
+      "message": "treeitem に階層メタデータ(aria-level / aria-setsize / aria-posinset)が無く、ディレクトリの aria-expanded も実機能と乖離している。renderTree は 1 段表示で全エントリをフラットに並べ (tree.ts:24-29)、ディレクトリには aria-expanded=false を一律付与するが展開導線が未実装 (tree.ts:39-43)。スクリーンリーダーは aria-expanded=false の treeitem を『折りたたまれた、展開可能』と読み上げるため、実際には開けないフォルダを操作可能と誤認させる。Enter/Space もファイルのみ反応しフォルダは無反応 (tree.ts:147-154)。展開が未実装なら aria-expanded を付けない、もしくはフォルダ展開を結線するまでフォルダを treeitem として操作対象にしない方が、読み上げと実挙動の齟齬を避けられる。",
+      "location": "src/ui/tree.ts:39-43,147-154"
+    },
+    {
+      "severity": "medium",
+      "area": "ビジュアル一貫性 / 状態表現のハードコード",
+      "message": "状態スタイルがデザイントークンを経由せず直接 DOM へ書き込まれており、テーマ/forced-colors 追従の単一源から外れる。削除済みの取り消し線が li.style.textDecoration / btn.style.textDecoration でインライン適用される (tree.ts:53-55, tabs.ts:38-40)。forced-colors 時のスタイル降格は app.css の @media(forced-colors:active) で border/background/color のみ扱い (app.css:412-431)、インライン text-decoration はメディアクエリで上書きできないため強制配色下でも残るが、他の状態表現(伝播マークは data-unread 属性で CSS 側・tree.ts:58-60)とは適用経路が不統一。取り消し線も data 属性+CSS クラスへ寄せ、状態表現の適用経路をトークン/クラス側に一元化すべき(ui-design の単一源原則)。",
+      "location": "src/ui/tree.ts:53-55, src/ui/tabs.ts:38-40"
+    },
+    {
+      "severity": "low",
+      "area": "a11y / アイコンの読み上げ",
+      "message": "ツリー/タブの絵文字アイコン(📁/📄)が textContent に直接連結され、aria-label でカバーされる行(tree.ts:51,86)は二重読み上げを回避できているが、状態記号(± ◆)が aria-label と可視テキストの双方に出る。tree の aria-label は entry.name+kind+stateText で組むのに対し可視テキストは icon+name+mark.suffix なので不一致は許容範囲だが、絵文字に aria-hidden 相当の配慮が無くスクリーンリーダー設定によっては『フォルダ 書類』等のアイコン名が読まれうる。装飾アイコンは別 span に分離し aria-hidden=true を付けると確実。",
+      "location": "src/ui/tree.ts:48-52, src/ui/tabs.ts:34-37"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 7 の a11y 全Web再構築は roving tabindex・WAI-ARIA tree/tablist のキーボード移動・色非依存の記号併用・forced-colors 降格・5状態プレースホルダ・通知キュー優先順位まで広く実装されており、frontend-ui 観点の critical (主要操作が不能/不可視・キーボードで主要機能に到達不能) は無い。キーボードのみで開く→差分→確認の中心フローは到達可能。ただし (1)外部変更=中心体験の再描画 (refreshTree) でツリーの roving フォーカス/選択が毎回先頭へ巻き戻る操作一貫性の欠陥が high。(2)tab↔tabpanel の ARIA 関連付け欠如・(3)3つの polite ライブ領域の読み上げ重複・(4)展開未実装フォルダの aria-expanded と実挙動の乖離・(5)取り消し線インラインスタイルのトークン非経由 が medium。いずれも次ターン generator が feedback_structured で対応可能。"
+}

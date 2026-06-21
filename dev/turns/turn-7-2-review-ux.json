@@ -1,0 +1,39 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 7,
+  "iteration": 2,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "エラー回復・行き止まり",
+      "message": "Ctrl+F/Ctrl+H（検索/置換）が dispatchAction で『検索バーは表示メニューから利用できます』という通知を出すだけで終わる（main.ts dispatchAction の find/replace ケース）。しかし当該『表示メニュー』および検索バー UI 自体がこのフロントに存在せず（grep で検索バー実体・メニュー描画なし／viewstate の 'search-no-results' 文言も未到達）、ユーザーは案内に従っても検索に到達できない=指示先のない行き止まり。Nielsen #9『エラーからの回復支援＝次の一手が実在する』に反する。検索が系統C 後回しなのは spec 上妥当だが、ユーザーへ『未実装』ではなく実在しない導線を案内している点が ux 上の欠陥。文言を『検索バーは未実装（今後対応）』等の正直な表現にするか、最低限フォーカスをエディタへ戻す等の現実的な次の一手に変える。",
+      "location": "src/main.ts:981-988"
+    },
+    {
+      "severity": "medium",
+      "area": "エラー文言の平易さ",
+      "message": "ユーザー向け通知の多くが内部エラーオブジェクトを `String(e)` でそのまま文字列補間している（『開けませんでした: ${String(e)}』『差分の計算に失敗: ${String(e)}』『プレビューの準備に失敗: ${String(e)}』等）。Rust/Tauri から来る Result の Err 文字列がそのまま露出すると、ux 観点では『何が起きたか＋なぜ＋どうすればよいか』のうち『どうすればよいか』が欠け、技術的すぎる文面になりやすい（ux.md よくある見落とし『技術的すぎてユーザーが次に何をすべきか分からない』）。保存失敗・confirm-all スキップは『次の一手』を併記できている good 例があるので、これらの汎用 catch にも簡潔な回復ヒント（再試行/F5/別名保存 等）を添えると一貫する。",
+      "location": "src/main.ts:204,479,552,634,659"
+    },
+    {
+      "severity": "medium",
+      "area": "フィードバック・通知種別の取り違え",
+      "message": "後方互換 notify(message, level) のレベル→種別マッピングが意味的にずれている（notifications.ts:156-159）。level='info' → kind='file-removed'、level='warn' → kind='settings-error'、level='error' → kind='conflict' に固定写像している。このため (1) 一過性の info 通知（例『画像ファイルです』『再同期: 変更なし』）が優先順位最下位の file-removed 扱いになり、(2) 一過性の error（例『差分の計算に失敗』）が AUTO_DISMISS=false の conflict（最高優先・閉じるまで残る）に固定され自動消滅しない。要件11.1 の優先順位（衝突＞設定エラー＞…）は『衝突』という具体イベントを指すのに、汎用 error がすべて衝突優先度を奪う。表示順・残留挙動がユーザーの体感とずれる（重要な実衝突が一過性エラーに埋もれうる）。汎用 notify 用に中立な kind を 1 つ用意するか、レベルに応じた auto-dismiss/優先度を分離するのが望ましい。",
+      "location": "src/ui/notifications.ts:156-163"
+    },
+    {
+      "severity": "low",
+      "area": "一貫性・破壊的操作の確認 UI",
+      "message": "フォルダ切替の未保存三択を window.confirm 2 段（confirmDiscardUnsaved）で表現しているが、1 段目の『［キャンセル］次の選択へ』は OS 標準ダイアログのキャンセルを『次へ進む』意味に転用しており、ユーザーの慣習（キャンセル＝中止）と一瞬反する（Nielsen #4 一貫性・#2 現実世界との一致）。文面で補っており致命ではないが、本実装の保存/破棄/キャンセルはネイティブ三択ダイアログ（系統C 結線時）へ寄せるのが望ましい旨はコメント済み。現状の暫定実装としては許容範囲。",
+      "location": "src/main.ts:311-326"
+    },
+    {
+      "severity": "low",
+      "area": "情報設計・空状態",
+      "message": "viewstate.ts の Empty 3分岐のうち 'search-no-results'（検索0件）が定義されているが、検索機能未配線のため到達不能で、現状ユーザーが目にすることがない（デッドコードではないが現フェーズでは未到達）。sprint 7 must『Empty の3分岐で文言が変わること』の検索0件分岐は決定論テスト・文言定義としては満たすが、実 UI 上は no-folder/all-consumed のみ体験可能。acceptance.md TG4 に系統C 後回しと明記されており追跡は取れている。検索実装スプリント側で結線確認すること。",
+      "location": "src/ui/viewstate.ts:5-12"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 7（a11y/エッジケース/配布/acceptance 整備）の ux を、中心体験の導線・エラー回復・フィードバックの観点で確認した。主要タスク（開く→ツリー/タブ→編集→保存／差分→確認済み/一括確認/巻き戻し）に完了不能な導線破綻はなく、破壊的操作（未保存タブ閉じ・フォルダ切替・rollback・上書き保存）はいずれも確認または退避を先行させており『誤操作でデータ喪失（確認/取り消しなし）』に該当する欠陥もないため critical は無し。削除済みタブの rollback 回復導線・confirm-all スキップ時の『次の一手（F5 再同期）』提示・保存中断時のデータ保全文言など、回復支援は総じて良い。acceptance.md の TG 節（sprint 7）は requirements/design doc 節番号併記で体裁が整い、ux deliverable として妥当。一方で high 1 件＝Ctrl+F/H が実在しない『表示メニューの検索バー』へ誘導する行き止まり（案内先が無い）。medium 2 件＝汎用エラーの内部文字列露出（次の一手欠如）と、後方互換 notify のレベル→種別固定写像による優先度/自動消滅の取り違え。low 2 件＝フォルダ切替三択の OS ダイアログ転用の慣習ずれ、Empty 検索0件分岐の未到達。いずれもリリースを妨げないため次ターンの generator が feedback_structured 経由で対応すればよい。"
+}
