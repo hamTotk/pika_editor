@@ -13,6 +13,7 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod commands;
+mod watcher;
 mod webview2;
 
 fn main() {
@@ -39,10 +40,15 @@ fn run() {
             commands::open_workspace,
             commands::read_file,
             commands::save_file,
+            commands::f5_resync,
         ])
         .setup(|app| {
             // 起動時にメインウィンドウを表示（visible:false で生成し、初期化後に出す）。
             use tauri::Manager;
+            // 監視サービスを managed state として登録（command から State で取得する）。
+            // 監視スレッドはここでは起動せず、open_workspace でルート確定時に開始する
+            // （フォルダ未オープン時は監視コストゼロ＝軽い）。
+            app.manage(watcher::WatcherService::new(app.handle().clone()));
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
             }

@@ -706,3 +706,31 @@
   手で通す。GUI 実機が要るため系統C。
 - **状態**: 実装済（cargo build＋npm build 成立・cargo test PASS）。**基準機での実機起動と一連の貫通操作は
   未実施（要実機）**。起動時間・初回プレビューは T-001 と併せて計測する。
+
+## T-005 watcher オーバーフロー表面化・rename FileId 補強（sprint 2・design doc 15章-2／系統C）
+
+- **重大度**: 高（要件7.4「100件同時で取りこぼさない」が中心シナリオ。握り潰すと未読を失う）。
+- **対応章**: 要件7.1/7.4・design doc 4章/15章-2・19章 rename継承。acceptance.md TC1〜TC6。
+- **検証内容**:
+  1. **notify オーバーフロー表面化** — notify crate（v6.1.1）が `ReadDirectoryChangesW` のバッファ溢れ
+     （ERROR_NOTIFY_ENUM_DIR ＝ Win32 0x3FF）を `Error`/`EventKind` で表面化するか実機で確認する。
+     表面化すれば `src-tauri/src/watcher.rs::is_overflow_error()` が拾って `do_overflow_resync()`（全再列挙）へ落ちる。
+     **握り潰す（個々のイベントだけ来てバッファ溢れは黙殺される）なら、windows crate `ReadDirectoryChangesW` 直叩きへ
+     切替える**（design doc 50行/341行）。判断結果を本欄に追記する。
+  2. **100件同時変更** — 配下に 100 ファイルを一斉生成/書換しても全件未読化されることを実機確認する。
+- **設計上の確定（決定論側は cargo test 済み）**:
+  - 合成層は **pika-core::watcher**（UI/notify 非依存）に集約し `cargo test` で固めた（28 件）。
+    `overflow::resync_against_baseline` は「新規/削除/変更」を昇順・決定論で算定し、`百件同時新規を全件取りこぼさない`
+    テストで 100 件取りこぼし無しを観測（オーバーフロー後の全再列挙が機能する保証＝決定論側）。
+  - `is_overflow_error()` は notify の `ErrorKind::Generic("...overflow...")` と
+    `ErrorKind::Io(raw_os_error == 0x3FF)` の双方を拾う実装にし、notify がどちらの形で出しても再同期へ落ちる。
+    どちらも出さない（黙殺）場合の切替判断を実機で確定する。
+- **rename FileId 補強の制約**: `std::fs::Metadata` の `file_index()`/`volume_serial_number()` は安定版 Rust では
+  未提供（nightly `windows_by_handle`）。そのため `src-tauri/src/watcher.rs::file_id_of()` は **安定版では `None`** を返し、
+  rename ペア化は **時間窓ベース**（pika-core::watcher::rename の段2）に倒している。相互スワップ/上書き rename の
+  完全な解決には FileId が要るため、**windows crate `GetFileInformationByHandle` の導入を sprint 5/7（または本 T-005 の
+  切替時）に検討**する。pika-core 側の正規化ロジックは FileId が来れば段1（FileId 主キー）で解決する設計済み
+  （`相互スワップ_a_b_を_2_本の_rename_に正規化する` 等のテストは FileId 有りで合格）。
+- **状態**: 合成層は cargo test PASS・配線（監視スレッド/emit/ポーリング/F5）は cargo build 成立。
+  **基準機での 100 件同時変更・オーバーフロー再現・notify の表面化有無・rename 実挙動は未実施（要実機）**。
+  実測結果と FileId 補強の要否判断を本欄に追記する。
