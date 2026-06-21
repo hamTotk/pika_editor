@@ -19,10 +19,14 @@ import {
   saveAppState,
   hashContent,
   noteRecent,
+  showPreview,
+  hidePreview,
+  setPreviewBounds,
   type TreeEntry,
   type OpenRequestPayload,
   type AppState,
   type DocEncoding,
+  type PreviewRect,
 } from "./ipc";
 import { initTheme } from "./theme";
 import { initA11y, announce } from "./a11y";
@@ -200,6 +204,11 @@ async function activateTab(path: string): Promise<void> {
     refreshTabs();
     // 差分トグル ON のままタブを切替えたら新しいアクティブタブの差分を再描画する。
     if (state.diffOn) await renderActiveDiff();
+    // プレビュー表示中（preview/split）のままタブを切替えたら、新アクティブタブのプレビューへ追従させる
+    // （別WebView を新内容へ再ナビゲート。占有世代で stale 破棄＝design doc 6章）。
+    if (resolveOccupancy(state.viewMode, state.diffOn).showPreview) {
+      await renderActivePreview();
+    }
   } catch (e) {
     notify(`開けませんでした: ${String(e)}`, "error");
   }
@@ -513,6 +522,27 @@ function applyOccupancy(): void {
   editorHost().hidden = !occ.showEditor;
   diffHost().hidden = !occ.showDiff;
   previewHost().hidden = !occ.showPreview;
+  // 占有がプレビュー非表示なら別WebView を隠す（表示は renderActivePreview の show_preview が担う）。
+  // 占有がプレビュー表示でも、ここでは bounds 追従のみ更新する（ナビゲートは renderActivePreview）。
+  if (!occ.showPreview) {
+    void hidePreview();
+  }
+}
+
+/** `#preview-host` の DOM 矩形（メイン窓クライアント領域基準・CSS ピクセル）を子WebView 配置用に取る。 */
+function previewRect(): PreviewRect {
+  const r = previewHost().getBoundingClientRect();
+  return { x: r.left, y: r.top, w: r.width, h: r.height };
+}
+
+/** プレビュー別WebView を `#preview-host` の現在矩形へ追従させる（resize・ペイン変化時）。 */
+function syncPreviewBounds(): void {
+  // 占有がプレビュー表示で、領域が確定（幅高さ>0）のときのみ追従させる（非表示中は無害化）。
+  const occ = resolveOccupancy(state.viewMode, state.diffOn);
+  if (!occ.showPreview || previewHost().hidden) return;
+  const rect = previewRect();
+  if (rect.w <= 0 || rect.h <= 0) return;
+  void setPreviewBounds(rect);
 }
 
 /** アクティブタブのプレビューを準備し別WebView へ流す URL を得る（要件6・design doc 6章）。 */
@@ -541,10 +571,12 @@ async function renderActivePreview(): Promise<void> {
       // meta refresh は ammonia で除去されるため自動遷移しない＝挙動が変わる旨を伝える（medium 指摘）。
       notify("自動リダイレクト（meta refresh）は無効化して表示しています", "info");
     }
-    // 別WebView の src を ready.url へ設定するのは系統C（GUI 実機）の配線。ここでは占有領域へ
-    // URL を data 属性で保持し、別WebView 生成/ナビゲートは backend 側で行う（HTML は非経由）。
+    // 権限ゼロ別WebView を `#preview-host` の矩形へ重ね、ready.url へナビゲートする（HTML は非経由）。
+    // URL のみ backend に渡し、HTML 本体は custom protocol が別WebView へ直配信する（design doc 6章）。
+    // data 属性は診断/系統C スクショ検証の手掛かりとして残す（実体の表示は show_preview）。
     previewHost().setAttribute("data-preview-url", ready.url);
     previewHost().setAttribute("data-preview-flavor", ready.flavor);
+    await showPreview(previewRect(), ready.url);
     setPreviewState("ready");
     setStatus(`プレビュー: ${path}`);
   } catch (e) {
@@ -1064,6 +1096,12 @@ async function main(): Promise<void> {
       notify(`プレビューの一部ブロックを描画できませんでした（${failures} 件・元コード表示）`, "warn");
     }
   });
+  // プレビュー別WebView の領域追従（design doc 6章「ネイティブ子WebView が DOM 領域を追う」）。
+  // `#preview-host` のサイズ変化（ペイン/差分トグル/分割）と window resize の両方で矩形を backend へ送る。
+  // プレビュー非表示中は syncPreviewBounds が無害化する（占有チェック）。
+  const previewResizeObserver = new ResizeObserver(() => syncPreviewBounds());
+  previewResizeObserver.observe(previewHost());
+  window.addEventListener("resize", () => syncPreviewBounds());
   // 外部変更/監視モードの購読（backend の emit を受ける）。
   await onFsChanged((payload) => onExternalChange(payload.changes));
   await onWatchMode((message) => notify(message, "info"));

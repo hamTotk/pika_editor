@@ -1132,3 +1132,36 @@
 - **起動/復元時の保存失敗トースト**: 起動時復元（`restoreOnStartup` は `saveOnce` を呼ばない）でも CLI 再オープン
   でも未再現。readonly.md（R 属性）への保存が `os error 5` で失敗するのは**正しい挙動**。残る問題は文言のみで
   F-027 に集約。
+
+## T-012 プレビュー実結線 Stage ①（子WebView オーバーレイ最小貫通／系統C）
+
+中心体験の核「プレビュー」がライブUIで全く描画されない問題（別WebView 未生成・未ナビゲート）を、
+権限ゼロの子WebView オーバーレイ（Tauri v2 `Window::add_child`・`unstable` feature）で実結線した。
+引き継ぎ `docs/handoff-preview-wiring.md` の段階分割①を完了。
+
+- **構成**: `setup()` では子WebView を作らず、イベントループ稼働後の `RunEvent::Ready` で
+  `preview::create_preview_webview` を呼ぶ（**setup 内同期 `add_child` はイベントループ未稼働で
+  デッドロック**＝メイン窓が不可視のまま約35MB で固着する回帰を実機特定→修正）。
+- **配信**: custom protocol `/doc/<gen>` を pika-core の純粋関数 `wrap_preview_document` で
+  `<!DOCTYPE>`/`<head>`（charset・最小 base CSS）付き完全文書にラップして返す（body 不変・CSP ヘッダ強制・
+  `<meta>` CSP 非依存）。HTML はメインWebView の JS ワールドを経由しない。
+- **frontend**: `renderActivePreview` が `#preview-host` の矩形＋URL を `show_preview` へ、占有解除で
+  `hide_preview`、`ResizeObserver`＋window resize で `set_preview_bounds`。
+- **実機検証（debug＋Vite・showcase.md）**:
+  - ✅ メイン窓が可視化（デッドロック解消）。
+  - ✅ プレビュー子WebView が `#preview-host` 領域にオーバーレイ表示。H1／GFM テーブル／タスクリスト
+    （チェックボックス）／段落が base CSS 付きで描画。日本語も charset 正常。
+  - ✅ トグルオン=show、トグルオフ=hide でエディタへ復帰。
+  - ✅ ウィンドウ縮小に子WebView が追従（`set_preview_bounds`）。リフローし右端の覗きも解消。
+  - 想定どおり未描画（Stage ② 対象）: Mermaid（`flowchart LR …` 生表示）／KaTeX（`$…$` 生表示）／
+    コードハイライト。アセット配信・信頼 JS 注入は未実施。
+- **軽微所見（後段で詰める）**: 既定窓幅では子WebView 右端が `#preview-host` よりわずかに内側で、
+  下のエディタが ~20px 覗く瞬間がある（DPI/領域追従の微差・Stage ③）。
+- **繰り越し（必須・未実施）**:
+  - 権限ゼロ実証（プレビューWebView から `window.__TAURI_INTERNALS__` 不在・任意 invoke 失敗）の
+    **JS 実行による形式検証**。アーキ上は「capability 不在＋remote オリジン（`pika-preview.localhost`）で
+    app command 自動拒否」で担保されるが、実機の到達不能確認は別途行う。
+  - Stage ②（Mermaid/KaTeX/highlight アセット配信＋信頼 JS 注入）／Stage ③（テーマ CSS 変数・
+    失敗件数の Tauri event 化・占有[プレビュー＋差分]の左右並置）／Stage ④（HTML 系統B・外部 opt-in・
+    暴走ガード実機）。
+- **状態**: Stage ① 完了（4ゲート緑＋実機目視 OK）。

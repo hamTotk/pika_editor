@@ -21,7 +21,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # コアロジックは pika-core に集約（Tauri 層は薄い境界）。
 pika-core = { path = "../crates/pika-core" }
-tauri = { version = "2", features = [] }
+# `unstable`: メインウィンドウへ権限ゼロのプレビュー別WebView を重ねる Window::add_child（マルチ WebView）に必要
+# （design doc 6章 子WebView オーバーレイ隔離）。
+tauri = { version = "2", features = ["unstable"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 監視スレッド: OS の raw event 供給（notify）と内容ハッシュ（twox-hash）。

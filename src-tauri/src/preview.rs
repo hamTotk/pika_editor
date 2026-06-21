@@ -12,8 +12,8 @@
 
 use pika_core::render::{
     check_image_bytes, check_svg_bytes, confine_under, join_under, prepare_html_preview,
-    prepare_markdown_preview, resolve_local_ref, ExternalResourceAllow, GuardDecision,
-    LocalRefDecision, PreviewFlavor, PreviewResponse, DEFAULT_IMAGE_MAX_PIXELS,
+    prepare_markdown_preview, resolve_local_ref, wrap_preview_document, ExternalResourceAllow,
+    GuardDecision, LocalRefDecision, PreviewFlavor, PreviewResponse, DEFAULT_IMAGE_MAX_PIXELS,
     DEFAULT_SVG_MAX_ELEMENTS, DEFAULT_SVG_MAX_PIXELS,
 };
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::http::{header, Response, StatusCode};
-use tauri::{State, UriSchemeContext};
+use tauri::{LogicalPosition, LogicalSize, Manager, State, UriSchemeContext};
+
+/// プレビュー別WebView のラベル（capability マップに**含めない**＝権限ゼロ・design doc 6章/9章）。
+pub const PREVIEW_WEBVIEW_LABEL: &str = "preview";
+
+/// メインウィンドウのラベル（tauri.conf.json と一致）。子WebView はこの窓のクライアント領域に重ねる。
+const MAIN_WINDOW_LABEL: &str = "main";
 
 /// プレビュー custom protocol のスキーム名。
 pub const PREVIEW_SCHEME: &str = "pika-preview";
@@ -162,6 +168,117 @@ pub fn prepare_preview(
     })
 }
 
+/// メインウィンドウへ **権限ゼロのプレビュー別WebView（子WebView オーバーレイ）** を生成する（design doc 6章/9章）。
+///
+/// `setup()` から一度だけ呼ぶ。初期は極小サイズ・画面外配置・`about:blank` の hidden 状態にしておき、
+/// frontend が `show_preview` を呼んだ時に矩形へ配置・表示・ナビゲートする（中心体験の核）。
+///
+/// 権限ゼロの担保（design doc 6章・最重要）:
+/// - **capability ファイルに `preview` ラベルを含めない**（`capabilities/main.json` は `["main"]` のみ）。
+/// - 別WebView は `pika-preview.localhost`（**remote オリジン**）へナビゲートするため、Tauri の ACL は
+///   remote オリジンからの app command を拒否する（`invoke`/`__TAURI_INTERNALS__` 経由の到達不能）。
+/// - 念のため `browser_extensions_enabled(false)` で拡張機能経由の注入面も塞ぐ。
+///
+/// マルチ WebView（`Window::add_child`）は Tauri の `unstable` feature を要する（Cargo.toml で有効化）。
+pub fn create_preview_webview(app: &tauri::AppHandle) -> tauri::Result<()> {
+    // 既に生成済みなら何もしない（多重生成防止）。
+    if app.get_webview(PREVIEW_WEBVIEW_LABEL).is_some() {
+        return Ok(());
+    }
+    let Some(main) = app.get_window(MAIN_WINDOW_LABEL) else {
+        // メイン窓が無い異常系。プレビュー無しでもアプリは動く（中心体験の編集は継続）。
+        return Ok(());
+    };
+
+    // about:blank の空ページで生成する。HTML 本体は custom protocol が show_preview 時に直配信する。
+    let builder = tauri::webview::WebviewBuilder::new(
+        PREVIEW_WEBVIEW_LABEL,
+        tauri::WebviewUrl::External("about:blank".parse().expect("about:blank は妥当な URL")),
+    )
+    // 拡張機能経由の注入面を塞ぐ（権限ゼロの多層防御）。
+    .browser_extensions_enabled(false)
+    // プレビューは文書のドラッグ＆ドロップを受けない（アプリシェル側の DnD と混線させない）。
+    .disable_drag_drop_handler();
+
+    // 初期は極小・画面外・hidden（show_preview で矩形へ配置・表示する）。
+    let webview = main.add_child(
+        builder,
+        LogicalPosition::new(0.0, 0.0),
+        LogicalSize::new(1.0, 1.0),
+    )?;
+    let _ = webview.hide();
+    Ok(())
+}
+
+/// プレビュー別WebView を指定矩形（`#preview-host` の DOM 矩形・CSS ピクセル）へ配置・表示し `url` へナビゲートする。
+///
+/// 座標はメインウィンドウのクライアント領域基準の論理座標（CSS ピクセル）。DPI は Tauri の論理座標系へ委ねる。
+/// frontend は表示モードが preview/split のときのみ呼ぶ（占有解決は resolveOccupancy）。
+#[tauri::command]
+pub fn show_preview(
+    app: tauri::AppHandle,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    url: String,
+) -> Result<(), String> {
+    let webview = app
+        .get_webview(PREVIEW_WEBVIEW_LABEL)
+        .ok_or("プレビュー別WebView 未生成")?;
+    apply_bounds(&webview, x, y, w, h)?;
+    let parsed = url.parse().map_err(|_| "プレビュー URL が不正")?;
+    webview.navigate(parsed).map_err(|e| e.to_string())?;
+    webview.show().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// プレビュー別WebView を隠す（占有がソース等プレビュー非表示のとき）。
+///
+/// 再表示できる方式（hide）にする。次の show_preview で再ナビゲートするため about:blank へは戻さない
+/// （戻すと一瞬の空白が見えるだけで利点が無い・hide で十分）。
+#[tauri::command]
+pub fn hide_preview(app: tauri::AppHandle) -> Result<(), String> {
+    // 別WebView 未生成（極端な異常系）でも frontend 側のトグルは成功扱いにする（編集継続を阻害しない）。
+    if let Some(webview) = app.get_webview(PREVIEW_WEBVIEW_LABEL) {
+        webview.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// プレビュー別WebView の位置・サイズのみ更新する（ペイン/ウィンドウ resize への領域追従）。
+///
+/// frontend の `ResizeObserver`/window resize から `#preview-host` の矩形を渡す。表示中のみ呼ぶ
+/// （非表示中は無害だが frontend 側で抑止する）。
+#[tauri::command]
+pub fn set_preview_bounds(
+    app: tauri::AppHandle,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
+    if let Some(webview) = app.get_webview(PREVIEW_WEBVIEW_LABEL) {
+        apply_bounds(&webview, x, y, w, h)?;
+    }
+    Ok(())
+}
+
+/// 子WebView の位置・サイズを論理座標で適用する（show_preview/set_preview_bounds の共通処理）。
+///
+/// サイズが 0 以下になり得る（領域未確定/縮退）ため最小 1px に丸める（WebView2 が 0 サイズを嫌うため）。
+fn apply_bounds(webview: &tauri::Webview, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+    let w = w.max(1.0);
+    let h = h.max(1.0);
+    webview
+        .set_position(LogicalPosition::new(x, y))
+        .map_err(|e| e.to_string())?;
+    webview
+        .set_size(LogicalSize::new(w, h))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// `pika-preview://`（実体 `http://pika-preview.localhost/`）の custom protocol ハンドラ。
 ///
 /// ルーティング:
@@ -175,7 +292,6 @@ pub fn handle_preview_request(
     request: tauri::http::Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
     let app = ctx.app_handle();
-    use tauri::Manager;
     let Some(preview) = app.try_state::<PreviewService>() else {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "preview state 未登録");
     };
@@ -215,7 +331,13 @@ pub fn handle_preview_request(
 }
 
 /// サニタイズ済み HTML 本体を CSP ヘッダ付きで返す（design doc 6章）。
+///
+/// pika-core のサニタイズ済み body は `<head>`/`<!DOCTYPE>` を持たない**フラグメント**なので、
+/// 別WebView へ配信する前に [`wrap_preview_document`]（pika-core・cargo test 済み）で
+/// 完全 HTML 文書（charset utf-8・最小 base CSS）にラップする。**body は一字一句改変しない**。
+/// CSP は引き続きレスポンスヘッダで強制し、文書内 `<meta>` には依存しない（design doc 6章）。
 fn document_response(doc: &PreparedDoc) -> Response<Vec<u8>> {
+    let html = wrap_preview_document(&doc.response.body, &doc.response.nonce, doc.response.flavor);
     // CSP は pika-core が組んだ値（既定外部遮断・nonce・オプトイン緩和は img/font のみ）。
     Response::builder()
         .status(StatusCode::OK)
@@ -224,7 +346,7 @@ fn document_response(doc: &PreparedDoc) -> Response<Vec<u8>> {
         // クリックジャッキング/MIME スニッフィング/参照漏れの追加防御。
         .header("X-Content-Type-Options", "nosniff")
         .header(header::REFERRER_POLICY, "no-referrer")
-        .body(doc.response.body.clone().into_bytes())
+        .body(html.into_bytes())
         .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "応答組立失敗"))
 }
 

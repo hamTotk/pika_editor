@@ -61,6 +61,37 @@ pub fn prepare_markdown_preview(markdown: &str, allow: &ExternalResourceAllow) -
     }
 }
 
+/// サニタイズ済み body を**最小の完全 HTML 文書**にラップする（別WebView へ直配信する素体）。
+///
+/// 役割（design doc 6章/3章「薄い境界」）: custom protocol が配信するのは `<!DOCTYPE>`/`<head>` を含む
+/// 完全文書である必要がある（フラグメントのままだと charset 未指定で日本語が化け、base CSS も当たらない）。
+/// 本関数は **純粋な String 操作**に徹し、Tauri を一切知らない（cargo test の決定論ゲート対象）。
+///
+/// セキュリティ上の不変条件（Stage ① で死守）:
+/// - **`body` を改変しない**（[`sanitize_html`] 通過済みの本体をそのまま `<body>` 内へ埋め込む）。
+/// - **`<meta http-equiv>` CSP を入れない**（CSP はレスポンスヘッダで強制する＝[`csp`]）。`<meta charset>` のみ。
+/// - **このStageではスクリプト/ベンダーアセットを注入しない**（Mermaid/KaTeX/highlight は後続Stage）。
+///   `nonce`/`flavor` は将来の信頼 JS 注入位置を確定するため引数に取るが、本実装では使用しない。
+///
+/// 最小 base CSS（`<style>`）は読みやすさのためのみで、CSP の `style-src 'unsafe-inline'`（系統A/B とも許可）
+/// の範囲に収まる。文書由来 CSS（系統B のインライン CSS）は `body` 側に既に含まれ、ここでは上書きしない。
+pub fn wrap_preview_document(body: &str, _nonce: &str, _flavor: PreviewFlavor) -> String {
+    // 最小 base CSS: 余白・行間・等幅・画像はみ出し抑制のみ（質感/テーマは後続Stageで CSS 変数受け渡し）。
+    const BASE_CSS: &str = "\
+html{color-scheme:light dark}\
+body{margin:0;padding:16px;font-family:\"Segoe UI\",\"Meiryo\",\"Yu Gothic UI\",sans-serif;\
+line-height:1.6;word-wrap:break-word;overflow-wrap:anywhere}\
+img{max-width:100%;height:auto}\
+pre{overflow:auto}\
+table{border-collapse:collapse}\
+th,td{border:1px solid currentColor;padding:.3em .6em}";
+    format!(
+        "<!DOCTYPE html>\n<html lang=\"ja\">\n<head>\n<meta charset=\"utf-8\">\n\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n\
+<style>{BASE_CSS}</style>\n</head>\n<body>\n{body}\n</body>\n</html>\n"
+    )
+}
+
 /// オプトイン外部許可を CSP へ渡す前に検証し、不正があれば**外部遮断（既定）へ倒す**（fail-closed）。
 ///
 /// [`validate_allow_hosts`] で 1 つでも不正ホストが見つかれば許可リスト全体を破棄する
@@ -170,6 +201,30 @@ mod tests {
             resp.csp.contains("img-src pika-preview:;"),
             "外部遮断に戻っていない: {}",
             resp.csp
+        );
+    }
+
+    #[test]
+    fn wrap_は完全文書にし_charset_を入れ_body_を改変しない() {
+        // Stage ①: フラグメント body を完全 HTML 文書へラップする。
+        // 不変条件: DOCTYPE/charset 付与・body を一字一句改変しない・meta CSP を入れない。
+        let body = "<h1>見出し</h1>\n<p>日本語の本文 &amp; テスト</p>";
+        let doc = wrap_preview_document(body, "abc123", PreviewFlavor::MarkdownTrustedJs);
+        assert!(doc.starts_with("<!DOCTYPE html>"), "DOCTYPE が無い: {doc}");
+        assert!(
+            doc.contains("<meta charset=\"utf-8\">"),
+            "charset が無い（日本語化けの危険）: {doc}"
+        );
+        assert!(doc.contains(body), "body が改変された: {doc}");
+        // CSP はレスポンスヘッダで強制するため、文書内に meta CSP を入れてはならない（design doc 6章）。
+        assert!(
+            !doc.to_ascii_lowercase().contains("http-equiv"),
+            "meta CSP を埋め込んだ（ヘッダ強制原則違反）: {doc}"
+        );
+        // このStageでは信頼 JS/ベンダーアセットを注入しない（Mermaid 等は後続Stage）。
+        assert!(
+            !doc.contains("<script"),
+            "Stage ① でスクリプトを注入した: {doc}"
         );
     }
 
