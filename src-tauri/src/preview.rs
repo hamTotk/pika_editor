@@ -27,6 +27,18 @@ use tauri::{LogicalPosition, LogicalSize, Manager, State, UriSchemeContext};
 /// プレビュー別WebView のラベル（capability マップに**含めない**＝権限ゼロ・design doc 6章/9章）。
 pub const PREVIEW_WEBVIEW_LABEL: &str = "preview";
 
+/// 発信元 WebView ラベルが「IPC を拒否すべき権限ゼロ WebView（プレビュー）」かを判定する純粋関数。
+///
+/// `main.rs` の `invoke_handler` 前段ガードが使う唯一の判定点（design doc 6章/9章「Tauri API 到達不能」）。
+/// Tauri v2 の ACL は自前 app command を自動ゲートしないため、ここでラベルを照合して
+/// プレビュー別WebView（[`PREVIEW_WEBVIEW_LABEL`]）からの invoke を command ディスパッチ前に弾く。
+/// メイン窓（label `"main"`）など他ラベルは `false`（=従来どおり全 command を通す）。
+/// 文字列直書きを避け定数照合に寄せることで、ラベル変更時の取りこぼしを防ぐ（回帰テスト対象）。
+#[inline]
+pub fn is_blocked_invoke_origin(label: &str) -> bool {
+    label == PREVIEW_WEBVIEW_LABEL
+}
+
 /// メインウィンドウのラベル（tauri.conf.json と一致）。子WebView はこの窓のクライアント領域に重ねる。
 const MAIN_WINDOW_LABEL: &str = "main";
 
@@ -547,6 +559,31 @@ pub struct HtmlHazards {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipc_発信元ガードはプレビューを拒否しメインは通す() {
+        // 最重要セキュリティ境界の回帰防止（design doc 6章/9章）: invoke_handler 前段ガードが使う
+        // ラベル判定が「プレビュー別WebView は拒否・メイン窓ほかは許可」であることを純粋関数として固定する。
+        // 実機プローブで read_file 漏洩を検出した欠陥（自前 app command が ACL で自動ゲートされない）を
+        // ここで塞ぐ唯一の判定点なので、ラベル定数（PREVIEW_WEBVIEW_LABEL）変更にも追従させる。
+        assert!(
+            is_blocked_invoke_origin(PREVIEW_WEBVIEW_LABEL),
+            "プレビューWebView（権限ゼロ）からの IPC が拒否されていない"
+        );
+        assert!(
+            is_blocked_invoke_origin("preview"),
+            "現行のプレビューラベル文字列が拒否されていない"
+        );
+        // メイン窓は従来どおり全 command を通す（既存機能を壊さない）。
+        assert!(
+            !is_blocked_invoke_origin(MAIN_WINDOW_LABEL),
+            "メイン窓の IPC が誤って拒否された"
+        );
+        assert!(!is_blocked_invoke_origin("main"));
+        // 想定外ラベルは拒否しない（プレビューのみを限定して塞ぐ＝過剰遮断で既存機能を壊さない）。
+        assert!(!is_blocked_invoke_origin(""));
+        assert!(!is_blocked_invoke_origin("other"));
+    }
 
     #[test]
     fn html_危険検知_script_と外部参照と_meta_refresh() {

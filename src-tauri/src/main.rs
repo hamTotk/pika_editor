@@ -39,41 +39,65 @@ fn main() {
 /// capability マップ（design doc 9章）:
 /// - メインウィンドウ（label "main"）: `capabilities/main.json` の最小集合のみ。
 /// - プレビュー別WebView（setup で生成・label "preview"・[`preview::create_preview_webview`]）:
-///   **capability ファイルを置かない**＝Tauri は未宣言ウィンドウへ command を一切許可しない（権限ゼロ）。
-///   さらに別WebView は remote オリジン（pika-preview.localhost）へナビゲートするため、Tauri の ACL は
-///   remote からの app command を拒否する。これにより未信頼文書 WebView から `invoke`/`__TAURI_INTERNALS__`
-///   経由の任意 command が到達不能になる（design doc 6章/15章-3・到達不能の実証は系統C）。
+///   **capability ファイルを置かない**＝Tauri は未宣言ウィンドウへ plugin/core command を許可しない。
+///
+/// 【最重要セキュリティ境界・自前 app command の到達ガード】
+/// Tauri v2 の ACL（capability）は plugin/core command をゲートするが、`generate_handler!` に登録した
+/// **自前 app command は既定で全 WebView から呼べる**（メイン窓も custom-protocol オリジンの別WebView も
+/// 区別しない。`pika-preview.localhost` はアプリ登録スキームのため "remote 扱いで自動拒否" も成立しない）。
+/// 実機プローブで、プレビュー別WebView から `__TAURI_INTERNALS__.invoke('read_file', …)` が成功し
+/// 任意ファイル読取に到達した（CVE-2024-35222 級の漏洩）。capability では塞げないため、ここで
+/// **発信元 WebView ラベルを command ディスパッチ前に検査し、プレビューからの invoke を一律 reject** する
+/// （唯一の堅牢な choke point。未信頼文書由来の JS が万一走っても command に到達させない＝design doc 6章/9章
+/// 「Tauri API 到達不能」。多層防御の最後の砦）。
 fn run() {
+    // `generate_handler!` は引数なしの `move |invoke| { … }`（`Fn(Invoke<R>) -> bool`）へ展開される。
+    // 変数束縛では `R` を推論できない（E0282）ため、束縛の型を `Invoke<tauri::Wry>` を取る関数として明示し
+    // ランタイムを Wry に固定する。これを前段ガードで包み、プレビューWebView からの IPC は内側ハンドラ
+    // （command ディスパッチ）へ渡さない。
+    let app_invoke: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        commands::open_workspace,
+        commands::read_file,
+        commands::save_file,
+        commands::f5_resync,
+        commands::save_app_state,
+        commands::restore_app_state,
+        commands::hash_content,
+        commands::note_recent,
+        commands::path_kind,
+        snapshot::compute_file_diff,
+        snapshot::confirm_file,
+        snapshot::confirm_all,
+        snapshot::rollback_file,
+        preview::prepare_preview,
+        preview::show_preview,
+        preview::hide_preview,
+        preview::set_preview_bounds,
+        document::open_document,
+        document::save_document,
+        document::read_range,
+        document::search_in_text,
+        document::replace_in_text,
+        diagnostic::log_folder_path,
+    ];
+
     let app = tauri::Builder::default()
         // プレビュー custom protocol（pika-preview://）= Rust から別WebView へサニタイズ済み HTML を
         // 直配信する（HTML を JS のメインワールドに通さない＝design doc 6章）。CSP はレスポンスヘッダで強制。
         // この protocol が読むのは PreviewService（サニタイズ済み素材）のみで、Tauri command には到達しない。
         .register_uri_scheme_protocol(preview::PREVIEW_SCHEME, preview::handle_preview_request)
-        .invoke_handler(tauri::generate_handler![
-            commands::open_workspace,
-            commands::read_file,
-            commands::save_file,
-            commands::f5_resync,
-            commands::save_app_state,
-            commands::restore_app_state,
-            commands::hash_content,
-            commands::note_recent,
-            commands::path_kind,
-            snapshot::compute_file_diff,
-            snapshot::confirm_file,
-            snapshot::confirm_all,
-            snapshot::rollback_file,
-            preview::prepare_preview,
-            preview::show_preview,
-            preview::hide_preview,
-            preview::set_preview_bounds,
-            document::open_document,
-            document::save_document,
-            document::read_range,
-            document::search_in_text,
-            document::replace_in_text,
-            diagnostic::log_folder_path,
-        ])
+        .invoke_handler(move |invoke| {
+            // 権限ゼロ別WebView（プレビュー・label = preview::PREVIEW_WEBVIEW_LABEL）からの IPC は
+            // command 実行前に全拒否する（自前 app command は ACL で自動ゲートされない＝上記ドキュメント）。
+            // メイン窓（label "main"）からの invoke はここを素通りし従来どおり全 command が通る。
+            if preview::is_blocked_invoke_origin(invoke.message.webview_ref().label()) {
+                invoke
+                    .resolver
+                    .reject("プレビューWebViewからのIPCは許可されていません");
+                return true; // 処理済み（内側の command ディスパッチへ渡さない）。
+            }
+            app_invoke(invoke)
+        })
         .setup(|app| {
             use tauri::Manager;
 
