@@ -43,6 +43,12 @@ getrandom = "0.2"
 # 単一インスタンス転送 JSON・state.json の直列化（design doc 9章・要件3.2/10.1）。
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# エンコーディング往復（BOM/UTF-8/UTF-16/Shift_JIS 判定・往復・表現不能文字検出）。
+# encoder の unmappable ハンドリングで保存中断フローを実装する（design doc 12章・要件5.2/5.6）。
+encoding_rs = "0.8"
+# 検索/置換（後方参照・キャプチャ参照・Unicode文字クラス・第一候補は純Rust）。
+# backtrack_limit で ReDoS のバックトラック上限、協調キャンセルで処理打切りを実装（design doc 2章/12章/15章-8・要件5.4）。
+fancy-regex = "0.16"
 
 [profile.release]
 # 軽量配布（design doc 1章「軽い」）。LTO とサイズ最適化でバイナリを絞る。

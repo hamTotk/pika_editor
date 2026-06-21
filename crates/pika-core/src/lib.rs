@@ -8,13 +8,17 @@
 pub mod cli;
 pub mod data_root;
 pub mod diff;
+pub mod encoding;
 pub mod error;
 pub mod hashing;
+pub mod huge;
 pub mod ipc;
 pub mod path_verify;
+pub mod range;
 pub mod recent;
 pub mod render;
 pub mod review;
+pub mod search;
 pub mod snapshot;
 pub mod state;
 pub mod watcher;

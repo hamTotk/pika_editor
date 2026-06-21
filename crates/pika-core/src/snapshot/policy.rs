@@ -7,10 +7,12 @@
 //!   （元ファイル削除後に平文コピーを残さないデータ最小化＝要件9.1）。
 //!
 //! 「ちょうど 10MB はハッシュのみ」（境界＝10MB 未満のみ内容保存）。
-//! 第1段階閾値（10MB）は sprint 6 の CM6 実測で確定する暫定値（spec 補完判断4・要件2.2 TBD）。
+//! 第1段階閾値（10MB）は sprint 6 の CM6 実測（系統C・acceptance-findings.md）で
+//! 「10MB で編集・検索・保存が通常通り可能」を確認し**確定（維持）**した（要件2.2/9.2・design doc 16章）。
 
 /// 内容保存の境界（バイト）。これ**未満**のみ内容を保存し、ちょうど・超過はハッシュのみ。
-/// （要件9.2「10MB未満のみ内容保存」。暫定値＝sprint6 CM6 実測で確定）。
+/// （要件9.2「10MB未満のみ内容保存」。sprint6 CM6 実測で 10MB に確定）。
+/// [`crate::huge::STAGE1_THRESHOLD_BYTES`]・[`crate::hashing::HUGE_FILE_THRESHOLD_BYTES`] と同値。
 pub const DEFAULT_CONTENT_LIMIT_BYTES: u64 = 10 * 1024 * 1024;
 
 /// ベースライン保存方針（観測可能にしてテストで分岐を検証する）。
