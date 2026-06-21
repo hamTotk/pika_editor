@@ -1,7 +1,7 @@
 {
   "current_sprint": 5,
-  "iteration": 1,
-  "total_turns": 5,
+  "iteration": 2,
+  "total_turns": 6,
   "max_turns_per_sprint": 3,
   "max_total_turns": 21,
   "history": [
@@ -9,7 +9,8 @@
     {"sprint": 2, "iteration": 1, "score": 92, "passed": true, "duration_sec": 0, "commit": "889a9f4"},
     {"sprint": 3, "iteration": 1, "score": 93, "passed": true, "duration_sec": 0, "commit": "8a78c77"},
     {"sprint": 4, "iteration": 1, "score": 88, "passed": false, "duration_sec": 0, "commit": "d528987"},
-    {"sprint": 4, "iteration": 2, "score": 90, "passed": true, "duration_sec": 0, "commit": "8f3a681"}
+    {"sprint": 4, "iteration": 2, "score": 90, "passed": true, "duration_sec": 0, "commit": "8f3a681"},
+    {"sprint": 5, "iteration": 1, "score": 84, "passed": false, "duration_sec": 0, "commit": "0a5fa9b"}
   ],
   "status": "running",
   "sprint_criteria_done": {"sprint": 5, "reviewers": ["data", "frontend-ui"]}

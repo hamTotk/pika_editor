@@ -8,9 +8,9 @@
 use crate::snapshot::SnapshotService;
 use crate::state_store;
 use crate::watcher::WatcherService;
+use pika_core::hashing::hash_normalized_lf;
 use pika_core::state::{AppState, TabRestore, WorkspaceRestore};
 use serde::{Deserialize, Serialize};
-use std::hash::Hasher;
 use std::path::Path;
 use tauri::State;
 
@@ -89,9 +89,73 @@ pub fn save_file(
     watcher: State<'_, WatcherService>,
 ) -> Result<(), String> {
     // 保存後ハッシュを先に算出して登録（watcher イベントより先に勝つ必要があるため保存前に登録）。
-    let saved_hash = hash_normalized(content.as_bytes());
+    let saved_hash = hash_normalized_lf(content.as_bytes());
     watcher.register_self_save(&path, &saved_hash);
     std::fs::write(&path, content).map_err(|e| format!("保存に失敗: {e}"))
+}
+
+/// 最近使った項目の種別（ファイル/フォルダ）。
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecentKind {
+    File,
+    Folder,
+}
+
+/// 最近使った項目（ファイル/フォルダ）を追記し、更新後のリストを返す（要件10.2・design doc 9章）。
+///
+/// LRU・重複排除・上限切り詰めは pika_core::recent（cargo test 済み）。ここは state.json の
+/// read-modify-write（既存状態を読み→core でマージ→アトミック書込）と、ジャンプリスト反映
+/// （Windows COM・系統C）への受け渡しのみを行う。state.json が未知バージョン/破損のときは
+/// 既存状態を保全して何もしない（最上位原則「データを失わない」＝Preserved を返す）。
+#[tauri::command]
+pub fn note_recent(
+    kind: RecentKind,
+    path: String,
+) -> Result<pika_core::recent::RecentList, String> {
+    let root = state_store::resolve()?;
+    match state_store::load_for_update(&root) {
+        // 既知バージョン or 初回（ファイル無し）→ 追記して保存する。
+        state_store::LoadForUpdate::Editable(mut state) => {
+            match kind {
+                RecentKind::File => state.recent.push_file(&path),
+                RecentKind::Folder => state.recent.push_folder(&path),
+            }
+            state_store::save(&root, &state)?;
+            // OS のジャンプリスト（Recent）へも反映する（実描画は系統C・ベストエフォート）。
+            crate::jumplist::add_recent(&path);
+            Ok(state.recent)
+        }
+        // 未知バージョン/破損→上書きしない（保全）。空のリストを返す（フロントは表示更新しない）。
+        state_store::LoadForUpdate::Preserve => Ok(pika_core::recent::RecentList::default()),
+    }
+}
+
+/// パスの種別を返す（"file" | "dir" | "missing"）。
+///
+/// 存在しないファイルパスを「保存時に作成される新規タブ」として開く判断（要件3.2）に使う。
+/// 存在判定のみで内容は読まない（軽い）。
+#[tauri::command]
+pub fn path_kind(path: String) -> String {
+    let p = Path::new(&path);
+    if p.is_dir() {
+        "dir".into()
+    } else if p.is_file() {
+        "file".into()
+    } else {
+        "missing".into()
+    }
+}
+
+/// 内容の LF 正規化ハッシュを返す（state.json のタブ content_hash 算出・要件10.1/13）。
+///
+/// 自己保存抑制（save_file）・復元の別物判定（state_store::probe_path）と**同一規則**
+/// （pika_core::hashing）で計算する。フロントは開く/保存/外部リロード時にこれを呼んで
+/// タブの content_hash を実値で詰める（eval high: ダミー値固定の解消）。算出は cheap で
+/// 開く/保存時のみ呼ぶためホットパスではない。
+#[tauri::command]
+pub fn hash_content(content: String) -> String {
+    hash_normalized_lf(content.as_bytes())
 }
 
 /// F5（要件7.1/11.2）= オンデマンドの全体再スキャン＋再同期。検知した変更件数を返す。
@@ -105,9 +169,16 @@ pub fn f5_resync(watcher: State<'_, WatcherService>) -> Result<usize, String> {
 ///
 /// 直列化・version はすべて pika-core::state（cargo test 済み）。ここはデータルート解決と
 /// アトミック書込（一時ファイル→置換）の FS 配線のみ（state_store）。
+///
+/// `recent`（最近使った項目）は note_recent が read-modify-write で**単独管理**する owner なので、
+/// フロントが送る AppState.recent では上書きせず**ディスクの既存値を保持**する
+/// （フロントは recent を空で送る規約。二重管理による取りこぼしを構造的に防ぐ）。
 #[tauri::command]
-pub fn save_app_state(state: AppState) -> Result<(), String> {
+pub fn save_app_state(mut state: AppState) -> Result<(), String> {
     let root = state_store::resolve()?;
+    if let state_store::LoadForUpdate::Editable(existing) = state_store::load_for_update(&root) {
+        state.recent = existing.recent;
+    }
     state_store::save(&root, &state)
 }
 
@@ -128,6 +199,10 @@ pub struct RestoreOutcomeDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
     pub tabs: Vec<RestoredTabDto>,
+    /// 復元後にアクティブ化すべきタブの絶対パス（`active_tab` インデックスを解決した値）。
+    /// 復元順に依らずパスで再アクティブ化するため（eval high: active_tab 往復欠落の解消）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_path: Option<String>,
     /// 未知バージョン/破損で空起動した（このセッションは上書き保存を控える＝読めない状態を保全）。
     pub safe_empty: bool,
 }
@@ -169,28 +244,7 @@ pub fn restore_app_state() -> Result<RestoreOutcomeDto, String> {
         workspace_status,
         workspace_path,
         tabs,
+        active_path: outcome.active_path,
         safe_empty: outcome.safe_empty,
     })
-}
-
-/// 内容（バイト列）を LF 正規化してハッシュ化する（自己保存抑制の保存後ハッシュ）。
-/// 改行のみの差を未読/差分に出さない方針（要件8.1）と整合させる。
-fn hash_normalized(bytes: &[u8]) -> String {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\r' => {
-                out.push(b'\n');
-                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                    i += 1;
-                }
-            }
-            b => out.push(b),
-        }
-        i += 1;
-    }
-    let mut h = twox_hash::XxHash64::with_seed(0);
-    h.write(&out);
-    format!("{:016x}", h.finish())
 }

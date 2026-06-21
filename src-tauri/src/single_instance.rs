@@ -78,8 +78,8 @@ mod windows_impl {
     use std::ptr;
     use tauri::{AppHandle, Emitter, Manager};
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_PIPE_BUSY, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
-        LocalFree,
+        CloseHandle, GetLastError, LocalFree, ERROR_PIPE_BUSY, GENERIC_WRITE, HANDLE,
+        INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,

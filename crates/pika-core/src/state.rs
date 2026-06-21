@@ -14,6 +14,7 @@
 //!   （読めない状態を壊さない＝最上位原則「データを失わない」のリポジトリ版）。
 
 use crate::error::{PikaError, Result};
+use crate::recent::RecentList;
 use serde::{Deserialize, Serialize};
 
 /// state.json のスキーマバージョン。未知バージョンは安全側に倒して読まない。
@@ -94,6 +95,9 @@ pub struct AppState {
     /// ウィンドウ状態。
     #[serde(default)]
     pub window: WindowState,
+    /// 最近使ったファイル/フォルダ（要件10.2・各20件 LRU）。
+    #[serde(default)]
+    pub recent: RecentList,
 }
 
 impl AppState {
@@ -106,7 +110,17 @@ impl AppState {
             active_tab: 0,
             expanded_dirs: Vec::new(),
             window: WindowState::default(),
+            recent: RecentList::default(),
         }
+    }
+
+    /// `active_tab` インデックスが指すタブのパスを返す（復元後の再アクティブ化に使う）。
+    ///
+    /// タブを復元順（消失=削除済み等で順序がずれうる）に開いたあと、**インデックスでなくパスで**
+    /// アクティブタブを指定し直すための解決関数（eval high: active_tab 往復欠落）。
+    /// 範囲外（タブ無し・index 過大）は `None`（フロントは先頭/最後の挙動に委ねる）。
+    pub fn active_tab_path(&self) -> Option<&str> {
+        self.tabs.get(self.active_tab).map(|t| t.path.as_str())
     }
 
     /// アトミック書込用に JSON へ直列化する（実書込＝一時ファイル→置換は呼び出し側）。
@@ -246,9 +260,39 @@ mod tests {
         s.tabs.push(sample_tab());
         s.active_tab = 0;
         s.expanded_dirs.push(r"C:\ws\sub".into());
+        s.recent.push_file(r"C:\ws\note.md");
+        s.recent.push_folder(r"C:\ws");
         let json = s.to_json().unwrap();
         match load_state(&json) {
             StateLoad::Ok(loaded) => assert_eq!(loaded, s),
+            other => panic!("Ok を期待したが {other:?}"),
+        }
+    }
+
+    #[test]
+    fn active_tab_path_がインデックスをパスへ解決する() {
+        let mut s = AppState::empty();
+        s.tabs.push(TabState {
+            path: r"C:\ws\a.md".into(),
+            ..sample_tab()
+        });
+        s.tabs.push(TabState {
+            path: r"C:\ws\b.md".into(),
+            ..sample_tab()
+        });
+        s.active_tab = 1;
+        assert_eq!(s.active_tab_path(), Some(r"C:\ws\b.md"));
+        // 範囲外は None（フロントが先頭等へフォールバック）。
+        s.active_tab = 99;
+        assert_eq!(s.active_tab_path(), None);
+    }
+
+    #[test]
+    fn 旧バージョン_recent_欠落でも_default_で読める() {
+        // recent フィールドが無い既存 state.json も #[serde(default)] で読める（後方互換）。
+        let json = r#"{"version":1,"tabs":[],"active_tab":0}"#;
+        match load_state(json) {
+            StateLoad::Ok(s) => assert!(s.recent.files.is_empty() && s.recent.folders.is_empty()),
             other => panic!("Ok を期待したが {other:?}"),
         }
     }
@@ -334,6 +378,9 @@ mod tests {
 
     #[test]
     fn ワークスペース無しは単体ファイル扱い() {
-        assert_eq!(restore_workspace(None, false), WorkspaceRestore::NoWorkspace);
+        assert_eq!(
+            restore_workspace(None, false),
+            WorkspaceRestore::NoWorkspace
+        );
     }
 }

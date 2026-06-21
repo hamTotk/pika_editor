@@ -1,0 +1,27 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 5,
+  "iteration": 2,
+  "findings": [
+    {
+      "severity": "low",
+      "area": "CLI/-g 導線の冗長動作",
+      "message": "iteration1 の medium『複数パス＋-g で goto が最後のタブへ飛ぶ』は解消済み（goto を paths[0] に明示結合・src/main.ts:574-580）。ただし新たに軽微な冗長が残る: onOpenRequestEvent は payload.paths を for ループで全件 openPath したあと、goto があると paths[0] を再度 openPath で開き直す（src/main.ts:569-580）。単一パスの `pika -g a.md:50` でも a.md を 2 回開く（2 回目の openPath→openFile→activateTab で readFile/noteRecent/persistAppState が再走）。openFile は既存タブを重複追加しないため機能破綻・データ喪失はなく導線も成立するが、IPC ラウンドトリップとタブ activate が二重に走る。goto 時は『paths を全部開いてから先頭タブを activate して gotoPosition する』だけにし、二重 open を避けると DX が締まる（Nielsen #4 一貫性・余分な処理の削減）。critical/high ではない磨き込み。",
+      "location": "src/main.ts:574"
+    },
+    {
+      "severity": "low",
+      "area": "CLI フィードバック/DX",
+      "message": "クライアント転送の無言失敗は iteration1 から未対応のまま（low 継続・将来課題）。forward_to_server は CreateFileW 失敗（ERROR_PIPE_BUSY 等）や build_forward_message 失敗で何も通知せず return し（src-tauri/src/single_instance.rs:252-257）、CLI は spawn 成功で既に exit 0 を返している。契約『終了コード0=受理（ファイルが開かれた保証ではない）』に整合しており仕様内だが、稀な短命接続競合（BUSY）でファイルが開かない場合に診断手掛かりが残らない。sprint7 の診断ログ（要件12.3）へ転送失敗を記録する、または BUSY に最小リトライを入れる余地がある。pika-cli の --help/--version・usage（実行例付き）・stderr/stdout 分離・終了コード規約（0=受理/2=引数/3=GUI起動失敗）・未知オプション拒否は良好で、この点のみ将来の磨き込み。",
+      "location": "src-tauri/src/single_instance.rs:252"
+    },
+    {
+      "severity": "low",
+      "area": "CLI ヘルプの自己記述性",
+      "message": "終了コード規約（0=受理 / 2=引数エラー / 3=GUI 起動失敗）は pika-cli の module doc コメント（crates/pika-cli/src/main.rs:8-11）には明文化されているが、--help 出力（HELP 定数・同 19-34）には載っていない。スクリプトから pika を叩く利用者は help だけでは終了コードの意味（特に 2 と 3 の差）を知れず、ソースを読む必要がある。usage/オプション/注記は充実しているので、注記末尾に終了コード表（0=受理・2=引数エラー・3=GUI 起動失敗）を 3 行足すと CLI の自己記述性（Nielsen #10 ヘルプ）が完結する。任意の磨き込み。",
+      "location": "crates/pika-cli/src/main.rs:19"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 5 iteration2（CLI 二段構成・単一インスタンス・状態復元）の UX/DX を確認。iteration1 の指摘は要対応分が全て解消済み: (high) 復元時の削除済みタブが導線として残らず rollback へ到達不能→ restoreOnStartup が deleted タブを取消線で残し（src/main.ts:719-729）、activateTab が削除済みタブで『［確認済み時点に戻す］で退避から復元できます』を提示し回復導線を保つ（同 153-159）。(medium) state.json 破損/未知バージョンで空起動した理由が不可視→ safe_empty 時に『前回の状態を読み込めなかったため空で起動／元の設定は保全し上書きしません』を warn 通知（同 696-703）。(medium) 複数パス＋-g で goto が最後のタブへ→ goto を paths[0] に明示結合（同 574-580）。CLI の DX は引き続き良好: --help/--version/usage が実行例付き、エラーは stderr・本来出力は stdout、終了コード規約（0/2/3）が明文化され未知オプション拒否、-g のドライブレターコロン非分割パースも cargo test で固められている。状態復元は version 安全側＋アトミック書込＋PID 固有 tmp＋fsync で既存 state.json を壊さず、退避/ベースラインも保全されるため誤操作でのデータ喪失なし。単一インスタンスは client→exit(0)＋既存ウィンドウ前面化（旧 F-019 の終了コード255 を解消）、未保存タブ切替確認をキャンセルしても exit0（系統C T-008/H4 に記録）。critical（主要タスク完了不能な導線破綻・誤操作でのデータ喪失）は無し。残るのは low 3 件（goto 時の二重 open の冗長・転送無言失敗の診断手掛かり欠如・--help に終了コード表が無い）のみ。critical=0。"
+}

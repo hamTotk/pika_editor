@@ -1,0 +1,27 @@
+{
+  "reviewer": "performance",
+  "sprint_id": 5,
+  "iteration": 2,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "起動ホットパス / N+1 IPC + 同期FS",
+      "message": "restoreOnStartup のタブ復元ループが、復元タブ 1 件ごとに openFile を直列 await し、その中で noteRecent('file', ...) を呼ぶ。noteRecent は backend(note_recent command)で『state.json を read_to_string→parse→tmp 書込→sync_all(fsync)→rename』のアトミック read-modify-write をフル実行する(commands.rs:111-132 / state_store.rs:62-87・load_for_update)。結果、N タブ復元 = N 回の state.json 全書込+fsync が起動経路で直列に走る(main.ts:717-742→openFile main.ts:209-217→noteRecent main.ts:215)。さらに各 openFile は readFile(IPC)+hashContent(IPC)も発行するため、復元タブあたり最低 3 回の IPC ラウンドトリップ+1 回の fsync が直列化する。性能ゲート(要件2.1 起動0.5秒)に対する起動経路の劣化要因。タブ数は通常一桁で構造的破綻には至らないため critical ではないが、復元時に既に最近リストに載っているファイルを再録(同一値の retain+insert+全書込)するのは純粋な churn でもある。改善案: 起動復元では noteRecent を呼ばない(復元=新規オープンではない)、または復元タブ群の最近リスト更新を 1 回の IPC にまとめ fsync 回数を 1 回へ落とす。readFile も独立タブ分を Promise.all で並列化できる(confirmAll で既に採られている手法・main.ts:454)。",
+      "location": "src/main.ts:717-742, src-tauri/src/commands.rs:111-132, src-tauri/src/state_store.rs:62-87"
+    },
+    {
+      "severity": "low",
+      "area": "操作経路の同期FS書込頻度",
+      "message": "save_app_state / note_recent はいずれも呼び出しごとに state.json を read_to_string→parse→tmp 書込→sync_all→rename する。persistAppState 側は 400ms デバウンスで合体済み(main.ts:653-670・eval medium 対応済み)で適切だが、noteRecent はファイル/フォルダを開くたびに即時・非デバウンスで別経路の全書込+fsync を発行する(main.ts:215,273)。通常操作頻度では問題にならない規模だが、save_app_state と note_recent が同一 state.json を別タイミングで二重に read-modify-write する設計のため、連続オープン時は書込回数が二系統で積み増しになる。noteRecent も persistAppState と同様にデバウンス/合体する余地がある(低優先・可読性とコストの天秤の範囲内)。",
+      "location": "src/main.ts:215, src/main.ts:273, src-tauri/src/commands.rs:176-183"
+    },
+    {
+      "severity": "low",
+      "area": "ホットパス保護の妥当性確認(逆方向・問題なし)",
+      "message": "懸念の打ち消しとして記録。state_store::probe_path(state_store.rs:181-216)は復元時の別物判定で 10MB(HUGE_FILE_THRESHOLD_BYTES)以上のタブを全量読込せず一致扱いにし、起動0.5秒ゲートのホットパスを保護している(spec『10MB 以上はハッシュのみ』と整合)。recent.rs の push_recent は RECENT_CAP=20 上限の retain+insert で実質 O(20)、ipc.rs の parse_incoming_message は MAX_MESSAGE_BYTES=8KB 打切りで入力規模が固定境界。これらはいずれも規模・頻度に照らして過不足なく、過剰最適化も非効率も見当たらない。",
+      "location": "src-tauri/src/state_store.rs:181-216, crates/pika-core/src/recent.rs:43-54, crates/pika-core/src/ipc.rs:120-147"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 5(CLI二段/単一インスタンス/状態復元)の変更を performance 観点でレビュー。critical(criteria のレイテンシ/スループット要件を構造的に満たせない実装)は無し。最大の懸念は起動ホットパスでの N+1 的コスト: restoreOnStartup が復元タブごとに noteRecent を直列発火し、noteRecent が state.json の全書込+fsync をフル実行するため、N タブ復元で N 回の同期 FS 書込+各 3 回の IPC が直列化する(要件2.1 起動0.5秒ゲートの劣化要因)。ただしタブ数は通常一桁で構造的破綻ではないため high 止まり。復元時の noteRecent 抑止/最近リスト更新の 1 IPC 化/独立タブ readFile の並列化で軽減できる。core 純粋ロジック(recent/ipc)と probe_path の巨大ファイルガードは規模・頻度に照らして適切で、過剰最適化も認めない。"
+}

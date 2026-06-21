@@ -43,6 +43,8 @@ windows-sys = { version = "0.59", features = [
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_System_Threading",
+  # ジャンプリスト（最近使った項目）: SHAddToRecentDocs で OS の Recent jump list へ登録する。
+  "Win32_UI_Shell",
 ] }
 
 [features]

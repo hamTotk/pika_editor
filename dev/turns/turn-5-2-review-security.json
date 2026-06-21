@@ -1,0 +1,27 @@
+{
+  "reviewer": "security",
+  "sprint_id": 5,
+  "iteration": 2,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "信頼境界 / 多層防御",
+      "message": "named pipe サーバー(read_and_validate)は接続元プロセスの所有者/トークンを検証しない。DACL(D:(A;;GA;;;OW)(A;;GA;;;SY))と PIPE_REJECT_REMOTE_CLIENTS により『同一ユーザーのローカルプロセス or LocalSystem』に接続を限定する設計で、これは脅威モデル(個人ローカルツール・同一ユーザー文脈)に対して十分。ただし LocalSystem(SY) にも GA を与えているため、同一マシン上の SYSTEM 権限プロセス(別の悪性サービス等)はパイプへ接続し OpenRequest を送れる。受理操作はパスオープン限定で任意 command には到達せず実害は『任意の絶対パスをエディタで開かせる』に留まるため critical ではないが、SY への許可が必要か(通常運用で SYSTEM がクライアントになる場面は無い)を再検討し、不要なら DACL を OW のみに絞ると攻撃面が縮む。design doc 15章-9 のユーザー限定 DACL 趣旨により合致する。",
+      "location": "src-tauri/src/single_instance.rs:115 (PIPE_SDDL)"
+    },
+    {
+      "severity": "low",
+      "area": "情報漏洩 (エラーメッセージ)",
+      "message": "verify_received_path / parse_incoming_message のエラーメッセージに受信パス文字列をそのまま埋め込む(例『絶対パスでない転送パスを拒否: {raw}』『代替データストリーム参照を拒否: {raw}』)。これらは PikaError として戻り named pipe リスナー側では .ok() で破棄されるため現状フロントやログには出ないが、将来 diagnostic ログ(sprint 7・要件12.3『ユーザーのファイル内容を書かない』)へ流す配線が入った場合に、転送パス(利用文脈の痕跡)がログ化される懸念がある。診断ログ実装時に raw を含む検証エラーの扱い(マスク/要約)を要件12.3 に照らして確定すること。本スプリント単体では実害なし。",
+      "location": "crates/pika-core/src/path_verify.rs:96, ipc.rs:123"
+    },
+    {
+      "severity": "low",
+      "area": "入力検証 (パス封じ込め・多層防御)",
+      "message": "verify_received_path は文字列レベルの健全性検査(絶対パス/制御文字/ADS/長パス接頭辞)に限定され、'..' トラバーサルの正規化や canonicalize はモジュール冒頭コメント通り呼び出し側(src-tauri/pika-cli)へ委ねる設計。だが single_instance::read_and_validate から emit('open-request') の経路では verify 後に canonicalize/ワークスペース封じ込めを行わず、フロントが受け取った絶対パスをそのまま open する。受理操作がパスオープン限定で(任意 command でなく)、かつ pika は元々任意の絶対パスを開けるエディタ(脅威モデル上『同一ユーザーが開けるファイル』は元々開ける)なので権限昇格には当たらず critical/high ではない。ただしコメントが約束する『呼び出し側の canonicalize』が転送経路には実在しないため、設計意図とのギャップとして記録する。プレビュー等の機密配信拒否は sprint 4 の path 封じ込め(別系統)が担うことを確認済み。",
+      "location": "crates/pika-core/src/path_verify.rs:1-16, src-tauri/src/single_instance.rs:210"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 5(CLI 二段構成・単一インスタンス named pipe・状態復元)のセキュリティ核心(信頼境界・受信引数再検証・パスパース)を精査した。critical は無い。named pipe は (1) パイプ名 pika-<SID> へ SID 注入文字(英数字とハイフン以外)を拒否、(2) owner/System 限定 DACL + PIPE_REJECT_REMOTE_CLIENTS でリモート/他ユーザーを排除、(3) 受信 8KB 以下に打切り + UTF-8/JSON スキーマ検証 + version 安全側拒否、(4) OpenRequest 型が paths/goto のみで任意 command フィールドを構造的に持たない(余分フィールドは serde で無視)、(5) 受信パスを verify_received_path で再正規化・再検証(相対/ドライブ相対/制御文字/NUL/ADS を拒否) と、信頼境界が多段で fail-closed に閉じられており spec の must『受信引数は core 検証層で再正規化・再検証』『受理操作=パスオープン限定』を満たす。CLI(pika-cli) から GUI 起動は Command::args の引数配列渡しでシェル非経由、jumplist の SHAddToRecentDocs もシェル展開を伴わず argv/コマンドインジェクションのリスクなし。secret/トークンのハードコードは無い。state.json は version 安全側(未知/破損は読まず書かず空起動)でデシリアライズ爆弾耐性も serde 標準範囲内。指摘は medium 1(DACL の SY 許可の妥当性再検討)・low 2(将来の診断ログでの受信パス漏洩懸念・転送経路に canonicalize が無い設計ギャップ)で、いずれもリリースを妨げない多層防御の改善提案。"
+}

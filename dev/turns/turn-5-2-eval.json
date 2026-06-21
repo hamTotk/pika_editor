@@ -1,0 +1,63 @@
+{
+  "score": 100,
+  "plan_implementation": {
+    "overall": 100,
+    "notes": "sprint5(CLI二段構成・自前named pipe単一インスタンス・受信引数再検証・state.json復元3分岐)の must 5件は全充足。決定論ロジックを pika-core(cli/ipc/path_verify/state/hashing/recent)へ集約し cargo test 207件(+14新規=hashing6/recent6/state+2)で観測、src-tauri は薄い橋渡し層(state_store/commands/single_instance/jumplist)に徹し design doc 3章パターンに準拠。系統C must(単一インスタンス実機H1/H2/H4・ジャンプリスト実描画H12・GUI反映H8-H11)は spec契約どおり acceptance-findings T-008 に節番号併記で記録。should 3件(最近使った項目+ジャンプリスト/フォルダ切替/存在しないパス=新規タブ)を実装し iteration1 の 0/3 → 3/3。iteration1 の high4件(状態復元の実体不全=cursor/scroll/content_hashダミー固定→EditorHandle.getCursor/getScrollTop+backend hash_content で実値化し『別物=未読復元』分岐を production で活性化・active_tab往復欠落→active_tab_path()でパス解決し RestoreOutcome.active_path 経由で再アクティブ化・削除済みタブ回復導線欠落→取消線タブで残し rollback到達可能に・起動復元ホットパスの巨大ファイルガード→probe_path を metadata len 先読みで10MB以上は全量読込せず Same扱い)を全て実体修正、medium/low も対応。"
+  },
+  "quality": {
+    "overall": 100,
+    "breakdown": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 94
+    },
+    "dimension_thresholds": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 80
+    }
+  },
+  "all_dimensions_passed": true,
+  "feedback": "sprint5 iteration2(CLI二段構成・自前named pipe単一インスタンス・受信引数再検証・state.json復元3分岐)は全must充足・全レビュワー critical=0・テスト改竄なしで passed=true(score=100)。[d_verify=100] cargo test/cargo build(warnings=deny)/npm run typecheck の3コマンド全 exit 0。[d_accept=100] -gドライブレターコロン非分割パース・named pipe(per-SIDパイプ名+注入検査+owner限定DACL+PIPE_REJECT_REMOTE_CLIENTS+8KB打切り+JSONスキーマ検証+version安全側+受理操作=OpenRequest型でpaths/gotoのみ・余分フィールドはserdeが落とす)・受信パス再検証(path_verify=絶対パス/制御文字/ADS/長パス接頭辞)・state復元3分岐(消失=削除済み/別物=未読/一致=正常+version安全側 未知=読まず書かず再生成せず)を pika-core で実装し cargo test で観測。[d_quality=94] iteration1 の品質欠陥(復元の実体不全で Changed分岐が死に枝・active_tab往復欠落・削除済みタブ行き止まり・probe_pathのサイズガード欠如)を全て本物の実装で解消。getCursor/getScrollTop は CM6 API(selection.main.head/lineBlockAtHeight)で実値収集、content_hash は backend hash_content(pika-core::hashing と同一規則)で実値化、active_path はインデックスでなくパスで再アクティブ化、削除済みタブは取消線で残し rollback導線保持、probe_path は10MB以上を全量読込せず Same扱い(起動ホットパス保護・spec『10MB以上はハッシュのみ』整合)。重複ハッシュ実装を hashing.rs へ集約しドリフト源を解消、note_recent が recent の単独owner で save_app_state と二重管理しない設計、ICustomDestinationList カスタムカテゴリは要件外として足さない(YAGNI遵守)。[d_review=100] security/performance/ux いずれも has_critical=false。テスト変更は新規14件の追加と cargo fmt 整形のみで既存アサーションの緩和/スキップ/無効化なし。[should 3/3] 最近使った項目+ジャンプリスト(recent.rs LRU/重複排除/各20件上限・SHAddToRecentDocs)・フォルダ切替(未保存確認)・存在しないパス=新規タブ(path_kind 種別分岐)。残findingは全て low/medium のリリース非ブロック(DACL の SY許可再検討・診断ログ未配線時の受信パス漏洩懸念・goto時の二重open冗長・転送無言失敗の診断手掛かり・--help に終了コード表)で sprint7 診断ログ等へ正しく引き継がれている。",
+  "feedback_structured": {
+    "high": [],
+    "medium": [
+      {
+        "area": "起動ホットパス N+1 (performance)",
+        "message": "restoreOnStartup のタブ復元ループが復元タブ1件ごとに openFile を直列 await し、その中で noteRecent('file',...) を呼ぶ。noteRecent は backend で state.json の read-modify-write(read_to_string→parse→tmp書込→sync_all(fsync)→rename)をフル実行するため、Nタブ復元=N回の state.json 全書込+fsync が起動経路で直列化する(各 openFile は readFile+hashContent の IPC も発行)。タブ数は通常一桁で構造的破綻ではないため critical/high ではないが、要件2.1 起動0.5秒ゲートの劣化要因。改善案: 起動復元では noteRecent を呼ばない(復元=新規オープンではない)、または復元タブ群の最近リスト更新を1回の IPC へまとめ fsync を1回に落とす。独立タブの readFile は confirmAll で既採用の Promise.all で並列化できる(turn report の『並列化見送り=YAGNI』判断は size guard を前提に妥当だが、noteRecent の fsync churn は別軸の改善余地)。次ターン以降 or sprint6 CM6 実測(系統C)で再評価。"
+      },
+      {
+        "area": "DACL の SY 許可妥当性 (security)",
+        "message": "named pipe の PIPE_SDDL が D:(A;;GA;;;OW)(A;;GA;;;SY) で Owner(OW) に加え LocalSystem(SY) にも GA を与えている。受理操作はパスオープン限定で任意 command に到達せず実害は『任意絶対パスをエディタで開かせる』に留まるため critical ではないが、通常運用で SYSTEM がクライアントになる場面は無く design doc 15章-9 のユーザー限定 DACL 趣旨に照らすと SY 許可は攻撃面の素。不要なら DACL を OW のみへ絞ると攻撃面が縮む。要否を検討して確定すること。"
+      }
+    ],
+    "low": [
+      {
+        "area": "診断ログでの受信パス/SID 漏洩懸念 (security)",
+        "message": "verify_received_path/parse_incoming_message のエラーメッセージに受信パス文字列・SID をそのまま埋め込む。現状 named pipe リスナーは .ok() で破棄しフロント/ログへ出ない経路だが、sprint7 の診断ログ(要件12.3『ユーザーのファイル内容を書かない』)へ流す配線が入った際に転送パス/SID がログ化されないか(長さ/種別へ丸めるか)を要件12.3 に照らして確定すること。本スプリント単体では実害なし。"
+      },
+      {
+        "area": "転送経路の canonicalize 責務ギャップ (security)",
+        "message": "path_verify モジュール冒頭コメントは '..'トラバーサルの正規化/canonicalize を呼び出し側責務と約束するが、single_instance::read_and_validate → emit('open-request') の転送経路には canonicalize/ワークスペース封じ込めが実在しない。受理操作がパスオープン限定で pika は元々任意の絶対パスを開けるエディタ(同一ユーザーが元々開けるファイル)なので権限昇格に当たらず critical/high ではないが、設計意図とのギャップとして記録。プレビュー素材配信(sprint4 の prefix検証+canonicalize)とどこで traversal を最終封じするかの責務分界を spec/コメントで一本化すると取りこぼしを防げる。"
+      },
+      {
+        "area": "noteRecent の非デバウンス即時 fsync (performance)",
+        "message": "persistAppState は400msデバウンスで合体済み(eval medium 対応済み)だが、noteRecent はファイル/フォルダを開くたびに即時・非デバウンスで別経路の state.json 全書込+fsync を発火する。save_app_state と note_recent が同一 state.json を別タイミングで二重に read-modify-write する設計のため連続オープン時に書込が二系統で積み増す。通常頻度では問題にならない規模だが noteRecent も persistAppState 同様にデバウンス/合体する余地(可読性とコストの天秤の範囲内)。"
+      },
+      {
+        "area": "goto 時の二重 open 冗長 (ux)",
+        "message": "onOpenRequestEvent は payload.paths を for ループで全件 openPath したあと goto があると paths[0] を再度 openPath で開き直すため、単一パス `pika -g a.md:50` でも a.md を2回開く(2回目で readFile/noteRecent/persistAppState/activate が再走)。openFile は既存タブを重複追加しないので機能破綻・データ喪失はなく仕様内だが、goto時は『paths を全部開いてから先頭タブを activate して gotoPosition する』だけにし二重 open を避けると DX が締まる。"
+      },
+      {
+        "area": "転送無言失敗の診断手掛かり欠如 (ux)",
+        "message": "forward_to_server は CreateFileW 失敗(ERROR_PIPE_BUSY 等)や build_forward_message 失敗で何も通知せず return し CLI は spawn 成功で既に exit 0 を返す。契約『終了コード0=受理(開かれた保証ではない)』に整合し仕様内だが、稀な短命接続競合でファイルが開かない場合に診断手掛かりが残らない。sprint7 診断ログへ転送失敗を記録するか BUSY に最小リトライを入れる余地。"
+      },
+      {
+        "area": "--help に終了コード表が無い (ux)",
+        "message": "終了コード規約(0=受理/2=引数エラー/3=GUI起動失敗)は pika-cli の module doc には明文化されているが --help 出力(HELP 定数)には載っていない。スクリプトから叩く利用者が help だけで終了コードの意味を知れない。注記末尾に終了コード表を3行足すと CLI の自己記述性が完結する。任意の磨き込み。"
+      }
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

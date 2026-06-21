@@ -8,9 +8,19 @@ import { markdown } from "@codemirror/lang-markdown";
 /** 外部リロードのトランザクションに付ける注釈。これが付いた変更は dirty 化しない（要件7.2/5.1）。 */
 const ExternalReload = Annotation.define<boolean>();
 
+/** カーソル位置（1 始まり行・桁。state.json 保存用）。 */
+export interface CursorPos {
+  line: number;
+  column: number;
+}
+
 export interface EditorHandle {
   /** 現在のバッファ内容を取得する（保存に使う）。 */
   getContent(): string;
+  /** 現在のカーソル位置（1 始まり行・桁）を取得する（state.json 保存用・要件10.1）。 */
+  getCursor(): CursorPos;
+  /** スクロール位置（先頭の表示行番号 1 始まり近似）を取得する（state.json 保存用・要件10.1）。 */
+  getScrollTop(): number;
   /** 内容を差し替える（タブ切替時）。 */
   setContent(text: string): void;
   /**
@@ -24,6 +34,11 @@ export interface EditorHandle {
    * 行・桁は 1 始まり。行数超過は最終行、桁省略/超過は行頭/行末へクランプする。
    */
   gotoPosition(line: number, column: number): void;
+  /**
+   * 指定行が最上部に来るようスクロールする（state.json 復元用・要件10.1）。
+   * カーソルは動かさない（カーソル復元は gotoPosition が担う）。行超過は最終行へクランプ。
+   */
+  scrollToLine(line: number): void;
   /** 破棄する。 */
   destroy(): void;
 }
@@ -71,6 +86,18 @@ export function createEditor(
 
   return {
     getContent: () => view.state.doc.toString(),
+    getCursor: () => {
+      // メインカーソル（selection.main.head）の絶対位置から 1 始まり行・桁へ換算する。
+      const head = view.state.selection.main.head;
+      const line = view.state.doc.lineAt(head);
+      return { line: line.number, column: head - line.from + 1 };
+    },
+    getScrollTop: () => {
+      // スクロール最上部に対応する行番号（1 始まり近似）。ピクセルでなく行で保持し、
+      // 復元時に再オープン内容が多少変わっても破綻しにくくする（行ベース近似・要件10.1）。
+      const topPos = view.lineBlockAtHeight(view.scrollDOM.scrollTop).from;
+      return view.state.doc.lineAt(topPos).number;
+    },
     setContent: (text: string) => {
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: text },
@@ -100,6 +127,13 @@ export function createEditor(
       const pos = Math.min(lineInfo.from + (col - 1), lineInfo.to);
       view.dispatch({ selection: { anchor: pos, head: pos }, scrollIntoView: true });
       view.focus();
+    },
+    scrollToLine: (line: number) => {
+      const lineCount = view.state.doc.lines;
+      const target = Math.max(1, Math.min(line, lineCount));
+      const lineInfo = view.state.doc.line(target);
+      // 指定行を上端に寄せる（カーソルは変えない＝復元時の位置近似）。
+      view.dispatch({ effects: EditorView.scrollIntoView(lineInfo.from, { y: "start" }) });
     },
     destroy: () => view.destroy(),
   };
