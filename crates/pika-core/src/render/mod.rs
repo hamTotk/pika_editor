@@ -29,6 +29,67 @@ pub use path::{
 };
 pub use sanitize::{markdown_to_unsafe_html, sanitize_html, PreviewFlavor};
 
+// PreviewTheme（Stage ③・別WebView へ降ろすテーマ配色）は本モジュール直下で pub 定義する。
+
+/// プレビュー別WebView へ降ろすテーマ配色（Stage ③・design doc 10章「別WebViewへ CSS 変数」）。
+///
+/// 別WebView は独立文書でメインアプリの CSS 変数を継承しないため、アプリの解決済みトークン色を
+/// ここで受け取り `wrap_preview_document` が `:root{--pk-*}` として注入する。
+///
+/// **設計上の不変条件（pika-core は Tauri/UI を知らない＝純粋 String）**:
+/// - フィールドは全て**色文字列**のみ（`#rrggbb`・`rgb(...)`・`rgba(...)` 等）。UI 型は持ち込まない。
+/// - 注入前に [`PreviewTheme::is_safe_color`] で CSP/HTML インジェクション文字（`;`/`<`/`{` 等）を弾く。
+///   1 つでも不正なら [`wrap_preview_document`] は theme 注入を丸ごと諦め、`color-scheme` 任せに倒す
+///   （fail-closed・攻撃者制御文字列を `<style>` に漏らさない）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PreviewTheme {
+    /// プレビュー背景（アプリの `--bg-raised`）。
+    pub bg: String,
+    /// 本文色（`--text-1`）。
+    pub fg: String,
+    /// 淡色テキスト（`--text-2`・blockquote 等）。
+    pub muted: String,
+    /// 罫線（`--border-2`・table/blockquote）。
+    pub border: String,
+    /// リンク色（`--accent`）。
+    pub accent: String,
+    /// 沈み込み背景（`--bg-sunken`・コード/失敗ブロック等）。
+    pub sunken: String,
+    /// ダークかどうか（hljs CSS の出し分けに使う）。
+    pub dark: bool,
+}
+
+impl PreviewTheme {
+    /// 全色フィールドが安全な色値文字列か（CSP/HTML インジェクション対策・防御的）。
+    ///
+    /// 許可するのは英数字と色値で現れる記号（`#`/`(`/`)`/`,`/`%`/`.`/`-`/空白）に限定する。
+    /// `;`/`<`/`>`/`{`/`}`/`"`/`'`/`:`/`/`/`*` 等の宣言区切り・タグ文字・URL 文字は弾く
+    /// （`<style>` への注入を 1 文字でも許さない）。空文字も不可（注入が無意味）。
+    pub fn is_safe_colors(&self) -> bool {
+        [
+            &self.bg,
+            &self.fg,
+            &self.muted,
+            &self.border,
+            &self.accent,
+            &self.sunken,
+        ]
+        .iter()
+        .all(|c| Self::is_safe_color(c))
+    }
+
+    /// 単一の色値文字列が安全か（英数 + `#(),%. -` と空白のみ・非空・長さ上限）。
+    fn is_safe_color(c: &str) -> bool {
+        if c.is_empty() || c.len() > 64 {
+            return false;
+        }
+        c.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(ch, '#' | '(' | ')' | ',' | '%' | '.' | '-' | ' ')
+        })
+    }
+}
+
 /// custom protocol が別WebView へ直配信する 1 レスポンス分（要件6・design doc 6章）。
 ///
 /// `body`（サニタイズ済み HTML）と `csp`（レスポンスヘッダ値）を**必ずセットで**配信する。
@@ -89,23 +150,33 @@ pub fn prepare_markdown_preview(markdown: &str, allow: &ExternalResourceAllow) -
 ///
 /// 最小 base CSS（`<style>`）は読みやすさのためのみで、CSP の `style-src 'unsafe-inline'`（系統A/B とも許可）
 /// の範囲に収まる。文書由来 CSS（系統B のインライン CSS）は `body` 側に既に含まれ、ここでは上書きしない。
-pub fn wrap_preview_document(body: &str, nonce: &str, flavor: PreviewFlavor) -> String {
-    // 最小 base CSS: 余白・行間・等幅・画像はみ出し抑制のみ（質感/テーマは後続Stageで CSS 変数受け渡し）。
-    const BASE_CSS: &str = "\
-html{color-scheme:light dark}\
-body{margin:0;padding:16px;font-family:\"Segoe UI\",\"Meiryo\",\"Yu Gothic UI\",sans-serif;\
-line-height:1.6;word-wrap:break-word;overflow-wrap:anywhere}\
-img{max-width:100%;height:auto}\
-pre{overflow:auto}\
-table{border-collapse:collapse}\
-th,td{border:1px solid currentColor;padding:.3em .6em}";
-
+///
+/// Stage ③（テーマ反映・design doc 10章）:
+/// - `theme` が `Some` かつ全色が安全（[`PreviewTheme::is_safe_colors`]）なら `:root{--pk-*}` を `<style>` 先頭へ
+///   注入し、base CSS は `var(--pk-*)` を参照する（アプリの解決済みトークン色で背景/本文/リンク/罫線を着色）。
+/// - hljs CSS link は `theme.dark` で出し分ける（dark→github-dark / light→github）。
+/// - `theme` が `None` または不正色のときは theme 注入を諦め、`color-scheme:light dark` の OS 任せに倒す（fail-closed）。
+/// - **系統B（HTML・ユーザー文書）にはテーマを適用しない**（文書スタイル尊重＝要件11.3・ui-design 8章）。
+///   よって呼び出し側は系統B では `theme=None` を渡す（本関数も系統B では `--pk-*` を出さない）。
+pub fn wrap_preview_document(
+    body: &str,
+    nonce: &str,
+    flavor: PreviewFlavor,
+    theme: Option<&PreviewTheme>,
+) -> String {
     // 系統A のみベンダーアセット注入の対象（系統B は文書 JS 完全無効）。
     // 条件付き注入（「軽い」原則・F-004）: 使われている機能だけ CSS link / JS を入れる。
-    let assets = if matches!(flavor, PreviewFlavor::MarkdownTrustedJs) {
+    let is_markdown = matches!(flavor, PreviewFlavor::MarkdownTrustedJs);
+    let assets = if is_markdown {
         detect_assets(body)
     } else {
         AssetNeeds::none()
+    };
+
+    // テーマ注入は系統A のみ・全色が安全なときのみ（系統B＝文書スタイル尊重・不正色は fail-closed）。
+    let themed = match theme {
+        Some(t) if is_markdown && t.is_safe_colors() => Some(t),
+        _ => None,
     };
 
     let mut head_links = String::new();
@@ -114,17 +185,70 @@ th,td{border:1px solid currentColor;padding:.3em .6em}";
         head_links.push_str("<link rel=\"stylesheet\" href=\"/assets/katex.min.css\">\n");
     }
     if assets.highlight {
-        head_links
-            .push_str("<link rel=\"stylesheet\" href=\"/assets/hljs-github-dark.min.css\">\n");
+        // テーマのダーク判定で hljs CSS を出し分ける（dark→github-dark / light→github・両方 vendor にある）。
+        // テーマ不明（None・系統B）のときは従来どおり github-dark 固定（color-scheme:light dark の暗背景前提）。
+        let hljs = if themed.is_some_and(|t| !t.dark) {
+            "hljs-github.min.css"
+        } else {
+            "hljs-github-dark.min.css"
+        };
+        head_links.push_str(&format!(
+            "<link rel=\"stylesheet\" href=\"/assets/{hljs}\">\n"
+        ));
     }
 
+    let style = build_base_style(themed);
     let scripts = build_asset_scripts(&assets, nonce);
 
     format!(
         "<!DOCTYPE html>\n<html lang=\"ja\">\n<head>\n<meta charset=\"utf-8\">\n\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n\
-{head_links}<style>{BASE_CSS}</style>\n</head>\n<body>\n{body}\n{scripts}</body>\n</html>\n"
+{head_links}{style}\n</head>\n<body>\n{body}\n{scripts}</body>\n</html>\n"
     )
+}
+
+/// プレビュー base CSS の `<style>` を組む（テーマ変数注入・forced-colors 最小対応）。
+///
+/// `themed` が `Some` なら `:root{--pk-*}` を先頭に置き、base CSS は `var(--pk-*)` を参照する。
+/// `None`（テーマ無し/不正色/系統B）なら `--pk-*` を出さず、`var()` の第2引数フォールバック値が効く
+/// （`color-scheme:light dark`＋`currentColor`/`Canvas` 系で OS 任せに倒れる＝fail-closed）。
+fn build_base_style(themed: Option<&PreviewTheme>) -> String {
+    // テーマ変数（安全色のみ到達）。フォールバックは var() の第2引数で OS 任せに倒す。
+    let root_vars = match themed {
+        Some(t) => format!(
+            ":root{{--pk-bg:{};--pk-fg:{};--pk-muted:{};--pk-border:{};--pk-accent:{};--pk-sunken:{}}}",
+            t.bg, t.fg, t.muted, t.border, t.accent, t.sunken
+        ),
+        None => String::new(),
+    };
+
+    // base CSS は CSS 変数参照（未定義時はフォールバック）。色は theme 変数で着色する（design doc 10章）。
+    // forced-colors:active では独自色を降ろし system color に委ねる（要件11.5・design doc 10/17章・最小）。
+    const BASE_CSS: &str = "\
+html{color-scheme:light dark}\
+body{margin:0;padding:16px;font-family:\"Segoe UI\",\"Meiryo\",\"Yu Gothic UI\",sans-serif;\
+line-height:1.6;word-wrap:break-word;overflow-wrap:anywhere;\
+background:var(--pk-bg);color:var(--pk-fg)}\
+a{color:var(--pk-accent)}\
+img{max-width:100%;height:auto}\
+pre{overflow:auto}\
+:not(pre)>code{background:var(--pk-sunken)}\
+table{border-collapse:collapse}\
+th,td{border:1px solid var(--pk-border,currentColor);padding:.3em .6em}\
+blockquote{margin:0 0 1em;padding:0 1em;color:var(--pk-muted);border-left:3px solid var(--pk-border,currentColor)}\
+hr{border:none;border-top:1px solid var(--pk-border,currentColor)}\
+.pika-block-error{position:relative;padding-left:.8em;\
+border-left:3px solid var(--pk-accent,Highlight);background:var(--pk-sunken,transparent)}\
+.pika-block-error::before{content:\"描画に失敗（元のコードを表示）\";display:block;\
+font-size:.8em;color:var(--pk-accent,Highlight);padding:.2em 0}\
+@media (forced-colors: active){\
+body{background:Canvas;color:CanvasText}\
+a{color:LinkText}\
+th,td,blockquote,hr{border-color:CanvasText}\
+.pika-block-error{border-left-color:Highlight;background:Canvas}\
+.pika-block-error::before{color:Highlight}}";
+
+    format!("<style>{root_vars}{BASE_CSS}</style>")
 }
 
 /// 系統A の body で使われている機能（どの同梱アセットを注入すべきか）。
@@ -204,16 +328,19 @@ fn build_asset_scripts(assets: &AssetNeeds, nonce: &str) -> String {
 ///
 /// **正本はここ（pika-core）**。frontend の旧 `buildTrustedJsInit`（`src/preview/index.ts`）は実行時の正本では
 /// なくなった（Stage ② で Rust 側へ移植）。文字列の意味は旧実装と一致させる（per-block 描画・約1秒タイムアウト・
-/// 失敗時の元コード復帰マーク・失敗件数集計）。
+/// 失敗時の元コード復帰マーク）。
 ///
 /// 危険オプション封じ（design doc 6章「信頼済み JS の危険オプション封じ」）:
 /// - **Mermaid**: `securityLevel:'strict'`（click/任意 HTML 生成禁止）・`startOnLoad:false`（手動 per-block 描画）。
 /// - **KaTeX**: `trust:false`・`strict:true`・`maxExpand:1000`・`throwOnError:false`（`\href{javascript:}`/`\htmlData` 経路封じ）。
 /// - **highlight.js**: `pre code` のみ。
-/// - 各ブロック個別描画。構文エラー/タイムアウト（約1秒）で当該ブロックを元コード表示へ戻しエラーマーク。
+/// - 各ブロック個別描画。構文エラー/タイムアウト（約1秒）で当該ブロックを元コード表示へ戻し `pika-block-error` 付与。
 ///
-/// 失敗件数は `window.parent.postMessage` で通知するが、別WebView はトップレベルで `window.parent === window`
-/// のため**無害な no-op**になる（Stage ③ で Tauri event/IPC へ置換予定。本 Stage は描画が主目的でそのままでよい）。
+/// **失敗の可視化は in-preview（Stage ③・要件6.2）**: 失敗ブロックには [`markError`] が `pika-block-error` を
+/// 付け、[`build_base_style`] の CSS が縦線＋「描画に失敗（元のコードを表示）」ラベルで視認可能にする。
+/// `window.parent.postMessage` は別WebView では `window.parent === window` の**無害な no-op**で残す
+/// （F-029 でプレビュー別WebView からの IPC/event は境界で全拒否＝メインへ件数を送る経路は持たない・
+/// セキュリティ設計と両立させるため穴を開け直さない）。
 const TRUSTED_JS_INIT: &str = r#"(function(){
   "use strict";
   var BLOCK_TIMEOUT_MS = 1000;
@@ -391,7 +518,7 @@ mod tests {
         // Stage ①: フラグメント body を完全 HTML 文書へラップする。
         // 不変条件: DOCTYPE/charset 付与・body を一字一句改変しない・meta CSP を入れない。
         let body = "<h1>見出し</h1>\n<p>日本語の本文 &amp; テスト</p>";
-        let doc = wrap_preview_document(body, "abc123", PreviewFlavor::MarkdownTrustedJs);
+        let doc = wrap_preview_document(body, "abc123", PreviewFlavor::MarkdownTrustedJs, None);
         assert!(doc.starts_with("<!DOCTYPE html>"), "DOCTYPE が無い: {doc}");
         assert!(
             doc.contains("<meta charset=\"utf-8\">"),
@@ -416,8 +543,8 @@ mod tests {
         let body = "<pre><code class=\"language-mermaid\">graph TD;A--&gt;B</code></pre>\n\
 <p>数式 $E=mc^2$ です</p>\n\
 <pre><code class=\"language-rust\">fn main(){}</code></pre>";
-        let doc = wrap_preview_document(body, "abc123", PreviewFlavor::MarkdownTrustedJs);
-        // CSS link（KaTeX/highlight）。
+        let doc = wrap_preview_document(body, "abc123", PreviewFlavor::MarkdownTrustedJs, None);
+        // CSS link（KaTeX/highlight）。theme=None は従来どおり hljs-github-dark 固定。
         assert!(
             doc.contains("<link rel=\"stylesheet\" href=\"/assets/katex.min.css\">"),
             "KaTeX CSS link が無い: {doc}"
@@ -470,7 +597,7 @@ mod tests {
     fn wrap_条件付き注入_使われない機能のアセットは入れない() {
         // Mermaid のみ使う body（数式・コードブロック無し）。katex/highlight は注入されない。
         let body = "<pre><code class=\"language-mermaid\">graph TD;A--&gt;B</code></pre>";
-        let doc = wrap_preview_document(body, "n", PreviewFlavor::MarkdownTrustedJs);
+        let doc = wrap_preview_document(body, "n", PreviewFlavor::MarkdownTrustedJs, None);
         assert!(
             doc.contains("/assets/mermaid.min.js"),
             "mermaid が入っていない: {doc}"
@@ -491,7 +618,7 @@ mod tests {
     fn wrap_平易な本文には何も注入しない_コストゼロ() {
         // Mermaid/数式/コードブロックいずれも無い → ベンダー JS も初期化 script も注入しない。
         let body = "<h1>タイトル</h1>\n<p>ただの日本語段落です。</p>";
-        let doc = wrap_preview_document(body, "n", PreviewFlavor::MarkdownTrustedJs);
+        let doc = wrap_preview_document(body, "n", PreviewFlavor::MarkdownTrustedJs, None);
         assert!(
             !doc.contains("<script"),
             "未使用なのに script を注入した（コストゼロ違反）: {doc}"
@@ -507,7 +634,7 @@ mod tests {
     fn wrap_系統b_には一切注入しない() {
         // 系統B（HTML・JS 完全無効）にはコードブロックや数式があっても何も注入しない。
         let body = "<pre><code class=\"language-rust\">fn main(){}</code></pre>\n<p>$x$</p>";
-        let doc = wrap_preview_document(body, "n", PreviewFlavor::HtmlNoJs);
+        let doc = wrap_preview_document(body, "n", PreviewFlavor::HtmlNoJs, None);
         assert!(
             !doc.contains("<script"),
             "系統B に script を注入した（文書 JS 完全無効違反）: {doc}"
@@ -523,7 +650,7 @@ mod tests {
     fn wrap_数式のみの本文には_katex_だけ入る() {
         // インラインコードを含まない純テキスト数式（highlight/mermaid は不要）。
         let body = "<p>方程式 $$a^2+b^2=c^2$$ について</p>";
-        let doc = wrap_preview_document(body, "n", PreviewFlavor::MarkdownTrustedJs);
+        let doc = wrap_preview_document(body, "n", PreviewFlavor::MarkdownTrustedJs, None);
         assert!(
             doc.contains("/assets/katex.min.js"),
             "KaTeX が入っていない: {doc}"
@@ -553,5 +680,170 @@ mod tests {
             "正常な許可ホストが反映されない: {}",
             resp.csp
         );
+    }
+
+    /// テスト用の妥当なライト/ダークテーマ（色文字列は安全文字のみ）。
+    fn theme_fixture(dark: bool) -> PreviewTheme {
+        PreviewTheme {
+            bg: "#fafafb".into(),
+            fg: "#26262b".into(),
+            muted: "rgb(90, 90, 98)".into(),
+            border: "#cacace".into(),
+            accent: "#4f74a8".into(),
+            sunken: "#e6e6ea".into(),
+            dark,
+        }
+    }
+
+    #[test]
+    fn wrap_系統aは_theme_を_root_css変数として注入する() {
+        // Stage ③: 解決済みトークン色を :root{--pk-*} として <style> 先頭へ注入し base CSS が参照する。
+        let theme = theme_fixture(false);
+        let body = "<h1>見出し</h1><p>本文</p>";
+        let doc = wrap_preview_document(body, "n", PreviewFlavor::MarkdownTrustedJs, Some(&theme));
+        assert!(doc.contains("--pk-bg:#fafafb"), "--pk-bg 未注入: {doc}");
+        assert!(doc.contains("--pk-fg:#26262b"), "--pk-fg 未注入: {doc}");
+        assert!(
+            doc.contains("--pk-muted:rgb(90, 90, 98)"),
+            "--pk-muted 未注入: {doc}"
+        );
+        assert!(
+            doc.contains("--pk-border:#cacace"),
+            "--pk-border 未注入: {doc}"
+        );
+        assert!(
+            doc.contains("--pk-accent:#4f74a8"),
+            "--pk-accent 未注入: {doc}"
+        );
+        assert!(
+            doc.contains("--pk-sunken:#e6e6ea"),
+            "--pk-sunken 未注入: {doc}"
+        );
+        // base CSS が変数を参照していること（背景/本文/リンク/罫線）。
+        assert!(
+            doc.contains("background:var(--pk-bg);color:var(--pk-fg)"),
+            "body が theme 変数を参照していない: {doc}"
+        );
+        assert!(
+            doc.contains("a{color:var(--pk-accent)}"),
+            "リンク色未参照: {doc}"
+        );
+        // body は一字一句改変しない（不変条件）。
+        assert!(doc.contains(body), "body が改変された: {doc}");
+        // meta CSP は入れない（ヘッダ強制原則）。
+        assert!(
+            !doc.to_ascii_lowercase().contains("http-equiv"),
+            "meta CSP を埋め込んだ: {doc}"
+        );
+    }
+
+    #[test]
+    fn wrap_hljs_link_は_theme_dark_で出し分ける() {
+        // Stage ③: コードブロックを含む body に対し、dark→github-dark / light→github を出し分ける。
+        let body = "<pre><code class=\"language-rust\">fn main(){}</code></pre>";
+        let light = theme_fixture(false);
+        let dark = theme_fixture(true);
+        let doc_light =
+            wrap_preview_document(body, "n", PreviewFlavor::MarkdownTrustedJs, Some(&light));
+        assert!(
+            doc_light.contains("/assets/hljs-github.min.css")
+                && !doc_light.contains("/assets/hljs-github-dark.min.css"),
+            "light テーマで github（非dark）が選ばれていない: {doc_light}"
+        );
+        let doc_dark =
+            wrap_preview_document(body, "n", PreviewFlavor::MarkdownTrustedJs, Some(&dark));
+        assert!(
+            doc_dark.contains("/assets/hljs-github-dark.min.css"),
+            "dark テーマで github-dark が選ばれていない: {doc_dark}"
+        );
+    }
+
+    #[test]
+    fn wrap_不正な色文字列の_theme_は注入しない_fail_closed() {
+        // CSP/HTML インジェクション防御: 1 つでも不正色があれば --pk-* を一切出さない（fail-closed）。
+        let mut bad = theme_fixture(false);
+        bad.accent = "#000;} body{display:none".into(); // 宣言区切り/タグ崩しを仕込む。
+        assert!(!bad.is_safe_colors(), "不正色を安全判定した");
+        let body = "<p>本文</p>";
+        let doc = wrap_preview_document(body, "n", PreviewFlavor::MarkdownTrustedJs, Some(&bad));
+        // `var(--pk-*)` 参照は base CSS に常在するため、変数「定義」(`:root{--pk`) の有無で判定する。
+        assert!(
+            !doc.contains(":root{--pk"),
+            "不正色 theme なのに :root の --pk-* 定義を注入した: {doc}"
+        );
+        // 攻撃文字列そのものが <style> に漏れていないこと。
+        assert!(
+            !doc.contains("body{display:none"),
+            "攻撃者制御文字列が style に漏れた: {doc}"
+        );
+        // base CSS の var() フォールバックで OS 任せに倒れている（color-scheme は残る）。
+        assert!(
+            doc.contains("color-scheme:light dark"),
+            "fail-closed 時に color-scheme が無い: {doc}"
+        );
+    }
+
+    #[test]
+    fn wrap_系統bにはtheme色を適用しない_文書スタイル尊重() {
+        // 要件11.3・ui-design 8章: HTML プレビュー（系統B）にはテーマを適用しない。
+        let theme = theme_fixture(true);
+        let body = "<div style=\"color:red\">文書</div>";
+        let doc = wrap_preview_document(body, "n", PreviewFlavor::HtmlNoJs, Some(&theme));
+        // 系統B では `:root{--pk-*}` 定義を出さない（base CSS の var() 参照は常在＝定義の有無で判定）。
+        assert!(
+            !doc.contains(":root{--pk"),
+            "系統B に theme 変数定義を注入した（文書スタイル尊重違反）: {doc}"
+        );
+        assert!(doc.contains(body), "body が改変された: {doc}");
+    }
+
+    #[test]
+    fn wrap_失敗ブロックの可視化cssと_forced_colors_最小対応がある() {
+        // Stage ③: in-preview の失敗可視化（要件6.2・F-029 と整合）と forced-colors 最小対応。
+        let theme = theme_fixture(false);
+        let body = "<p>本文</p>";
+        let doc = wrap_preview_document(body, "n", PreviewFlavor::MarkdownTrustedJs, Some(&theme));
+        // 失敗ブロックの縦線＋ラベル（テーマ変数を使う）。
+        assert!(
+            doc.contains(".pika-block-error"),
+            "失敗ブロックの CSS が無い: {doc}"
+        );
+        assert!(
+            doc.contains("描画に失敗（元のコードを表示）"),
+            "失敗ブロックのラベルが無い: {doc}"
+        );
+        // forced-colors:active で system color に委ねる最小対応。
+        assert!(
+            doc.contains("@media (forced-colors: active)"),
+            "forced-colors 最小対応が無い: {doc}"
+        );
+        assert!(
+            doc.contains("background:Canvas;color:CanvasText"),
+            "forced-colors で system color に委ねていない: {doc}"
+        );
+    }
+
+    #[test]
+    fn preview_theme_is_safe_color_は危険文字を弾く() {
+        // 色値検証の単体回帰（防御の中核）。
+        assert!(PreviewTheme::is_safe_color("#1d1d21"));
+        assert!(PreviewTheme::is_safe_color("rgb(125, 158, 201)"));
+        assert!(PreviewTheme::is_safe_color("rgba(0,0,0,.5)"));
+        // 危険: 宣言区切り・タグ・属性閉じ・コロン・ブロック・コメント等は弾く
+        // （`<style>`/CSS 宣言を崩せる文字を 1 つでも含めば不可）。
+        for bad in [
+            "",
+            "red;color:blue", // `;`/`:` で宣言追加
+            "#000<script>",   // `<`/`>` でタグ崩し
+            "#000\"",         // `"` で属性/文字列崩し
+            "a{b}",           // `{`/`}` でブロック崩し
+            "x/*",            // `/`/`*` でコメント崩し
+            "url(x):y",       // `:` を含む
+        ] {
+            assert!(!PreviewTheme::is_safe_color(bad), "危険色 `{bad}` を通した");
+        }
+        // 注記: `url(...)`/`expression(...)` は英数+`()`のみで構成され色値検証は通過するが、
+        // CSS 変数値として `color:var(--pk-accent)` に展開されるだけで `<style>` 構造は崩せない
+        // （`;`/`{`/`<` が無いため宣言/タグを脱出できない＝注入不能）。
     }
 }

@@ -11,7 +11,12 @@
 //   ※ 実際の注入先は別WebView。本モジュールは「注入する信頼スクリプト文字列の生成」を担い、
 //      各ブロック個別描画・構文エラー/タイムアウト時の元コード復帰・失敗件数集計を実装する。
 
-import { preparePreview, type HtmlHazards, type PreviewMode } from "../ipc";
+import {
+  preparePreview,
+  type HtmlHazards,
+  type PreviewMode,
+  type PreviewTheme,
+} from "../ipc";
 
 /** 表示モード（要件6.1）。差分トグルは別の直交フラグ（diffOn）。 */
 export type ViewMode = "source" | "split" | "preview";
@@ -60,6 +65,32 @@ export function previewModeForPath(path: string): PreviewMode {
   return "markdown";
 }
 
+/**
+ * メインアプリの解決済みトークン色から別WebView 用テーマを組む（Stage ③・design doc 10章）。
+ *
+ * DOM へ依存しない純粋関数にして単体テスト可能にする。`getToken("--bg-raised")` のような
+ * 「CSS 変数の解決済み値（trim 済み文字列）を返す関数」と「ダークか」を受け、[`PreviewTheme`] を返す。
+ * トークンが空（未解決）のときは空文字のまま渡す（backend が安全化検証で fail-closed に倒す）。
+ *
+ * 呼び出し側（main.ts）は `getComputedStyle(document.documentElement).getPropertyValue(name).trim()` を
+ * `getToken` に渡し、`colorScheme` に "dark" を含むか / `matchMedia('(prefers-color-scheme: dark)')` と
+ * data-theme から `dark` を解決する。
+ */
+export function resolvePreviewTheme(
+  getToken: (name: string) => string,
+  dark: boolean,
+): PreviewTheme {
+  return {
+    bg: getToken("--bg-raised"),
+    fg: getToken("--text-1"),
+    muted: getToken("--text-2"),
+    border: getToken("--border-2"),
+    accent: getToken("--accent"),
+    sunken: getToken("--bg-sunken"),
+    dark,
+  };
+}
+
 /** プレビュー準備の結果（別WebView へ流すための情報）。 */
 export interface PreviewReady {
   /** 別WebView へナビゲートする URL（pika-preview:// 経由）。 */
@@ -80,14 +111,18 @@ export interface PreviewReady {
  * `content` は編集バッファ or ディスク内容。backend はこれを comrak→ammonia でサニタイズし
  * custom protocol のキャッシュに置く。**HTML 本体は戻り値に乗らない**（URL のみ）。
  * 系統B の危険検知（要件6.3）も同じ 1 回の invoke の戻り（hazards）で受け取る（IPC 二重転送回避）。
+ *
+ * `opts.theme`（Stage ③・design doc 10章）はメインアプリの解決済みトークン色。別WebView は独立文書で
+ * CSS 変数を継承しないため backend へ渡し `:root{--pk-*}` として注入させる。系統B（HTML）は文書スタイル
+ * 尊重で backend が theme を無視する（要件11.3）。色文字列の安全化検証は backend(pika-core)が担う。
  */
 export async function buildPreview(
   path: string,
   content: string,
-  opts: { allowExternal?: string[] } = {},
+  opts: { allowExternal?: string[]; theme?: PreviewTheme } = {},
 ): Promise<PreviewReady> {
   const mode = previewModeForPath(path);
-  const prepared = await preparePreview(path, mode, content, opts.allowExternal);
+  const prepared = await preparePreview(path, mode, content, opts.allowExternal, opts.theme);
   return {
     url: prepared.url,
     generation: prepared.generation,
@@ -98,28 +133,6 @@ export async function buildPreview(
 }
 
 /**
- * 信頼 JS 失敗件数メッセージ（別WebView → メインWebView）の型ガード（要件6.2・通知バー集計）。
- *
- * 別WebView 内の信頼 JS（[`buildTrustedJsInit`]）は描画失敗件数を `postMessage` で送る。
- * メイン側はこの形のメッセージのみ受理し通知バーへ集計する（受信導線＝high 指摘の片側配線解消）。
- * **別WebView は iframe でなく独立 WebView のため、本番（系統C 結線）では Tauri event/IPC 経路へ
- * 置換が必要**（window.parent は本体に届かない）。本関数は受信側の純粋な検証ロジックを提供する。
- */
-export function parsePreviewFailureMessage(data: unknown): number | null {
-  if (
-    typeof data === "object" &&
-    data !== null &&
-    (data as { type?: unknown }).type === "pika-preview-failures"
-  ) {
-    const count = (data as { count?: unknown }).count;
-    if (typeof count === "number" && Number.isFinite(count) && count > 0) {
-      return Math.floor(count);
-    }
-  }
-  return null;
-}
-
-/**
  * 別WebView へ注入する信頼 JS の初期化スクリプトを組み立てる（系統A・要件6.2・design doc 6章）。
  *
  * **【Stage ② で実行時の正本は Rust 側へ移動】** 注入する信頼 JS の正本は
@@ -127,14 +140,18 @@ export function parsePreviewFailureMessage(data: unknown): number | null {
  * 信頼 JS と同梱アセットは custom protocol 経由で別WebView 内に閉じ、メイン WebView の JS ワールドを
  * 一切経由しない（HTML/JS を invoke で返さない＝design doc 6章）。本関数はもはやランタイムでは呼ばれず、
  * **意味の対照参照として残す**（変更時は Rust 側 `TRUSTED_JS_INIT` を正とし、文字列の意味を一致させること）。
- * `parsePreviewFailureMessage` と main.ts の message リスナは Stage ③（Tauri event 化）まで残す。
+ *
+ * **【Stage ③・失敗の可視化】** 描画失敗は **in-preview で可視化する**（失敗ブロックへ `pika-block-error` を
+ * 付け、別WebView 文書の BASE_CSS が縦線＋「描画に失敗」ラベルで視認可能にする＝要件6.2）。
+ * F-029 でプレビュー別WebView からの IPC/event は境界で全拒否されるため、`postMessage` での失敗件数
+ * 通知は別WebView では `window.parent===window` の no-op のまま残す（メインへ送る経路は持たない＝
+ * プレビューに IPC 穴を開け直さない）。旧 `parsePreviewFailureMessage`・main.ts の message リスナは廃止した。
  *
  * 危険オプション封じ（design doc 6章「信頼済み JS の危険オプション封じ」）:
  * - **Mermaid**: `securityLevel:'strict'`（click/任意 HTML 生成禁止）・`startOnLoad:false`（手動 per-block 描画）。
  * - **KaTeX**: `trust:false`・`strict:true`・`maxExpand` 制限（`\href{javascript:}`/`\htmlData` 経路封じ）。
  * - **highlight.js**: コードブロックのみ。
  * - 各ブロック個別描画。構文エラー/タイムアウト（約1秒）で当該ブロックを元コード表示へ戻しエラーマーク。
- * - 失敗件数は `postMessage` でメインWebView へ通知（別WebView では window.parent===window で no-op＝Stage ③ で event 化）。
  *
  * 返すのは別WebView の `<script nonce="...">` に入れる本文（インライン）。`'unsafe-inline'`(script) は
  * CSP に付けず nonce のみ（design doc 6章）。
