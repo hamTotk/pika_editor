@@ -1,0 +1,27 @@
+{
+  "reviewer": "security",
+  "sprint_id": 3,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "入力検証 / パストラバーサル",
+      "message": "Tauri command 層（read_file/save_file/rollback_file/compute_file_diff/confirm_file/confirm_all/open_workspace）が frontend 由来の path 文字列をパス封じ込め検証（canonicalize＋ワークスペース prefix 検証・../ や絶対パス・シンボリックリンク脱出の拒否）なしに std::fs::read_to_string / std::fs::write へ直接渡している。呼び出し元はこのスプリントでは信頼アプリシェル（メインWebView）のみで、機密ファイルは policy.rs の baseline_policy が HashOnly にし内容 object を保持しないため『機密平文がベースライン object/差分に漏れる』経路は塞がれている（compute_file_diff も機密は object_hash=None で early return）。よって実害は薄く critical ではない。ただし sprint 4 で未信頼文書のプレビューが入り、custom protocol 直配信側のパス封じ込め（acceptance_criteria sprint4 must の『canonicalize＋prefix 検証で ../ /絶対パス/シンボリックリンク脱出を拒否・機密は配信拒否』）がここで再利用される設計上、コア側に共通のパス検証ヘルパ（pika-core で cargo test できる純粋ロジック）を今のうちに用意しておくと sprint4 の信頼境界が堅くなる。現状は src-tauri 内に検証なしで散在しており、検証漏れがコピーされやすい。",
+      "location": "src-tauri/src/snapshot.rs:180,225,282 / src-tauri/src/commands.rs:74,84,92"
+    },
+    {
+      "severity": "low",
+      "area": "機密ファイル判定の網羅性",
+      "message": "policy.rs の is_sensitive はファイル名を ASCII 小文字化（to_ascii_lowercase）し『.key/.pem 末尾』『.env / .env.* 前方一致』『secret 部分一致』で判定する。.env.production.local 等の派生は拾えるが、(1) NTFS の代替データストリーム（example.env:hidden）や末尾ドット/末尾空白付き名（Windows が正規化前に許容しうる）、(2) 大文字以外の Unicode ケース折り畳み（ASCII 限定）、(3) .p12/.pfx/.crt/credentials/id_rsa 等の他の機密系名は素通しになる。is_sensitive は『ハッシュのみ記録（平文を残さない＝要件9.1 のデータ最小化）』の入口なので、ここを外れた機密の平文が内容 object（将来データルートへ zstd 永続化）に保存されうる。ローカル個人ツールであり既定パターンは settings で調整可能な前提（コメントに明記）なので critical ではないが、要件9.1 の既定パターン拡充と Windows ファイル名正規化（ADS 分離・末尾ドット除去）を判定前に挟むと堅くなる。判定は pika-core の純粋関数なので cargo test しやすい。",
+      "location": "crates/pika-core/src/snapshot/policy.rs:38-47,61-64"
+    },
+    {
+      "severity": "low",
+      "area": "同一性ハッシュの選択（情報的）",
+      "message": "object のアドレッシングと未読/差分照合に twox-hash(XXH3 系・非暗号)を使う。コメント・design doc どおり用途は重複排除/同一性判定であり、攻撃者がベースラインと衝突する内容を意図的に作る脅威モデルはローカル単一ユーザーには無いため適切な選択で、findings というより確認事項。content-addressed object の物理削除は store.rs の is_object_referenced で全参照不在を確認後に行う設計になっており、ハッシュ衝突で別内容を同一 object とみなす理論上のリスクも、ローカル用途では実害なし。暗号用途（署名・改竄検知）に転用しない限り問題ない旨を記録する。",
+      "location": "crates/pika-core/src/snapshot/object.rs:53-74"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 3（snapshot/diff/review コア＋Tauri 差分・確認済み配線）に security の critical はゼロ。injection/RCE/SSRF の sink・機密のハードコード・認可バイパスのいずれも該当なし（pika はローカル単一ユーザーで認証/認可の概念が無く、未信頼コンテンツは sprint4 で権限ゼロ別WebView へ隔離する設計、capability も main のみ core:default で適切）。差分の frontend 描画は全て textContent で innerHTML 不使用＝XSS sink なし。機密ファイルは policy.rs が HashOnly にしベースライン object・差分に平文を載せない経路が守られている（compute_file_diff の機密 early return も確認）。残る指摘は high 未満：(1) command 層が frontend 由来 path を封じ込め検証なしで std::fs へ渡す（信頼アプリシェル由来で実害薄だが sprint4 の custom protocol パス封じ込めに備え共通検証を pika-core に用意する価値あり=medium）、(2) is_sensitive の網羅性（ADS/末尾ドット・他の機密系名は素通し=low）、(3) 非暗号ハッシュの用途確認（適切=low）。いずれも次ターン generator が feedback で対応すれば足る範囲。"
+}

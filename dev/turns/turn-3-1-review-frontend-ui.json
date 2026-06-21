@@ -1,0 +1,45 @@
+{
+  "reviewer": "frontend-ui",
+  "sprint_id": 3,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "キーボード操作 / 差分ジャンプ",
+      "message": "F8/Shift+F8 のハンドラが二重登録されている。renderDiff が差分ホストに keydown を張り (src/diff/index.ts:100)、同時に main.ts が window レベルでも F8 を拾って state.diff.jumpNext/jumpPrev を呼ぶ (src/main.ts:333-337)。差分ホストにフォーカスがある状態で F8 を押すと、ホスト側ハンドラ focusBlock が動いた後にイベントが window までバブルし jumpNext がもう一度走るため、1 打鍵でブロックを 2 つ進める。ホスト側は e.preventDefault() のみで e.stopPropagation() を呼んでおらず重複を遮断していない。前後ジャンプは中心体験『差分』の主要操作であり、隣接ブロックを飛ばすのは明確な操作欠陥。どちらか一方のハンドラに一本化する (推奨: ホスト側ハンドラを撤去し window 側 dispatch に集約) か stopPropagation で抑止する。critical ではない (差分自体は表示され、ジャンプ機能も到達・操作可能なため) が high。",
+      "location": "src/diff/index.ts:93-100, src/main.ts:332-337"
+    },
+    {
+      "severity": "medium",
+      "area": "フォーカス管理 / 差分ジャンプ",
+      "message": "差分トグル ON 時 (onToggleDiff→renderActiveDiff・src/main.ts:148) に差分ホストへフォーカスを移していない。renderDiff はホストに tabIndex=0 を設定しホスト keydown で F8 を拾う設計 (src/diff/index.ts:102) だが、ON 直後はフォーカスがツールバーの『差分』ボタンに残るためホスト側ハンドラの経路は実際には起動しにくい。window レベルハンドラが救済しているので操作不能にはならない (=critical でない) が、設計したフォーカス→ホストジャンプ経路がほぼ死んでおり、スクリーンリーダー利用者が差分内容へフォーカスを移す導線も無い。ON 時に diffHost().focus() を呼ぶと両ハンドラ問題 (上記 high) と併せて整理できる。",
+      "location": "src/main.ts:136-163, src/diff/index.ts:100-102"
+    },
+    {
+      "severity": "medium",
+      "area": "アクセシビリティ (スクリーンリーダー)",
+      "message": "各差分行に行本文をまるごと aria-label として付与している (src/diff/index.ts:155-157) が、同じ行の可視テキスト (diff-body) もそのまま読み上げ対象に残る。aria-label は要素の可読名を上書きするため子テキストとの二重読み上げ/不整合が起きやすく、長い行で冗長になる。意味付け (追加/削除) を伝えたいなら行頭記号 span に視覚非表示の補助テキストを足す、または行本文は aria-label に含めず接頭の語 (追加:/削除:) のみを別要素で持つ方が読み上げが素直。",
+      "location": "src/diff/index.ts:154-157"
+    },
+    {
+      "severity": "medium",
+      "area": "色非依存 / forced-colors",
+      "message": "F8 でジャンプした現在ブロックの強調 (.diff-block-current) が inset box-shadow の左帯のみ (src/styles/app.css:233-235)。forced-colors:active では box-shadow がブラウザに無視されるため、強制配色環境で『今どのブロックにいるか』の視覚手がかりが消える。行の +/- 記号は残るので情報自体は失われない。spec は forced-colors 対応を sprint 7 に明示的に繰り延べているため critical/high ではないが、現在ブロック表示は outline 等 forced-colors でも残る手段に寄せておくと sprint 7 の手戻りが減る。",
+      "location": "src/styles/app.css:232-235"
+    },
+    {
+      "severity": "low",
+      "area": "操作要素の状態",
+      "message": "『すべて確認済み』ボタン (#confirm-all) だけ refreshTabs での disabled 制御対象から外れ常に活性 (src/main.ts:54-61・index.html:26)。フォルダ未オープン/未読ゼロでも押せるが、onConfirmAll が未読ゼロを検知して『確認すべき未読はありません』と通知する graceful な分岐があり (src/main.ts:203-206) データ被害は無い。他のツールバーボタンが状態連動して disabled になるのに対し挙動が不揃いという一貫性の指摘 (未読件数に応じた活性制御にすると整合)。",
+      "location": "src/main.ts:54-61, src/index.html:26"
+    },
+    {
+      "severity": "low",
+      "area": "状態表示 (empty/unavailable)",
+      "message": "差分の empty (変更なし) / unavailable (ハッシュのみ=差分非対象) 状態は <p> で表示されるが role / aria-live を持たない (src/diff/index.ts:46-58)。差分ホスト自体に aria-label が付き読み上げ範囲には入るので致命的ではないが、トグル ON で状態が切り替わったことは通知されない。差分ホストに aria-live=polite を足すか、これらの状態文を status 領域に出すと動的更新が伝わる。",
+      "location": "src/diff/index.ts:44-59"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 3 frontend (read-only unified 差分レンダラ) は要件8.2/11.5 の必達=行頭+/-記号・変更語の下線+太字・色非依存・F8/Shift+F8 前後ジャンプ・読み取り専用 (role=document/aria-readonly) をすべて満たし、差分色は tokens.css の --diff-* デザイントークンをライト/ダーク両テーマで正しく再利用、empty/unavailable/error の状態分岐も用意されている (ビジュアル一貫性は良好)。critical は無し (主要操作の不能/不可視・キーボード到達不能には該当しない)。最重要は F8 ハンドラの二重登録による隣接ブロック飛ばし (high)。あわせてジャンプ系のフォーカス管理・行 aria-label の二重読み上げ・現在ブロック強調の forced-colors 脆さ (各 medium)、ボタン活性の不揃いと状態文の aria-live 欠落 (各 low) を次ターンで整理すると差分操作の品質が揃う。"
+}

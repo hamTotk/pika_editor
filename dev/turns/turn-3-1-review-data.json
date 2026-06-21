@@ -1,0 +1,39 @@
+{
+  "reviewer": "data",
+  "sprint_id": 3,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "index破損復元の整合性",
+      "message": "共有object(同一内容=同一ハッシュ)が複数のstashやbaselineから参照されている状況で、SnapshotStore::add_stash のLRU eviction が object_meta を無条件に remove する(store.rs:194-197)。object_meta は object ハッシュをキーにした BTreeMap で1 object 1 meta のため、ある file の stash が押し出されると、別 file の stash や baseline がまだ同じ object を参照していても、その object の自己記述メタが消える。結果 recover_stashes_from_meta(store.rs:283) による『index 破損時の退避一覧再生成』(最上位原則1=退避が最後の砦)で、生きている参照の復元が取りこぼされうる。eviction 時は『その object が live_objects()/is_object_referenced() で他から参照されていないこと』を確認してから meta を落とすべき(参照計数 or 残存参照走査)。live(プライマリ)索引は壊れないため critical ではないが、最後の砦の整合性に関わるため高。",
+      "location": "crates/pika-core/src/snapshot/store.rs:194"
+    },
+    {
+      "severity": "medium",
+      "area": "永続化なし(メモリ保持)による退避の非永続",
+      "message": "ベースライン内容 object と退避 object は src-tauri 側で HashMap<String,String> のメモリ保持に留まり(snapshot.rs:70 objects)、データルート配下への zstd 永続化・厳格 DACL が未配線。acceptance-findings T-006『本スプリントの限定』で意図的な carry として明記されておりプロセス継続中の整合性は保たれるため本スプリントの欠陥ではないが、現状はアプリ終了で退避・ベースラインが全消失する=『退避が最後の砦』が実FS上は成立しない状態。後続スプリントで pika-core の policy/gc/store 判定を再利用して必ず永続化すること、永続化時はアトミック書込(temp→rename)で index.json と object 群の不整合を作らないことをガードとして残す。",
+      "location": "src-tauri/src/snapshot.rs:70"
+    },
+    {
+      "severity": "medium",
+      "area": "物理削除の参照確認が未消費",
+      "message": "src-tauri 側は add_stash の返す evicted_objects を受け取らず破棄し(snapshot.rs:235・321)、is_object_referenced()/live_objects()/plan_gc() を一切呼ばない。content-addressed object は重複排除で共有されるため、押し出された object をそのまま物理削除すると共有先のbaseline/stashを壊す。GC未配線の本スプリントでは物理削除自体が走らず実害は出ないが、永続化スプリントで GC を結線する際に『全参照不在(baselineHash/stash.hash)を確認してから削除』(要件9.3)を必ず evicted_objects→is_object_referenced 経路で通すこと。core 側にAPIは揃っているので消費側の漏れに注意。",
+      "location": "src-tauri/src/snapshot.rs:321"
+    },
+    {
+      "severity": "low",
+      "area": "読取失敗の空扱い",
+      "message": "confirm_all のディスク再読みが read_to_string(path).unwrap_or_default()(snapshot.rs:282)。一時的な読取失敗(ロック/権限)を空文字列として扱うため、frozen.content_hash と不一致になり SkippedChanged=未読維持となり通常は安全側に倒れる。ただし元の差分内容も空だった稀ケースでは『読めなかったファイル』を空内容として確認済み(ベースライン化)しうる。read エラーは Err として明示スキップし、empty file と read failure を区別すると堅牢。データ破損には至らないため低。",
+      "location": "src-tauri/src/snapshot.rs:282"
+    },
+    {
+      "severity": "low",
+      "area": "ハッシュ衝突の理論的リスク",
+      "message": "object アドレッシングと未読/差分照合に twox-hash(XxHash64) の 16桁ハッシュを使用(object.rs:57 hash_normalized)。非暗号ハッシュゆえ衝突時は別内容が同一 object として共有され差分・巻き戻しが誤る理論的リスクがある。設計上『同一性/重複判定用』と明記され個人ローカルツールの規模では実用上問題ないため低。将来 object 数が大きくなる場合のみ衝突時フォールバック(サイズ併用 or 64bit以上)を検討候補として記録。",
+      "location": "crates/pika-core/src/snapshot/object.rs:57"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint3 の data 層(snapshot=content-addressed object/容量GC/自己記述メタ・review=確認済み/巻き戻し判定・baseline policy)はコア決定論ロジックが堅実で、ベースライン常に1件・LRU(未復元優先保護)・全参照確認後の物理削除API・退避失敗時のベースライン非更新(データを失わない)・確定直前のmtime/ハッシュ再照合・退避不能ガードがcargo testで観測可能に作り込まれている。LF正規化ハッシュも diff/object 間で規則が一致。critical(データ破損・不整合スキーマ/不可逆マイグレーション)は無し。最大の懸念は store.rs:194 の LRU eviction が共有objectのobject_metaを参照確認なしに削除する点で、index破損復元(最後の砦)の整合性を損ないうる(high)。永続化(zstd/DACL)とGC消費は意図的carryとしてacceptance-findings T-006に明記済みで本スプリントの欠陥ではないが、後続で『アトミック書込』『evicted_objects→is_object_referencedで全参照確認後に物理削除』を必ず通すこと。"
+}

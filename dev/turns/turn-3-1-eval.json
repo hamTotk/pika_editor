@@ -1,0 +1,47 @@
+{
+  "score": 93,
+  "plan_implementation": {
+    "overall": 100,
+    "notes": "sprint 3 の must 8件は全充足。diff(line.rs/inline.rs: Myers＋語/grapheme フォールバック・LF 正規化照合・空/新規/累積)・snapshot(object/store: content-addressed＋index 破損→object メタからの退避一覧再生成)・容量管理(LRU10件/14日保護/500MB/90日/共有object 全参照確認後削除)・機密/10MB境界・確認済みフロー(decide_confirm の確定直前 mtime/ハッシュ再照合・decide_confirm_all のフリーズ＋スキップ＋baseline-replace・decide_rollback/guard_destructive の退避不能ガード)・退避結合 Result を握り潰さない(ReviewError)・read-only unified 差分レンダラ(±記号/行内下線太字/色非依存/F8) を実装し、pika-core 50件の cargo test で観測。must の決定論ロジックはすべて pika-core(UI/Tauri 非依存)に集約され command/frontend は薄い境界。should は 1/3 充足＋2/3 部分: 退避不能ガード=充足、差分の Rust 側計算=配線済みだが『開始前のサイズ/編集距離ガード』未実装(perf high)、ファイル単位巻き戻し=配線済みだが should の『ベースライン内容で上書き』がディスク書き戻し未実施でバッファのみ(ux high)・フォルダ単位一括確認の右クリック起動は sprint7 へ繰延。実機項目(差分実描画・確認済み/巻き戻し実操作・index 破損/容量GC 実機)は系統C(acceptance.md TD1〜9・findings T-006)へ意図的 carry。"
+  },
+  "quality": {
+    "overall": 93,
+    "breakdown": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 86,
+      "d_review": 100
+    },
+    "dimension_thresholds": {
+      "d_verify": 100,
+      "d_accept": 100,
+      "d_quality": 80,
+      "d_review": 100
+    }
+  },
+  "all_dimensions_passed": true,
+  "feedback": "[合格] d_verify=100(cargo test 92件/cargo build warnings=deny zero/npm run typecheck すべて exit 0)・d_accept=100(must 8件全充足)・d_review=100(security/performance/data/frontend-ui/ux の5レビュワー全て critical ゼロ)・d_quality=86。score=93 で passed=true。テスト改竄なし(pika-core 50件は LRU 押し出し順・baseline-replace 別枠・確定直前再照合・退避不能ブロック・grapheme 境界保護など観測可能挙動を緩和/skip/犠牲的期待値変更なしで検証)。\n\n[high 5件・次ターン feedback で対応] (1) data: store.rs:194 add_stash の LRU eviction が共有 object の object_meta を is_object_referenced 確認なしに remove する。別 file の baseline/stash がまだ同 object を参照していてもメタが落ち、index 破損復元(最後の砦)の取りこぼし余地。eviction 時に残存参照走査してから meta を落とす。 (2) ux: rollback_file がディスクへ書き戻さず main.ts onRollback は reloadExternal(非dirty)でバッファのみ差し替えるのに『確認済み時点に戻しました』と成功通知。ディスクは新内容のまま・保存導線も出ず、should の『ベースライン内容で上書き』が未成立。ディスク書き戻しか dirty 化、できないなら文言を実態へ。 (3) ux: onConfirmAll が skipped>0 のとき確定済み分も未読を1件も解除しないのに『N件確定/M件スキップ』と報告し画面と通知が食い違う。確定済みパスだけ未読解除しスキップ分は『F5 で再差分』の次の一手を明示。 (4) frontend-ui: F8/Shift+F8 が diff/index.ts:100 のホスト keydown と main.ts:333 の window 両方で発火(ホスト側に stopPropagation 無し)、差分ホストにフォーカスがあると1打鍵で2ブロック進む。ハンドラ一本化(推奨: ホスト側撤去し window へ集約)。 (5) performance: compute_diff に should 明記の『開始前サイズ/編集距離ガード』が無く、current 肥大時に Myers O(N*D) が爆発しうる＋onConfirmAll の per-file computeFileDiff 直列 N+1(IPC 性能予算計上対象)。暫定上限縮退とバッチ化。\n\n[medium/low] パス封じ込め検証を pika-core 共通ヘルパ化(sprint4 custom protocol 信頼境界に再利用)・is_sensitive の網羅性(ADS/末尾ドット/他機密名)・差分 DOM 全行一括展開の仮想化余地・差分計算をロック外へ・diff 行 aria-label の二重読み上げ・現在ブロック強調の forced-colors 脆弱性(box-shadow→outline)・confirm-all ボタンの活性不揃い・差分末尾到達フィードバック・acceptance-findings.md の旧 wx 所見鮮度。いずれも passed をブロックしない。\n\n[carry の確認] ベースライン/退避 object のメモリ保持(zstd 永続化・DACL 未配線)は T-006 に意図的 carry として明記済み・決定論ロジック(policy/gc/store)は cargo test 済みで後続は永続化の結線のみ。中心体験③④(差分→確認済み)の縦切りは spec どおり貫通。",
+  "feedback_structured": {
+    "high": [
+      {"area": "data / index 破損復元の整合性", "message": "store.rs:194 add_stash の LRU eviction が共有 object の object_meta を is_object_referenced 確認なしに remove する。別 file の baseline/stash がまだ同 object を参照していてもメタが消え、recover_stashes_from_meta による index 破損時の退避一覧再生成(最後の砦)で生きている参照を取りこぼす余地。eviction 時に残存参照を走査(or 参照計数)してから meta を落とすこと。"},
+      {"area": "ux / 巻き戻しの成功フィードバック整合", "message": "rollback_file がディスクへ書き戻さず main.ts:241-257 onRollback は reloadExternal でバッファのみ差し替え(非dirty)するのに『確認済み時点に戻しました』と成功通知。ディスクは AI 新内容のまま・保存プロンプトも出ず、戻したと信じて閉じると乖離。should の『ベースライン内容で上書き』が未成立。最低でも dirty 化で保存へ導くか、ディスク書き戻し。不可なら通知文言を実態(『バッファのみ戻しました。保存で確定』)に合わせる。"},
+      {"area": "ux / すべて確認済みの状態可視化", "message": "onConfirmAll(main.ts:219-234)が skipped>0 のとき確定済み分も未読を1件も解除しないのに『${updated}件確定/${skipped}件スキップ』と確定件数を報告し、ツリー/タブの未読マークが全部残ったままで何が確定したか判別不能(Nielsen #1/#9)。確定済みパスだけ未読解除し、スキップ分は未読維持＋『N件は変化のため再確認が必要(F5 で再差分)』と次の一手を明示。"},
+      {"area": "frontend-ui / F8 ハンドラ二重登録", "message": "F8/Shift+F8 が diff/index.ts:93-100 のホスト keydown(e.preventDefault のみ・stopPropagation 無し)と main.ts:332-337 の window 両方で発火し、差分ホストにフォーカスがある状態では1打鍵で2ブロック進み隣接ブロックを飛ばす。前後ジャンプは中心体験『差分』の主要操作。ハンドラを一本化(推奨: ホスト側を撤去し window 側 dispatch に集約)するか stopPropagation で抑止。"},
+      {"area": "performance / 差分サイズガード＋一括確認 N+1", "message": "compute_diff に should 明記の『開始前のサイズ/編集距離ガード』が無く current 肥大時に similar Myers O(N*D) が爆発しうる(line.rs:104)。加えて onConfirmAll(main.ts:211-218)が targets を for ループで直列に computeFileDiff する N+1(IPC ラウンドトリップは spec で性能予算計上対象)。暫定上限での縮退(『差分が大きすぎます』)と confirm_all 前段の一括 command 化/並列化を入れる。"}
+    ],
+    "medium": [
+      {"area": "security / パス封じ込め共通化", "message": "command 層(read_file/save_file/rollback_file/compute_file_diff/confirm_file/confirm_all/open_workspace)が frontend 由来 path を canonicalize＋ワークスペース prefix 検証なしで std::fs へ渡す。現状は信頼アプリシェル由来＋機密は HashOnly で実害薄だが、sprint4 の custom protocol 直配信パス封じ込め(../ /絶対パス/シンボリックリンク脱出拒否・機密配信拒否)で再利用する共通検証を pika-core の純粋ロジックとして今のうちに用意すると信頼境界が堅くなる。"},
+      {"area": "security / 機密判定の網羅性", "message": "policy.rs is_sensitive が NTFS 代替データストリーム(name:hidden)・末尾ドット/空白付き名・ASCII 外ケース折り畳み・.p12/.pfx/.crt/credentials/id_rsa を素通し。要件9.1 の既定パターン拡充と Windows ファイル名正規化(ADS 分離・末尾ドット除去)を判定前に挟む。pika-core 純粋関数で cargo test しやすい。"},
+      {"area": "data / 永続化と GC 消費の carry ガード", "message": "ベースライン/退避 object が src-tauri 側 HashMap メモリ保持に留まり zstd 永続化・厳格 DACL 未配線(T-006 に意図的 carry)。後続で永続化する際はアトミック書込(temp→rename)で index.json と object 群の不整合を作らず、add_stash の evicted_objects を破棄せず is_object_referenced/plan_gc 経由で『全参照不在を確認してから物理削除』(要件9.3)を必ず通すこと。"},
+      {"area": "performance / 差分 DOM 全行一括展開・ロック粒度", "message": "renderDiff が diff.lines 全行を一括 createElement/appendChild するため数万行差分で UI スレッド 200ms 超ブロックの余地(仮想化は sprint6 担当)。また compute_file_diff/confirm_file/confirm_all/rollback_file が SnapshotService の Mutex を握ったまま compute_diff(CPU 重)や read_to_string(I/O)を実行。差分計算・FS 読取はロック外で行い反映時だけロックを取る形に寄せられる。"},
+      {"area": "ux / エラー文言と差分フィードバック", "message": "confirm_file の『差分を表示してから確認済みにしてください』と renderActiveDiff 失敗が二段の技術寄りメッセージになる・confirm_all が差分未提示パスを黙って continue で対象外にし理由を示さない。エラー文言を『何が起きたか＋次の一手』で一貫させ対象外件数と理由を1本にまとめる。F8 が末尾到達/変更なしで無反応の理由も提示。"}
+    ],
+    "low": [
+      {"area": "frontend-ui / aria・forced-colors・ボタン活性", "message": "差分行に行本文をまるごと aria-label 付与し可視テキストと二重読み上げになる(diff/index.ts:154-157)・現在ブロック強調が inset box-shadow のみで forced-colors:active で消える(outline 等へ)・『すべて確認済み』ボタンだけ disabled 制御外で常時活性(未読件数連動に揃える)・empty/unavailable 状態文に role/aria-live 無し。"},
+      {"area": "data/security / 読取失敗とハッシュ用途", "message": "confirm_all のディスク再読みが read_to_string(path).unwrap_or_default() で読取失敗を空文字列扱い(snapshot.rs:282)。通常は hash 不一致で安全側に倒れるが read エラーを Err として明示スキップし empty file と区別すると堅牢。twox-hash(XXH3/XxHash64)は同一性/重複判定用途として適切(暗号転用しない限り問題なし＝確認事項)。"},
+      {"area": "ux / findings 台帳の鮮度", "message": "docs/acceptance-findings.md が旧 wx 版所見(F-001〜F-004・C++ ファイル/build パス参照)のまま箇所が残り、本 sprint3 の巻き戻しディスク書き戻し有無・確認済み確定直前の再照合・一括取り消し導線といった系統C 手動UX項目を節番号付きで起票しておくと上記 high の導線ギャップが手動検証で漏れない。"}
+    ]
+  },
+  "passed": true,
+  "evaluator_skill": "assign-dev-evaluator"
+}

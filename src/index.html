@@ -20,6 +20,11 @@
         />
         <button id="open-folder" type="button">フォルダを開く</button>
         <button id="save-file" type="button" disabled>保存</button>
+        <!-- 差分トグル（Ctrl+\）・確認済み（要件8.2/8.3）。差分面は読み取り専用。 -->
+        <button id="toggle-diff" type="button" disabled aria-pressed="false">差分</button>
+        <button id="confirm-file" type="button" disabled>確認済みにする</button>
+        <button id="confirm-all" type="button">すべて確認済み</button>
+        <button id="rollback-file" type="button" disabled>確認済み時点に戻す</button>
       </header>
       <div id="workbench">
         <nav id="tree-pane" aria-label="ファイルツリー">
@@ -27,7 +32,9 @@
         </nav>
         <main id="editor-pane">
           <div id="tabs" role="tablist" aria-label="開いているタブ"></div>
+          <!-- 差分トグル ON 時に表示する read-only unified 差分面（要件8.2）。既定は非表示。 -->
           <div id="editor-host" aria-label="エディタ"></div>
+          <div id="diff-host" aria-label="差分" hidden></div>
         </main>
       </div>
       <!-- 通知バー（非モーダル・role=status は a11y スプリントで付与）。 -->

@@ -1,0 +1,51 @@
+{
+  "reviewer": "ux",
+  "sprint_id": 3,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "タスク完了導線/フィードバック整合",
+      "message": "「確認済み時点に戻す」がディスクへ書き戻されず、成功通知と実体が食い違う。onRollback は backend から baseline 内容を受け取り state.editor.reloadExternal(baselineContent) でバッファだけ差し替え、未読を解除し「確認済み時点に戻しました（戻す前の内容は退避済み）」と表示する(src/main.ts:241-257)。しかし reloadExternal は外部リロード扱いで dirty=false（src/editor/index.ts:74-87・annotations: ExternalReload）なので、(1)ディスク上のファイルは新内容のまま、(2)タブは非dirty で保存プロンプトも出ず、(3)未読も消える。結果『戻した』と告げられたのにディスクは戻っておらず、保存導線も誘発されない。sprint criteria の should『ファイル単位の巻き戻し（rollback 退避→ベースライン内容で上書き→バッファ再読込）』の『上書き』が成立していない。ユーザーが操作完了を信じてアプリを閉じると AI の新内容が残り続け、戻したつもりの内容と乖離する。最低でも保存（dirty化）まで導くか、ディスク書き戻しを行い、できないなら通知文言を実態（『バッファのみ戻しました。保存で確定してください』）に合わせるべき。",
+      "location": "src/main.ts:241-257"
+    },
+    {
+      "severity": "high",
+      "area": "状態の可視化/エラー回復",
+      "message": "「すべて確認済み」でスキップが1件でも出ると、確定できた分の未読マークも解除されず通知と画面が食い違う。onConfirmAll は result.skipped===0 のときだけ targets 全件の未読を clear し、skipped>0 のときは『安全側で全再評価を促す』として未読を1件も外さない（src/main.ts:223-228）。しかし通知は『${result.updated} 件確定 / ${result.skipped} 件スキップ』と確定件数を報告する(src/main.ts:232-234)。ユーザーから見ると『N件確定』と言われたのにツリー/タブの未読マークが全部残ったままで、何が確定し何が残っているか判別できない。Nielsen #1(状態可視化)/#9(回復支援)違反。コメントには『F5 を案内する』とあるが実際の案内文は通知に出ていない。確定済みパスだけ未読解除し、スキップ分は未読維持＋『N件は変化のため再確認が必要（F5 で再差分）』と次の一手を明示すべき。",
+      "location": "src/main.ts:219-234"
+    },
+    {
+      "severity": "medium",
+      "area": "破壊的操作の確認/制御と自由",
+      "message": "破壊的・不可逆寄りの操作に事前確認も取り消し導線も無い。確認済み（ベースライン更新で旧基準を上書き）・すべて確認済み（一括ベースライン更新）・巻き戻し（現内容を退避し基準で上書き）はいずれもワンクリックで即実行され、確認ダイアログが無い（src/main.ts:176-257）。backend は baseline-replace/rollback で退避を取り『退避が最後の砦』を満たしてはいる（src-tauri/src/snapshot.rs・review.rs）が、フロントには『元に戻す/一括取り消し』のUI導線が存在しない（confirmAll の stashed 件数は通知に出すが取り消しボタンが無い）。退避してある以上 critical ではないが、誤クリックからの即時 Undo（少なくとも baseline-replace バッチの一括取り消し）をUIに出さないと『ユーザーの制御と自由』(Nielsen #3)が弱い。",
+      "location": "src/main.ts:176-238"
+    },
+    {
+      "severity": "medium",
+      "area": "エラー文言/エラー防止",
+      "message": "確認操作の前提崩れ時のエラー文言がユーザーの行動と噛み合わない。confirm_file は diff_snapshots 未登録だと『差分を表示してから確認済みにしてください』を Err で返す（src-tauri/src/snapshot.rs:174-176）。フロントの onConfirm は『差分未表示なら先に renderActiveDiff() を呼ぶ』対策を入れている(src/main.ts:180)が、renderActiveDiff が失敗（差分計算失敗）した場合は diff_snapshot が作られないまま confirmFile が呼ばれ、ユーザーは『差分の計算に失敗』→『差分を表示してから…』と二段の技術寄りメッセージを受ける。また confirm_all は差分未提示パスを continue で黙って対象外にする(src-tauri/src/snapshot.rs:278-281)ため、確定件数に含まれず理由も示されない。エラー文言は『何が起きたか＋次の一手』を一貫させ、対象外になった件数と理由（『差分未表示のため対象外』）を1本にまとめて提示すべき。",
+      "location": "src-tauri/src/snapshot.rs:174-176, src/main.ts:176-198"
+    },
+    {
+      "severity": "medium",
+      "area": "差分ビューの状態可視化/フィードバック",
+      "message": "差分トグルON時、対象タブにベースライン内容が無い（ハッシュのみ＝10MB以上/画像/機密）場合や変更ゼロの場合の案内は出る（src/diff/index.ts:44-59）が、F8/Shift+F8 の前後ジャンプが『変更なし/差分非対象』で無反応のとき何も起きない理由が示されない（noopHandle・src/diff/index.ts:182-190）。また差分面の status は『差分: 変更 N 件』を一度出すだけで(src/main.ts:159)、ブロックジャンプ位置(1/M)は aria-label には反映されるが視覚ステータスには出ない。色非依存の弁別(±記号・下線/太字)や aria-label テキスト化は良好だが、空状態/末尾到達時の『これ以上の変更はありません』等の操作フィードバックが不足。Nielsen #1。",
+      "location": "src/diff/index.ts:79-114, src/main.ts:148-163"
+    },
+    {
+      "severity": "low",
+      "area": "オンボーディング/空状態",
+      "message": "「すべて確認済み」ボタンが常時 enabled で、フォルダ未オープン/未読ゼロでも押せる。押すと confirmTargets() が空配列を返し『確認すべき未読はありません』と通知される(src/main.ts:201-207)ので致命ではないが、他ボタン（保存/差分/確認済み/巻き戻し）はアクティブタブ有無で disabled 制御している(src/main.ts:54-61)のに対し一貫しない（Nielsen #4 一貫性）。未読ゼロ時は disabled にするか件数バッジを添えると、押す前に状態が分かりエラー防止になる。",
+      "location": "src/main.ts:54-61, index.html:26"
+    },
+    {
+      "severity": "low",
+      "area": "ヘルプ/系統C導線(findings 台帳の鮮度)",
+      "message": "docs/acceptance-findings.md がまだ旧 wx 版の所見(F-001〜F-004・preview_view.cpp 等の C++ ファイル参照・検証環境が build/x64-release/src/app/Release/pika.exe)のままで、本 Tauri スプリント3の確認済み/差分/巻き戻しフローに対応する系統C 手動チェック項目が追記されていない（変更ファイルに acceptance.md/acceptance-findings.md が含まれるが内容は旧スタック）。sprint3 must は cargo test で固める純粋ロジック中心なので致命ではないが、巻き戻しのディスク書き戻し有無・確認済み確定直前の再照合・一括取り消し導線といった実機でしか確認できないUX項目を系統C に節番号付きで起票しておかないと、上記 high の導線ギャップが手動検証でも漏れる。",
+      "location": "docs/acceptance-findings.md:1-12"
+    }
+  ],
+  "has_critical": false,
+  "summary": "差分の色非依存表現(±記号・下線/太字)・aria-label のテキスト化・差分面の読み取り専用化・確認済み確定直前の再照合(ユーザーが見ていない内容をベースライン化しない)・退避が最後の砦という設計はUX上の核を押さえており良好。一方フロントの導線結線に2つの high がある: (1) 巻き戻しがバッファ差し替えのみでディスクへ書き戻されず『戻しました』通知と実体が乖離する(成功フィードバックの虚偽)、(2) 一括確認でスキップが出ると確定済み分も未読が解除されず通知と画面が食い違い、次の一手も提示されない。加えて破壊的操作の事前確認/一括取り消しUI欠如・エラー文言の二段化・空状態ボタン制御の不一致・findings 台帳が旧wxのまま、が中〜低。critical(主要タスク完了不能/誤操作データ喪失で確認も取り消しも無い)には該当しない(退避は backend で取れており復元手段は存在する)。"
+}

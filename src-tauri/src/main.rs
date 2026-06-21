@@ -13,6 +13,7 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod commands;
+mod snapshot;
 mod watcher;
 mod webview2;
 
@@ -41,6 +42,10 @@ fn run() {
             commands::read_file,
             commands::save_file,
             commands::f5_resync,
+            snapshot::compute_file_diff,
+            snapshot::confirm_file,
+            snapshot::confirm_all,
+            snapshot::rollback_file,
         ])
         .setup(|app| {
             // 起動時にメインウィンドウを表示（visible:false で生成し、初期化後に出す）。
@@ -49,6 +54,8 @@ fn run() {
             // 監視スレッドはここでは起動せず、open_workspace でルート確定時に開始する
             // （フォルダ未オープン時は監視コストゼロ＝軽い）。
             app.manage(watcher::WatcherService::new(app.handle().clone()));
+            // スナップショット/差分/確認済みサービス（ベースライン索引＋内容 object）を登録する。
+            app.manage(snapshot::SnapshotService::new());
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
             }

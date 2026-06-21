@@ -27,6 +27,13 @@ notify = "6"
 # 内容ハッシュ（自己保存抑制・オーバーフロー再同期のプレスクリーン後の最終照合）。
 # 暗号用途ではなく重複/同一性判定用の高速ハッシュ（design doc 11章 twox-hash 方針と整合）。
 twox-hash = "1"
+# 差分エンジン（design doc 2章/7章）。Myers LCS は標準機能・自前は語境界判定のみ。
+# unicode-segmentation 連携で grapheme/語境界フォールバックを行う（pika-core が直接使う）。
+similar = "2"
+# 語境界不成立行（日本語等）の grapheme 単位フォールバック判定（design doc 2章/7章・要件8.2）。
+unicode-segmentation = "1"
+# スナップショット object の圧縮（design doc 11章・要件9.1「圧縮して保存」）。
+zstd = "0.13"
 
 [profile.release]
 # 軽量配布（design doc 1章「軽い」）。LTO とサイズ最適化でバイナリを絞る。

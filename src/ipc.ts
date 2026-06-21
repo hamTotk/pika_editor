@@ -45,6 +45,75 @@ export function f5Resync(): Promise<number> {
   return invoke<number>("f5_resync");
 }
 
+/** 行内差分セグメント（src-tauri snapshot::SegmentDto と対応・要件8.2）。 */
+export interface DiffSegment {
+  /** 変わった部分か（色だけに依存せず下線/太字で表す＝要件8.2/11.5）。 */
+  changed: boolean;
+  /** セグメント本文。 */
+  text: string;
+}
+
+/** unified 差分の 1 行（src-tauri snapshot::DiffLineDto と対応・要件8.2）。 */
+export interface DiffLine {
+  /** "equal" | "insert" | "delete" */
+  tag: "equal" | "insert" | "delete";
+  /** 旧側行番号（追加行は未設定）。 */
+  old_line_no?: number;
+  /** 新側行番号（削除行は未設定）。 */
+  new_line_no?: number;
+  /** 行本文（改行なし）。 */
+  content: string;
+  /** 行内差分セグメント（置換行のみ。共通部分は changed=false）。 */
+  segments: DiffSegment[];
+}
+
+/** ファイル差分（src-tauri snapshot::FileDiffDto と対応・要件8.2）。 */
+export interface FileDiff {
+  lines: DiffLine[];
+  change_count: number;
+  /** 内容ベースラインを持つか（false なら差分・巻き戻し非対象＝ハッシュのみ）。 */
+  has_baseline_content: boolean;
+}
+
+/** ベースライン vs 現在内容の差分を計算する（要件8.2）。current=編集バッファ or ディスク内容。 */
+export function computeFileDiff(path: string, current: string): Promise<FileDiff> {
+  return invoke<FileDiff>("compute_file_diff", { path, current });
+}
+
+/**
+ * 「確認済みにする」（要件8.3）。確定直前にディスク再照合し、変化していなければベースライン更新。
+ * 返り値 true=確認済み確定 / false=ディスクが変化していたため中断（再差分を促す）。
+ */
+export function confirmFile(path: string): Promise<boolean> {
+  return invoke<boolean>("confirm_file", { path });
+}
+
+/** 「すべて確認済みにする」の結果（src-tauri snapshot::ConfirmAllResult と対応・要件8.3）。 */
+export interface ConfirmAllResult {
+  /** 確認済みにした件数。 */
+  updated: number;
+  /** 処理中に変化したためスキップした件数（未読のまま残る）。 */
+  skipped: number;
+  /** baseline-replace バッチへ一括退避した件数（一括取り消し対象）。 */
+  stashed: number;
+}
+
+/**
+ * 「すべて確認済みにする」（要件8.3）。paths=実行開始時点でフリーズした未読集合。
+ * 更新前ベースラインは baseline-replace バッチへ一括退避される。
+ */
+export function confirmAll(paths: string[]): Promise<ConfirmAllResult> {
+  return invoke<ConfirmAllResult>("confirm_all", { paths });
+}
+
+/**
+ * 「確認済み時点に戻す」（ファイル単位巻き戻し・要件8.3/7.3）。
+ * 現在内容を退避してからベースライン内容を返す（退避不能はエラーで reject）。
+ */
+export function rollbackFile(path: string): Promise<string> {
+  return invoke<string>("rollback_file", { path });
+}
+
 /** 外部変更（合成結果）の購読。返り値の関数で購読解除する。 */
 export function onFsChanged(
   handler: (payload: FsChangedPayload) => void,

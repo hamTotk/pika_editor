@@ -1,0 +1,45 @@
+{
+  "reviewer": "performance",
+  "sprint_id": 3,
+  "iteration": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "area": "差分計算ガード（サイズ/編集距離）",
+      "message": "compute_diff() に should criteria 明記の『差分は開始前にサイズ/編集距離ガードを通す』が未実装。similar の Myers は O(N*D)（N=トークン数, D=編集距離）で、ほぼ全置換に近い大きめテキスト（10MB 未満でも数十万〜百万行）では計算量が爆発しうる。要件8.2/2.1 は『差分計算はワーカースレッドで・段階制（10MB以上は自動オフ）』を求める。現状 compute_file_diff はベースライン側が HashOnly（10MB以上）なら差分非対象に倒すが、current（編集バッファ）側のサイズ・編集距離の上限ガードが無く、ベースラインが小さくても current が肥大した場合に無防備。must（決定論ロジックの正しさ）は満たすため critical ではないが sprint 3 should の未充足。閾値確定は sprint 6 だが暫定上限（例: トークン数/編集距離の早期打切り→『差分が大きすぎます』へ縮退）を入れるべき。",
+      "location": "crates/pika-core/src/diff/line.rs:104 (compute_diff), src-tauri/src/snapshot.rs:148"
+    },
+    {
+      "severity": "high",
+      "area": "IPC N+1（すべて確認済み）",
+      "message": "onConfirmAll() がフリーズした未読集合 targets を for ループで一つずつ await computeFileDiff(path, current) する直列 N+1。未読 N 件ぶん IPC ラウンドトリップと各 readFile が直列に積み上がる（要件8.4 の累積差分・大量未読シナリオで顕在化）。IPC ラウンドトリップは spec で明示的に性能予算へ計上する対象。バッチ化（diff_snapshot 作成用の一括 command を 1 本立て backend 側でまとめて FS 読取・hash 算出）か、独立な await を Promise.all で並列化すべき。confirm_all command 自体は backend で targets を一括処理しているので、その前段の『diff_snapshot を作らせるためだけの per-file computeFileDiff ループ』が冗長な往復になっている。",
+      "location": "src/main.ts:211-218 (onConfirmAll の for ループ)"
+    },
+    {
+      "severity": "medium",
+      "area": "差分 DOM の一括展開（仮想化なし）",
+      "message": "renderDiff() が diff.lines 全行を for ループで一括 createElement し host へ appendChild する。行ごとに gutter/mark/body とセグメント span を複数生成するため、変更/文脈行が数万行になる差分（10MB 未満テキストでも到達しうる）でメインスレッド（WebView UI スレッド）の DOM 構築が 200ms を超えブロックしうる（要件2.1『200ms超ブロック禁止』）。巨大ファイル仮想化ビューアは sprint 6 担当のため sprint 3 では must 破綻ではないが、差分面は仮想化対象外で実装されており、表示行数ガード（hunk のみと前後文脈に絞る／窓描画）か行数上限を入れる余地がある。",
+      "location": "src/diff/index.ts:66-73 (for line of diff.lines の appendChild)"
+    },
+    {
+      "severity": "medium",
+      "area": "差分ごとの全文コピー・再ハッシュ",
+      "message": "compute_file_diff() が呼ばれるたびに current 全文に対し compute_diff 内で normalize_lf（String 新規確保）、別途 hash_normalized（全バイト走査）、さらに objects.entry の or_insert_with で current をもう一度 LF 正規化して object へ常時挿入する。差分計算は差分トグルやタブ切替（renderActiveDiff）で繰り返し走るホット寄りの経路で、1 回の差分につき current の O(N) 走査・コピーが 3 回以上発生する。current が変わっていない（同一 hash）なら object 挿入と再正規化はスキップできる（HashMap に既存ならコピー回避）。compute_diff 内部も old/new を normalize_lf でフル複製してから similar に渡しており、正規化済み内容のキャッシュ余地がある。",
+      "location": "src-tauri/src/snapshot.rs:147-162 (compute_file_diff), crates/pika-core/src/diff/line.rs:105-106"
+    },
+    {
+      "severity": "medium",
+      "area": "フォルダオープン時の全ファイル全量読込",
+      "message": "open_workspace() が直下エントリすべてに対し capture_baseline_for() を呼び、各ファイルを std::fs::read_to_string で全量読込してハッシュ化・10MB未満は内容 object をメモリ保持する。ベースラインは『全既読スタート』のため必要だが、要件9.2/起動性能の正道は『mtime+サイズの高速プレスクリーン→不一致のみハッシュ比較』（requirements.md 381）であり、現状は無条件フル read。大量ファイルや大きめファイルを含むフォルダのオープンで起動・オープン体感が劣化する。sprint 3 の must ではない（ベースライン取得は sprint 1 由来の暫定結線）が、object をメモリへ常時 String 保持する設計はメモリ上限（要件2.1 代表ワークロード 450MB）に対しても累積コストになる。",
+      "location": "src-tauri/src/commands.rs:46-54 (open_workspace), src-tauri/src/commands.rs:65-70 (capture_baseline_for)"
+    },
+    {
+      "severity": "low",
+      "area": "差分計算とロックの粒度",
+      "message": "compute_file_diff/confirm_file/confirm_all/rollback_file がいずれも SnapshotService の Mutex を握ったまま compute_diff（CPU 重）や std::fs::read_to_string（I/O ブロック）を実行する。個人ローカルツールで同時実行は事実上 watcher スレッドとの競合程度のため実害は小さいが、重い差分・大ファイル read の間ロックを保持すると他 command（watcher 由来の更新等）が待たされる。差分計算や FS 読取はロック外で行い、結果反映時だけロックを取る形にできる。",
+      "location": "src-tauri/src/snapshot.rs:129 (lock 保持中に compute_diff), 180/225/282 (lock 保持中に read_to_string)"
+    }
+  ],
+  "has_critical": false,
+  "summary": "sprint 3 の中核（diff の Myers と grapheme フォールバック、snapshot の content-addressed object/LRU/容量GC/参照計数、確認済み/巻き戻し/一括確認の決定論ロジック）は pika-core 側がすべて純粋関数で小規模（退避はファイルごと最大10件・GC は退避数オーダー・unread は Map で O(1)）であり、計算量・メモリの構造的破綻は無い＝critical 0。性能上の指摘は周辺の結線に集中する: (1) compute_diff にサイズ/編集距離ガードが無い（sprint 3 should の未充足。Myers O(N*D) が大きめ current で爆発しうる）, (2) onConfirmAll の per-file computeFileDiff 直列 N+1（IPC ラウンドトリップは spec で性能予算計上対象）, (3) renderDiff の差分 DOM 全行一括展開（仮想化なしで 200ms 超ブロックの余地）。いずれも must（ロジックの正しさ）の破綻ではなく、性能ゲートは系統C 実機実測へ寄せられているため high 以下。閾値確定（要件2.2/5.4/9.2）と巨大ファイル仮想化は sprint 6 担当だが、暫定の差分サイズガードと confirm_all のバッチ化は次ターンの generator が feedback で対応すべき。"
+}
