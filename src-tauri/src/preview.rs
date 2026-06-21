@@ -10,6 +10,7 @@
 //!   これにより未信頼文書 WebView から invoke/__TAURI_INTERNALS__ 経由の任意 command が到達不能になる。
 //!   到達不能の実証は系統C（Windows 実機 Release・design doc 15章-3）。
 
+use include_dir::{include_dir, Dir};
 use pika_core::render::{
     check_image_bytes, check_svg_bytes, confine_under, join_under, prepare_html_preview,
     prepare_markdown_preview, resolve_local_ref, wrap_preview_document, ExternalResourceAllow,
@@ -31,6 +32,13 @@ const MAIN_WINDOW_LABEL: &str = "main";
 
 /// プレビュー custom protocol のスキーム名。
 pub const PREVIEW_SCHEME: &str = "pika-preview";
+
+/// 同梱ベンダーアセット（Mermaid/KaTeX/highlight・KaTeX フォント・約3.84MiB）を exe へ埋め込む（Stage ②）。
+///
+/// 自己完結・ポータブル配布のため実行時 FS 依存にしない（design doc 1章「軽い/ワークスペースを汚さない」）。
+/// 仮想 FS（`include_dir`）からビルド時に畳み込み、`/assets/<相対パス>` で別WebView へ直配信する。
+/// アセットは custom protocol 経由でのみ別WebView に閉じ、メイン WebView の JS ワールドを経由しない。
+static PREVIEW_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../assets/vendor");
 
 /// プレビュー要求の系統指定（frontend から invoke で渡す＝要件6.1/6.3）。
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -313,6 +321,14 @@ pub fn handle_preview_request(
         return document_response(doc);
     }
 
+    // /assets/<相対パス> — exe 埋め込みの同梱ベンダーアセット（Mermaid/KaTeX/highlight・フォント・CSS）。
+    // 世代に依存しない静的配信。ロックは不要だが、ここではすでに取得済みなので保持したまま返す。
+    if let Some(rest) = path.strip_prefix("/assets/") {
+        // ロックを早めに解放（静的配信は PreviewService を読まない）。
+        drop(inner);
+        return asset_response(rest);
+    }
+
     // /local/<gen>/<相対パス> — ローカル参照（画像/CSS）の封じ込め配信。
     if let Some(rest) = path.strip_prefix("/local/") {
         let mut parts = rest.splitn(2, '/');
@@ -436,11 +452,48 @@ fn guess_content_type(path: &std::path::Path) -> &'static str {
         "ico" => "image/x-icon",
         "svg" => "image/svg+xml",
         "css" => "text/css; charset=utf-8",
+        // 同梱ベンダー JS（/assets/*.min.js）の配信に必要（Stage ② で追加）。
+        "js" | "mjs" => "text/javascript; charset=utf-8",
         "woff" => "font/woff",
         "woff2" => "font/woff2",
         "ttf" => "font/ttf",
         _ => "application/octet-stream",
     }
+}
+
+/// exe 埋め込みの同梱ベンダーアセットを `/assets/<相対パス>` から配信する（Stage ②・design doc 6章）。
+///
+/// セキュリティ:
+/// - **パストラバーサル防御**: `..`/絶対パス/ドライブ指定/バックスラッシュを含む参照は拒否する
+///   （`include_dir::get_file` は仮想 FS で `..` を解決しないが、防御的に明示拒否も入れる＝多層防御）。
+/// - 配信は `/assets/` 配下（[`PREVIEW_ASSETS`] の仮想ツリー）のみ。存在しなければ 404。
+/// - `X-Content-Type-Options: nosniff` を付ける。アセット応答自体に CSP ヘッダは付けない
+///   （ドキュメントのレスポンスヘッダ CSP が読み込み可否を統制する）。長期キャッシュ可。
+fn asset_response(reference: &str) -> Response<Vec<u8>> {
+    // パストラバーサル/絶対参照の明示拒否（仮想 FS の防御に加える多層防御）。
+    if reference.is_empty()
+        || reference.contains("..")
+        || reference.starts_with('/')
+        || reference.contains('\\')
+        || reference.contains(':')
+    {
+        return error_response(StatusCode::FORBIDDEN, "不正なアセット参照");
+    }
+
+    // 仮想 FS から引く（区切りは `/` 固定。include_dir は相対パスで解決する）。
+    let Some(file) = PREVIEW_ASSETS.get_file(reference) else {
+        return error_response(StatusCode::NOT_FOUND, "アセットなし");
+    };
+
+    let content_type = guess_content_type(std::path::Path::new(reference));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header("X-Content-Type-Options", "nosniff")
+        // 同梱アセットはビルドで固定（再現性は vendor.lock）。長期キャッシュ可。
+        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .body(file.contents().to_vec())
+        .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "応答組立失敗"))
 }
 
 /// エラーレスポンス（本文を最小化し情報漏れを避ける）。
@@ -533,6 +586,84 @@ mod tests {
         b.extend_from_slice(&h.to_be_bytes());
         b.extend_from_slice(&[8, 2, 0, 0, 0]);
         b
+    }
+
+    #[test]
+    fn guess_content_type_は_js_css_woff2_を正しく判定する() {
+        // Stage ②: 同梱ベンダー JS の Content-Type（js => text/javascript）欠落の回帰防止。
+        assert_eq!(
+            guess_content_type(std::path::Path::new("highlight.min.js")),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            guess_content_type(std::path::Path::new("katex.min.css")),
+            "text/css; charset=utf-8"
+        );
+        assert_eq!(
+            guess_content_type(std::path::Path::new("fonts/KaTeX_Main-Regular.woff2")),
+            "font/woff2"
+        );
+    }
+
+    #[test]
+    fn asset_response_は同梱アセットを配信し_未知は404() {
+        // 埋め込みツリーから実在アセットを引けること（mermaid/katex/highlight/フォント）。
+        for (name, ct) in [
+            ("mermaid.min.js", "text/javascript; charset=utf-8"),
+            ("katex.min.js", "text/javascript; charset=utf-8"),
+            ("highlight.min.js", "text/javascript; charset=utf-8"),
+            ("katex-auto-render.min.js", "text/javascript; charset=utf-8"),
+            ("katex.min.css", "text/css; charset=utf-8"),
+            ("hljs-github-dark.min.css", "text/css; charset=utf-8"),
+            ("fonts/KaTeX_Main-Regular.woff2", "font/woff2"),
+        ] {
+            let resp = asset_response(name);
+            assert_eq!(resp.status(), StatusCode::OK, "{name} が配信されない");
+            assert!(!resp.body().is_empty(), "{name} の本体が空");
+            assert_eq!(
+                resp.headers().get(header::CONTENT_TYPE).unwrap(),
+                ct,
+                "{name} の Content-Type が違う"
+            );
+            // nosniff を必ず付ける。
+            assert_eq!(
+                resp.headers().get("X-Content-Type-Options").unwrap(),
+                "nosniff",
+                "{name} に nosniff が無い"
+            );
+            // アセット応答自体に CSP を付けない（ドキュメントの CSP が統制する）。
+            assert!(
+                resp.headers()
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .is_none(),
+                "{name} にアセット CSP を付けた"
+            );
+        }
+        // 未知のアセットは 404。
+        assert_eq!(
+            asset_response("does-not-exist.js").status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn asset_response_はパストラバーサルを拒否する() {
+        // `..`/絶対/ドライブ/バックスラッシュ参照は 403（仮想 FS の防御に加える明示拒否）。
+        for bad in [
+            "../secret.txt",
+            "../../Cargo.toml",
+            "fonts/../../etc/passwd",
+            "/etc/passwd",
+            "C:\\windows\\system32",
+            "fonts\\..\\katex.min.js",
+            "",
+        ] {
+            assert_eq!(
+                asset_response(bad).status(),
+                StatusCode::FORBIDDEN,
+                "危険なアセット参照 `{bad}` が拒否されなかった"
+            );
+        }
     }
 
     #[test]

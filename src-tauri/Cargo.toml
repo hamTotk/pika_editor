@@ -26,6 +26,10 @@ pika-core = { path = "../crates/pika-core" }
 tauri = { version = "2", features = ["unstable"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# プレビュー別WebView へ配信する同梱ベンダーアセット（Mermaid/KaTeX/highlight・約3.84MiB）を
+# exe へ埋め込む（自己完結・ポータブル配布。実行時 FS 依存にしない＝design doc 1章「軽い/ワークスペースを汚さない」）。
+# fonts が 16 個ありビルド時に静的ツリーで畳む方が `include_bytes!` 列挙より簡潔。
+include_dir = "0.7"
 # 監視スレッド: OS の raw event 供給（notify）と内容ハッシュ（twox-hash）。
 # 合成ロジック（デバウンス/rename/自己保存抑制/オーバーフロー）は pika-core::watcher。
 notify = { workspace = true }

@@ -123,7 +123,11 @@ fn validate_one_host(host: &str) -> Result<(), &'static str> {
 /// - `default-src 'none'`（既定全遮断）
 /// - 系統A `script-src 'nonce-<rnd>'` / 系統B `script-src 'none'`
 /// - `connect-src 'none'`・`object-src 'none'`・`base-uri 'none'`・`frame-ancestors 'none'`・`frame-src 'none'`
-/// - `img-src`/`font-src` は `pika-preview:` + 許可ホスト（許可が空なら `pika-preview:` のみ＝既定遮断）
+/// - `img-src`/`font-src` は `'self'` + 許可ホスト（許可が空なら `'self'` のみ＝同一オリジンのみ＝既定遮断）。
+///   **同一オリジン資源は `'self'` で許可する**: Windows では custom protocol の実オリジンは
+///   `http://pika-preview.localhost`（http スキーム・host=pika-preview.localhost）に解決されるため、
+///   scheme-source `pika-preview:` は実オリジンに **マッチしない**（KaTeX CSS/フォント・ローカル画像が
+///   ブロックされる）。`'self'` は実オリジン `http://pika-preview.localhost` に正しく一致する。
 pub fn build_csp(flavor: PreviewFlavor, nonce: &str, allow: &ExternalResourceAllow) -> String {
     let script_src = match flavor {
         PreviewFlavor::MarkdownTrustedJs => format!("'nonce-{nonce}'"),
@@ -131,11 +135,14 @@ pub fn build_csp(flavor: PreviewFlavor, nonce: &str, allow: &ExternalResourceAll
         PreviewFlavor::HtmlNoJs => "'none'".to_string(),
     };
 
-    // img-src/font-src: pika-preview: は常に許可（ローカル相対参照解決）。許可ホストのみ追加できる。
+    // img-src/font-src: 同一オリジン資源は 'self' で許可（ローカル相対参照解決）。許可ホストのみ追加できる。
+    // Windows の custom protocol 実オリジンは `http://pika-preview.localhost`（http/host）に解決されるため、
+    // scheme-source `pika-preview:` は実オリジンに一致せずローカル画像/フォント/CSS がブロックされる。
+    // `'self'` は実オリジンと一致するため、系統A/B 共通でローカル資源が配信できる。
     // 呼び出し側は prepare_*_preview 経由で validate_allow_hosts 済みだが、CSP インジェクションは
     // 最重要 XSS 面のため **ここでも防御的に再検証**し、不正ホストは連結せず黙って捨てる
     // （多層防御＝検証漏れの呼び出し経路が後で増えてもポリシーを破らせない）。
-    let mut img_font = String::from("pika-preview:");
+    let mut img_font = String::from("'self'");
     for host in &allow.hosts {
         if validate_one_host(host).is_err() {
             continue;
@@ -144,10 +151,18 @@ pub fn build_csp(flavor: PreviewFlavor, nonce: &str, allow: &ExternalResourceAll
         img_font.push_str(host);
     }
 
-    // 系統A は同梱 KaTeX/highlight の CSS を nonce 付き <style> で入れるため style-src に nonce を許す。
-    // 'unsafe-inline'(style) は系統A/B いずれも CSS 表現の必要上許容するが script には付けない（design doc 6章）。
+    // style-src（スタイルのみの緩和。script-src は一切触らない＝design doc 6章・最重要 XSS 面）。
+    // 系統A:
+    //   - 同梱 KaTeX/highlight の CSS は同一オリジンの <link> で入れるため source 許可する。
+    //     Windows の custom protocol 実オリジンは `http://pika-preview.localhost` ＝ `'self'` で一致する。
+    //     scheme-source `pika-preview:` は実オリジンに不一致のため不可（KaTeX CSS がブロックされ崩れる）。
+    //   - **CSP3 では style-src に nonce/hash があると `'unsafe-inline'` が無効化される**。KaTeX はインライン
+    //     style 属性を、Mermaid は SVG に <style> を JS 注入するため、nonce 併記だとこれらがブロックされ崩れる。
+    //     よって nonce を併記せず `'unsafe-inline' 'self'`（インラインスタイルを通す＋同梱 CSS link）にする。
+    // 系統B: 文書のインライン CSS 表現を許す `'unsafe-inline'`（従来どおり・変更なし）。
+    // いずれも script-src には `'unsafe-inline'` を付けない（nonce 限定）。
     let style_src = match flavor {
-        PreviewFlavor::MarkdownTrustedJs => format!("'nonce-{nonce}' 'unsafe-inline'"),
+        PreviewFlavor::MarkdownTrustedJs => "'unsafe-inline' 'self'".to_string(),
         PreviewFlavor::HtmlNoJs => "'unsafe-inline'".to_string(),
     };
 
@@ -193,6 +208,21 @@ fn encode_base64url(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// CSP 文字列から 1 ディレクティブの値（名前を除いた残り）を取り出す（テスト用）。
+    /// 例: `extract_directive("default-src 'none'; script-src 'nonce-x'", "script-src")` → `"'nonce-x'"`。
+    fn extract_directive<'a>(csp: &'a str, name: &str) -> &'a str {
+        for part in csp.split(';') {
+            let part = part.trim();
+            if let Some(value) = part.strip_prefix(name) {
+                // 直後が空白で区切られていることを確認（`script-src` が `script-src-attr` 等に誤マッチしない）。
+                let value = value.trim_start();
+                // strip_prefix は前方一致なので、name 完全一致のため value の前に空白があったはず。
+                return value;
+            }
+        }
+        panic!("CSP にディレクティブ `{name}` が無い: {csp}");
+    }
+
     #[test]
     fn 系統a_は_nonce_スクリプトのみ許可する() {
         let csp = build_csp(
@@ -205,10 +235,55 @@ mod tests {
             !csp.contains("'unsafe-inline'; script"),
             "script に unsafe-inline が混入: {csp}"
         );
-        // script-src に 'unsafe-inline' を付けない（design doc 6章）。
+        // script-src に 'unsafe-inline' を付けない（design doc 6章・最重要 XSS 面）。
         assert!(
             !csp.contains("script-src 'nonce-abc123' 'unsafe-inline'"),
             "{csp}"
+        );
+        // script-src は nonce 限定（'unsafe-inline'/'unsafe-eval'/外部スキームを一切含めない）。
+        let script_src = extract_directive(&csp, "script-src");
+        assert_eq!(
+            script_src, "'nonce-abc123'",
+            "script-src が nonce 限定でない: {csp}"
+        );
+    }
+
+    #[test]
+    fn 系統a_の_style_src_は_unsafe_inline_と同梱オリジン許可で_nonce_を併記しない() {
+        // Stage ②: KaTeX のインライン style 属性・Mermaid の SVG <style> 注入を通すため、style-src は
+        // 'unsafe-inline' を有効に保つ（CSP3 では nonce/hash 併記すると 'unsafe-inline' が無効化されるため
+        // **nonce を併記しない**）。同梱 CSS の <link>（同一オリジン）は 'self' で許可する
+        // （Windows の custom protocol 実オリジン `http://pika-preview.localhost` は 'self' で一致。
+        //  scheme-source `pika-preview:` は不一致のため不可）。
+        let csp = build_csp(
+            PreviewFlavor::MarkdownTrustedJs,
+            "abc123",
+            &ExternalResourceAllow::blocked(),
+        );
+        let style_src = extract_directive(&csp, "style-src");
+        assert!(
+            style_src.contains("'unsafe-inline'"),
+            "style-src に 'unsafe-inline' が無い（KaTeX/Mermaid のスタイルがブロックされる）: {csp}"
+        );
+        assert!(
+            style_src.contains("'self'"),
+            "style-src に同梱 CSS link 用の 'self' が無い: {csp}"
+        );
+        // scheme-source pika-preview: は実オリジン不一致のため使わない（リグレッション防止）。
+        assert!(
+            !style_src.contains("pika-preview:"),
+            "style-src に実オリジン不一致の pika-preview: が残った: {csp}"
+        );
+        // nonce を style-src に併記しない（併記すると 'unsafe-inline' が無効化される＝CSP3）。
+        assert!(
+            !style_src.contains("nonce-"),
+            "style-src に nonce を併記した（'unsafe-inline' が無効化され KaTeX/Mermaid が崩れる）: {csp}"
+        );
+        // style-src の緩和が script-src へ波及していないこと（最重要）。
+        assert_eq!(
+            extract_directive(&csp, "script-src"),
+            "'nonce-abc123'",
+            "style-src 変更が script-src に波及した: {csp}"
         );
     }
 
@@ -238,9 +313,12 @@ mod tests {
         assert!(csp.contains("object-src 'none'"), "{csp}");
         assert!(csp.contains("base-uri 'none'"), "{csp}");
         assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
-        // img/font は pika-preview: のみ（外部ホストなし）。
-        assert!(csp.contains("img-src pika-preview:;"), "{csp}");
-        assert!(csp.contains("font-src pika-preview:;"), "{csp}");
+        // img/font は 'self'（同一オリジン）のみ（外部ホストなし）。
+        // Windows の custom protocol 実オリジン `http://pika-preview.localhost` は 'self' で一致する。
+        assert!(csp.contains("img-src 'self';"), "{csp}");
+        assert!(csp.contains("font-src 'self';"), "{csp}");
+        // scheme-source pika-preview: は実オリジン不一致のため使わない（リグレッション防止）。
+        assert!(!csp.contains("pika-preview:"), "{csp}");
     }
 
     #[test]
@@ -250,11 +328,11 @@ mod tests {
         };
         let csp = build_csp(PreviewFlavor::MarkdownTrustedJs, "n", &allow);
         assert!(
-            csp.contains("img-src pika-preview: https://example.com"),
+            csp.contains("img-src 'self' https://example.com"),
             "img-src に許可ホストが反映されない: {csp}"
         );
         assert!(
-            csp.contains("font-src pika-preview: https://example.com"),
+            csp.contains("font-src 'self' https://example.com"),
             "font-src に許可ホストが反映されない: {csp}"
         );
         // script-src/connect-src/object-src は緩めない（許可ホストが混入しない）。
@@ -281,7 +359,7 @@ mod tests {
             &ExternalResourceAllow::default(),
         );
         assert!(
-            csp.contains("img-src pika-preview:;"),
+            csp.contains("img-src 'self';"),
             "外部遮断に戻っていない: {csp}"
         );
         assert!(!csp.contains("https://"), "{csp}");

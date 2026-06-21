@@ -122,12 +122,19 @@ export function parsePreviewFailureMessage(data: unknown): number | null {
 /**
  * 別WebView へ注入する信頼 JS の初期化スクリプトを組み立てる（系統A・要件6.2・design doc 6章）。
  *
+ * **【Stage ② で実行時の正本は Rust 側へ移動】** 注入する信頼 JS の正本は
+ * `crates/pika-core/src/render/mod.rs` の `TRUSTED_JS_INIT`（`wrap_preview_document` が inline 注入）。
+ * 信頼 JS と同梱アセットは custom protocol 経由で別WebView 内に閉じ、メイン WebView の JS ワールドを
+ * 一切経由しない（HTML/JS を invoke で返さない＝design doc 6章）。本関数はもはやランタイムでは呼ばれず、
+ * **意味の対照参照として残す**（変更時は Rust 側 `TRUSTED_JS_INIT` を正とし、文字列の意味を一致させること）。
+ * `parsePreviewFailureMessage` と main.ts の message リスナは Stage ③（Tauri event 化）まで残す。
+ *
  * 危険オプション封じ（design doc 6章「信頼済み JS の危険オプション封じ」）:
  * - **Mermaid**: `securityLevel:'strict'`（click/任意 HTML 生成禁止）・`startOnLoad:false`（手動 per-block 描画）。
  * - **KaTeX**: `trust:false`・`strict:true`・`maxExpand` 制限（`\href{javascript:}`/`\htmlData` 経路封じ）。
  * - **highlight.js**: コードブロックのみ。
  * - 各ブロック個別描画。構文エラー/タイムアウト（約1秒）で当該ブロックを元コード表示へ戻しエラーマーク。
- * - 失敗件数は `postMessage` でメインWebView へ通知（通知バー集計＝要件6.2）。
+ * - 失敗件数は `postMessage` でメインWebView へ通知（別WebView では window.parent===window で no-op＝Stage ③ で event 化）。
  *
  * 返すのは別WebView の `<script nonce="...">` に入れる本文（インライン）。`'unsafe-inline'`(script) は
  * CSP に付けず nonce のみ（design doc 6章）。

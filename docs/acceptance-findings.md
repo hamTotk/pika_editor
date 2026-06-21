@@ -1165,3 +1165,35 @@
     失敗件数の Tauri event 化・占有[プレビュー＋差分]の左右並置）／Stage ④（HTML 系統B・外部 opt-in・
     暴走ガード実機）。
 - **状態**: Stage ① 完了（4ゲート緑＋実機目視 OK）。
+
+## T-013 プレビュー実結線 Stage ②（Mermaid/KaTeX/highlight 描画＋CSP オリジン是正／系統C）
+
+同梱ベンダーアセット（mermaid/KaTeX/highlight・約3.84MiB）と信頼 JS を custom protocol 経由で別WebView
+内に閉じて配信し、系統A の Mermaid 図・KaTeX 数式・コードハイライトを実描画。引き継ぎ段階分割②を完了。
+
+- **アセット配信**: `assets/vendor/` を `include_dir` で exe 埋め込み（自己完結・ポータブル）。custom protocol に
+  `/assets/<rel>` ルート追加（Content-Type に `js` 追加・nosniff・パストラバーサル拒否・CSP 非付与）。
+- **注入**: `wrap_preview_document`（pika-core 純粋関数）が系統A のみ、nonce 付き `<script src>`／CSS `<link>`／
+  inline 初期化 `<script nonce>` を組み込む。信頼 JS 初期化の**正本を Rust 側 `TRUSTED_JS_INIT` へ移植**
+  （Mermaid `securityLevel:'strict'`・KaTeX `trust:false/strict:true/maxExpand`・highlight `pre code`・per-block
+  タイムアウト・失敗集計）。frontend `buildTrustedJsInit` は実行時非依存に。**条件付き注入**で未使用アセットは
+  読み込まない（軽い原則）。
+- **CSP オリジン是正（実機で特定した重要バグ）**: `build_csp` の同一オリジン source が scheme-source
+  `pika-preview:` だったが、**Windows の custom protocol 実オリジンは `http://pika-preview.localhost`**（http）に
+  解決されるため不一致で、katex.css／KaTeX フォント／hljs CSS／ローカル画像が CSP `img/font/style-src` で
+  **ブロック**されていた（KaTeX が CSS 不在で `.katex-mathml` 露出＝二重表示、ローカル画像が破損）。
+  img/font/style-src の同一オリジン source を **`'self'`** へ修正（Windows 専用ゆえ `'self'` が実オリジンに一致）。
+  **`script-src 'nonce-X'` は不変**（nonce はオリジン非依存で JS は当初から実行できていた＝Mermaid だけ先に
+  描画できた理由）。`connect-src`/`object-src` 等も不変。csp.rs/mod.rs の期待テストを `'self'` へ更新。
+- **実機検証（debug＋Vite・showcase.md）**:
+  - ✅ Mermaid: `flowchart LR` がフロー図として描画（`securityLevel:'strict'`）。
+  - ✅ KaTeX: インライン `E=mc²`・ブロック積分が KaTeX フォントで綺麗に描画。**二重表示解消**（CSP 是正で
+    katex.css の `.katex-mathml` 隠蔽が効いた）。
+  - ✅ highlight: Python コードが github-dark テーマで配色（`def`/`return`/文字列/関数名）。
+  - ✅ GFM テーブル罫線・タスクリスト・日本語も正常。
+- **本 Stage 残（次の即対応）**: **ローカル画像が未表示**（破損アイコン）。原因は CSP ではなく、相対
+  `<img src="img/sample.png">` が文書 URL `/doc/<gen>` 基準で `/doc/img/...` に解決され `/local/<gen>/` 配信
+  ルートに届かないこと。文書内の相対ローカル参照（img/CSS）を `/local/<gen>/<rel>` へ**書き換える**処理が必要。
+- **繰り越し**: 権限ゼロ実証（JS 実行による形式検証）／Stage ③（テーマ CSS 変数・失敗件数 Tauri event 化・
+  プレビュー＋差分の左右並置）／Stage ④（HTML 系統B・外部 opt-in・暴走ガード実機）。
+- **状態**: Stage ② 完了（4ゲート緑＋実機目視 OK・Mermaid/KaTeX/highlight 描画確認）。ローカル画像は次対応。
