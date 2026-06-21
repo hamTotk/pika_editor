@@ -164,6 +164,32 @@ export function preparePreview(
   });
 }
 
+/** プレビュー別WebView を重ねる矩形（`#preview-host` の DOM 矩形・CSS ピクセル・メイン窓クライアント領域基準）。 */
+export interface PreviewRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * プレビュー別WebView を矩形へ配置・表示し url へナビゲートする（要件6・design doc 6章）。
+ * HTML 本体はメイン WebView を経由しない（別WebView が custom protocol で取得）。url のみ渡す。
+ */
+export function showPreview(rect: PreviewRect, url: string): Promise<void> {
+  return invoke<void>("show_preview", { x: rect.x, y: rect.y, w: rect.w, h: rect.h, url });
+}
+
+/** プレビュー別WebView を隠す（占有がプレビュー非表示のとき）。再表示は showPreview。 */
+export function hidePreview(): Promise<void> {
+  return invoke<void>("hide_preview");
+}
+
+/** プレビュー別WebView の位置・サイズを更新する（ペイン/ウィンドウ resize への領域追従）。 */
+export function setPreviewBounds(rect: PreviewRect): Promise<void> {
+  return invoke<void>("set_preview_bounds", { x: rect.x, y: rect.y, w: rect.w, h: rect.h });
+}
+
 /** 表示モード（state.json の ViewMode と対応・ui-design 8章）。 */
 export type ViewMode = "source" | "preview" | "split";
 

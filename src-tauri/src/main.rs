@@ -38,11 +38,13 @@ fn main() {
 ///
 /// capability マップ（design doc 9章）:
 /// - メインウィンドウ（label "main"）: `capabilities/main.json` の最小集合のみ。
-/// - プレビュー別WebView（sprint 4 で生成・label "preview"）: **capability ファイルを置かない**＝
-///   Tauri は未宣言ウィンドウへ command を一切許可しない（権限ゼロ）。これにより未信頼文書 WebView から
-///   `invoke`/`__TAURI_INTERNALS__` 経由の任意 command が到達不能になる（design doc 6章/15章-3）。
+/// - プレビュー別WebView（setup で生成・label "preview"・[`preview::create_preview_webview`]）:
+///   **capability ファイルを置かない**＝Tauri は未宣言ウィンドウへ command を一切許可しない（権限ゼロ）。
+///   さらに別WebView は remote オリジン（pika-preview.localhost）へナビゲートするため、Tauri の ACL は
+///   remote からの app command を拒否する。これにより未信頼文書 WebView から `invoke`/`__TAURI_INTERNALS__`
+///   経由の任意 command が到達不能になる（design doc 6章/15章-3・到達不能の実証は系統C）。
 fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         // プレビュー custom protocol（pika-preview://）= Rust から別WebView へサニタイズ済み HTML を
         // 直配信する（HTML を JS のメインワールドに通さない＝design doc 6章）。CSP はレスポンスヘッダで強制。
         // この protocol が読むのは PreviewService（サニタイズ済み素材）のみで、Tauri command には到達しない。
@@ -62,6 +64,9 @@ fn run() {
             snapshot::confirm_all,
             snapshot::rollback_file,
             preview::prepare_preview,
+            preview::show_preview,
+            preview::hide_preview,
+            preview::set_preview_bounds,
             document::open_document,
             document::save_document,
             document::read_range,
@@ -94,11 +99,30 @@ fn run() {
             app.manage(preview::PreviewService::new());
             // 検索/置換のキャンセルトークン置き場（新しい検索で前のを打ち切る＝固まらない・要件5.4）。
             app.manage(document::SearchCancelService::new());
+            // プレビュー別WebView（label "preview"・権限ゼロ）はここでは生成しない。
+            // Windows/WebView2 では子WebView コントローラの生成完了はメッセージループ経由で通知されるため、
+            // イベントループ未稼働の setup 内で add_child の完了を待つとデッドロックする（メイン窓が不可視のまま固着）。
+            // 生成はループ稼働後の RunEvent::Ready へ遅延させる（下記 app.run のコールバック）。
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("pika の起動に失敗しました");
+
+    // イベントループを起動し、稼働後（RunEvent::Ready）に子WebView を生成する。
+    // RunEvent::Ready のコールバックはメインスレッドでループ稼働中に発火するため、
+    // add_child 内部のメッセージポンプが回り、setup 内で起きていたデッドロックを回避できる。
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::Ready = event {
+            // プレビュー別WebView（label "preview"・権限ゼロ）をメイン窓へオーバーレイ生成する
+            // （design doc 6章/9章）。capability ファイルに preview を含めないことで Tauri API 到達不能を保つ。
+            // 初期は hidden・極小サイズ・about:blank。frontend が show_preview で矩形配置・ナビゲートする。
+            if let Err(e) = preview::create_preview_webview(app_handle) {
+                // 生成失敗でも編集体験は継続させる（プレビューのみ不能・最上位「固まらない/データを失わない」）。
+                eprintln!("プレビュー別WebView の生成に失敗しました: {e}");
+            }
+        }
+    });
 }
