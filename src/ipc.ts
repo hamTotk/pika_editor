@@ -132,6 +132,30 @@ export interface HtmlHazards {
   has_meta_refresh: boolean;
 }
 
+/**
+ * プレビュー別WebView へ降ろすテーマ配色（src-tauri preview::PreviewThemeDto と対応・Stage ③・design doc 10章）。
+ *
+ * 別WebView は独立文書でメインアプリの CSS 変数を継承しないため、解決済みトークン色をここで渡す。
+ * 値は全て**色文字列のみ**（`#rrggbb`/`rgb(...)` 等）。安全化検証は backend(pika-core)が担う。
+ * 系統B（HTML）は文書スタイル尊重で適用しない（backend が theme を無視する＝要件11.3）。
+ */
+export interface PreviewTheme {
+  /** プレビュー背景（--bg-raised）。 */
+  bg: string;
+  /** 本文色（--text-1）。 */
+  fg: string;
+  /** 淡色テキスト（--text-2）。 */
+  muted: string;
+  /** 罫線（--border-2）。 */
+  border: string;
+  /** リンク色（--accent）。 */
+  accent: string;
+  /** 沈み込み背景（--bg-sunken）。 */
+  sunken: string;
+  /** ダークかどうか（hljs CSS の出し分けに使う）。 */
+  dark: boolean;
+}
+
 /** prepare_preview の戻り（src-tauri preview::PreparedPreview と対応・design doc 6章）。 */
 export interface PreparedPreview {
   /** 別WebView へナビゲートする URL（pika-preview:// 経由）。HTML 本体は乗らない。 */
@@ -155,12 +179,14 @@ export function preparePreview(
   mode: PreviewMode,
   content: string,
   allowExternal?: string[],
+  theme?: PreviewTheme,
 ): Promise<PreparedPreview> {
   return invoke<PreparedPreview>("prepare_preview", {
     path,
     mode,
     content,
     allowExternal: allowExternal ?? null,
+    theme: theme ?? null,
   });
 }
 

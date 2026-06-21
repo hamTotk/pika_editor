@@ -42,11 +42,12 @@ import { createEditor, type EditorHandle } from "./editor";
 import { renderDiff, type DiffHandle } from "./diff";
 import {
   buildPreview,
-  parsePreviewFailureMessage,
   resolveOccupancy,
+  resolvePreviewTheme,
   PreviewSerializer,
   type ViewMode,
 } from "./preview";
+import type { PreviewTheme } from "./ipc";
 
 interface OpenTab extends TabModel {
   dirty: boolean;
@@ -105,6 +106,7 @@ const state = {
 };
 
 const saveBtn = () => document.getElementById("save-file") as HTMLButtonElement;
+const editorPane = () => document.getElementById("editor-pane") as HTMLElement;
 const editorHost = () => document.getElementById("editor-host") as HTMLElement;
 const diffHost = () => document.getElementById("diff-host") as HTMLElement;
 const previewHost = () => document.getElementById("preview-host") as HTMLElement;
@@ -522,10 +524,23 @@ function applyOccupancy(): void {
   editorHost().hidden = !occ.showEditor;
   diffHost().hidden = !occ.showDiff;
   previewHost().hidden = !occ.showPreview;
+  // プレビュー＋差分が両方表示のときは左右並置（左＝レンダリング／右＝テキスト差分＝ui-design 8章）。
+  // それ以外（単独占有）は分割クラスを外し、既存の単独レイアウト（grid-row:2 を 1 つが占有）に戻す。
+  const split = occ.showPreview && occ.showDiff;
+  if (split) {
+    editorPane().setAttribute("data-split", "preview-diff");
+  } else {
+    editorPane().removeAttribute("data-split");
+  }
   // 占有がプレビュー非表示なら別WebView を隠す（表示は renderActivePreview の show_preview が担う）。
   // 占有がプレビュー表示でも、ここでは bounds 追従のみ更新する（ナビゲートは renderActivePreview）。
   if (!occ.showPreview) {
     void hidePreview();
+  } else {
+    // レイアウト変更（分割の付け外し）で #preview-host の矩形が変わるため別WebView を再同期する。
+    // ResizeObserver も拾うが、確実に追従させるためここでも明示的に呼ぶ（左半分への移動を即反映）。
+    // DOM のレイアウト確定後に矩形を取るため次フレームで実行する（getBoundingClientRect の確定待ち）。
+    requestAnimationFrame(() => syncPreviewBounds());
   }
 }
 
@@ -545,6 +560,27 @@ function syncPreviewBounds(): void {
   void setPreviewBounds(rect);
 }
 
+/**
+ * メインアプリの解決済みトークン色から別WebView 用テーマを読み取る（Stage ③・design doc 10章）。
+ *
+ * 別WebView は独立文書でアプリの CSS 変数を継承しないため、`getComputedStyle` で解決済みの
+ * 主要トークン色を読み取り backend へ渡して `:root{--pk-*}` 注入させる。ダーク判定は
+ * `color-scheme` に "dark" を含むか / `prefers-color-scheme` と data-theme から解決する。
+ */
+function activePreviewTheme(): PreviewTheme {
+  const root = document.documentElement;
+  const cs = getComputedStyle(root);
+  const getToken = (name: string): string => cs.getPropertyValue(name).trim();
+  // ダーク判定: 解決済み color-scheme が "dark" を含むか（data-theme=dark / system+OS ダークで効く）。
+  // 念のため data-theme=system のときは prefers-color-scheme も見る（古い WebView の保険）。
+  const colorScheme = cs.colorScheme || "";
+  let dark = colorScheme.includes("dark");
+  if (!dark && root.getAttribute("data-theme") === "system") {
+    dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  }
+  return resolvePreviewTheme(getToken, dark);
+}
+
 /** アクティブタブのプレビューを準備し別WebView へ流す URL を得る（要件6・design doc 6章）。 */
 async function renderActivePreview(): Promise<void> {
   if (!state.active) return;
@@ -556,7 +592,8 @@ async function renderActivePreview(): Promise<void> {
   setPreviewState("loading");
   try {
     // content は 1 回だけ invoke で送る（hazards も同じ戻りに同梱＝IPC 二重転送回避）。
-    const ready = await buildPreview(path, content);
+    // テーマ配色を別WebView へ降ろす（Stage ③・design doc 10章）。系統B は backend が無視する。
+    const ready = await buildPreview(path, content, { theme: activePreviewTheme() });
     // 古い世代（素早い切替で後着）なら破棄して前モード残留を防ぐ（design doc 6章 直列化）。
     if (!state.previewSerializer.isCurrent(gen)) return;
     // 系統B（HTML）の危険検知を通知バー導線に出す（要件6.3）。has_meta_refresh も伝える。
@@ -1086,16 +1123,11 @@ async function main(): Promise<void> {
     if (action === null) return; // 未割当キーは CM6 等の既定処理へ委ねる。
     if (dispatchAction(action)) e.preventDefault();
   });
-  // 信頼 JS（別WebView 内の Mermaid/KaTeX/highlight）描画失敗件数の受信導線（要件6.2）。
-  // 別WebView は独立 WebView のため window.parent では本体に届かず、本番（系統C 結線）では
-  // Tauri event/IPC 経路へ置換する（T-007/TE6）。ここでは受信→通知バー集計の片側配線を解消し、
-  // window message（将来 iframe 経路・テスト）でも parsePreviewFailureMessage で受理する。
-  window.addEventListener("message", (e: MessageEvent) => {
-    const failures = parsePreviewFailureMessage(e.data);
-    if (failures !== null) {
-      notify(`プレビューの一部ブロックを描画できませんでした（${failures} 件・元コード表示）`, "warn");
-    }
-  });
+  // 信頼 JS（別WebView 内の Mermaid/KaTeX/highlight）描画失敗の扱い（要件6.2・Stage ③）:
+  // **失敗は in-preview で可視化する**（pika-core の TRUSTED_JS_INIT が失敗ブロックへ pika-block-error を
+  // 付け、別WebView 文書の BASE_CSS が縦線＋「描画に失敗」ラベルで視認可能にする）。
+  // F-029 でプレビュー別WebView からの IPC/event は境界で全拒否されるため、「失敗件数をメインへ送る」
+  // 経路は持たない（穴を開け直さない＝セキュリティ設計と両立）。よって message リスナは廃止した。
   // プレビュー別WebView の領域追従（design doc 6章「ネイティブ子WebView が DOM 領域を追う」）。
   // `#preview-host` のサイズ変化（ペイン/差分トグル/分割）と window resize の両方で矩形を backend へ送る。
   // プレビュー非表示中は syncPreviewBounds が無害化する（占有チェック）。

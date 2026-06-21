@@ -1221,3 +1221,20 @@
 - **状態**: 修正済み（4ゲート緑＋実機プローブで before=INVOKE_OK→after=invoke_rejected を確認）。design doc の
   「capability 不在＝権限ゼロ」記述は誤解を生むため、要件/設計改訂時に「自前 command は IPC 境界ガードで遮断」へ
   追記すべき（canon 改訂は別タスク）。
+
+## T-015 プレビュー仕上げ Stage ③（テーマ反映・preview+diff 左右並置・失敗 in-preview 表示／系統C）
+
+- **テーマ反映（design doc 10章）**: frontend が `getComputedStyle` でアプリの解決済みトークン
+  （`--bg-raised`/`--text-1`/`--text-2`/`--border-2`/`--accent`/`--bg-sunken`＋ダーク判定）を読み、`prepare_preview`
+  へ theme として渡す。pika-core の `wrap_preview_document` が色文字列を検証（`;`/`<`/`{` 等を弾く fail-closed）して
+  `:root{--pk-*}` を注入し BASE_CSS を変数参照化、hljs CSS を dark/light で出し分け。系統B（HTML）はテーマ非適用
+  （文書スタイル尊重）。**実機**: showcase プレビュー背景がアプリの `--bg-raised`（#212126）に一致。
+- **preview+diff 左右並置（ui-design 8章）**: `applyOccupancy` が両表示時に `#editor-pane[data-split="preview-diff"]`
+  を付与、CSS で row2 を 2 カラム化し **左=プレビュー・右=差分**（DOM 順非依存で grid-column 明示）。レイアウト確定後
+  `syncPreviewBounds()` で別WebView を左半分矩形へ追従。**実機**: 左=レンダリング/右=差分（変更0件）が均等に並置。
+- **描画失敗の in-preview 可視化（要件6.2・F-029 整合）**: F-029 でプレビューからの IPC は全拒否のため「失敗件数を
+  Tauri event でメインへ」案は**セキュリティと両立しない**＝採らない。代わりに `TRUSTED_JS_INIT` が失敗ブロックへ
+  付ける `.pika-block-error` を BASE_CSS でテーマ色の縦線＋「描画に失敗（元のコードを表示）」ラベルとして可視化。
+  デッドな postMessage 受信経路（`parsePreviewFailureMessage`＋main.ts message listener）は削除。`@media (forced-colors)`
+  最小対応も追加。**実機未トリガ**（崩れた Mermaid/KaTeX フィクスチャが無く workspace 書込禁止）＝CSS＋cargo test で担保。
+- **状態**: Stage ③ 完了（4ゲート緑＝pika-core 338/pika-app 11・実機でテーマ一致＋左右並置を確認）。

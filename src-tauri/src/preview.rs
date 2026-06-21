@@ -15,7 +15,7 @@ use pika_core::render::{
     check_image_bytes, check_svg_bytes, confine_under, join_under, prepare_html_preview,
     prepare_markdown_preview, resolve_local_ref, rewrite_local_image_refs, wrap_preview_document,
     ExternalResourceAllow, GuardDecision, LocalRefDecision, PreviewFlavor, PreviewResponse,
-    DEFAULT_IMAGE_MAX_PIXELS, DEFAULT_SVG_MAX_ELEMENTS, DEFAULT_SVG_MAX_PIXELS,
+    PreviewTheme, DEFAULT_IMAGE_MAX_PIXELS, DEFAULT_SVG_MAX_ELEMENTS, DEFAULT_SVG_MAX_PIXELS,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -62,6 +62,36 @@ pub enum PreviewMode {
     Html,
 }
 
+/// frontend から渡るテーマ配色（Stage ③・design doc 10章）。
+///
+/// メインアプリの解決済みトークン色（`--bg-raised`/`--text-1`/…）を別WebView 文書へ降ろすための DTO。
+/// **pika-core に serde/Tauri 型を持ち込まない**ため、ここで invoke 引数を受け取り
+/// 純粋な [`PreviewTheme`]（色文字列のみ）へ変換する（安全化検証は pika-core::render が担う）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct PreviewThemeDto {
+    pub bg: String,
+    pub fg: String,
+    pub muted: String,
+    pub border: String,
+    pub accent: String,
+    pub sunken: String,
+    pub dark: bool,
+}
+
+impl From<PreviewThemeDto> for PreviewTheme {
+    fn from(d: PreviewThemeDto) -> Self {
+        PreviewTheme {
+            bg: d.bg,
+            fg: d.fg,
+            muted: d.muted,
+            border: d.border,
+            accent: d.accent,
+            sunken: d.sunken,
+            dark: d.dark,
+        }
+    }
+}
+
 /// `prepare_preview` の戻り（frontend は別WebView の URL を切り替えるだけ＝design doc 6章）。
 #[derive(Debug, Clone, Serialize)]
 pub struct PreparedPreview {
@@ -105,6 +135,9 @@ struct PreparedDoc {
     /// ローカル相対参照（画像/CSS）を解決する基準ディレクトリ（canonicalize 済み）。
     /// `None` は基準ディレクトリ不明（FS 上に無い等）＝ローカル参照は配信しない。
     base_dir: Option<PathBuf>,
+    /// 別WebView へ降ろすテーマ配色（Stage ③・design doc 10章）。`document_response` が wrap へ渡す。
+    /// `None`（theme 未指定・系統B 文書スタイル尊重）のときは OS 任せ（color-scheme）に倒れる。
+    theme: Option<PreviewTheme>,
 }
 
 impl Default for PreviewService {
@@ -130,16 +163,24 @@ impl PreviewService {
 /// - `mode`: 系統A（Markdown）/ 系統B（HTML）。
 /// - `content`: 文書内容（編集バッファ or ディスク内容）。invoke の戻りに HTML を乗せないため入力のみ。
 /// - `allow_external`: オプトイン外部許可ホスト（既定は空＝外部遮断）。
+/// - `theme`: メインアプリの解決済みトークン色（Stage ③・design doc 10章）。系統A のみ別WebView へ降ろす。
+///   系統B（HTML）は文書スタイル尊重で適用しない（要件11.3）。色文字列の安全化は pika-core が担う。
 #[tauri::command]
 pub fn prepare_preview(
     path: String,
     mode: PreviewMode,
     content: String,
     allow_external: Option<Vec<String>>,
+    theme: Option<PreviewThemeDto>,
     preview: State<'_, PreviewService>,
 ) -> Result<PreparedPreview, String> {
     let allow = ExternalResourceAllow {
         hosts: allow_external.unwrap_or_default(),
+    };
+    // 系統A のみテーマを別WebView へ降ろす（系統B は文書スタイル尊重＝要件11.3・ui-design 8章）。
+    let theme: Option<PreviewTheme> = match mode {
+        PreviewMode::Markdown => theme.map(PreviewTheme::from),
+        PreviewMode::Html => None,
     };
 
     // サニタイズ＋CSP（pika-core::render）。HTML 本体は以後ストアにのみ置き、invoke で返さない。
@@ -184,9 +225,14 @@ pub fn prepare_preview(
 
     // 直近 1 世代のみ保持（メモリ節約＋前モード残留防止）。古い文書素材は破棄する。
     inner.documents.clear();
-    inner
-        .documents
-        .insert(generation, PreparedDoc { response, base_dir });
+    inner.documents.insert(
+        generation,
+        PreparedDoc {
+            response,
+            base_dir,
+            theme,
+        },
+    );
 
     // Windows/Android では custom protocol は http://<scheme>.localhost/ に解決される（Tauri 仕様）。
     // frontend はこの URL を別WebView の src へ設定する（HTML は JS を一切経由しない）。
@@ -377,7 +423,14 @@ pub fn handle_preview_request(
 /// 完全 HTML 文書（charset utf-8・最小 base CSS）にラップする。**body は一字一句改変しない**。
 /// CSP は引き続きレスポンスヘッダで強制し、文書内 `<meta>` には依存しない（design doc 6章）。
 fn document_response(doc: &PreparedDoc) -> Response<Vec<u8>> {
-    let html = wrap_preview_document(&doc.response.body, &doc.response.nonce, doc.response.flavor);
+    // テーマ配色を別WebView 文書へ降ろす（Stage ③・design doc 10章）。系統B では prepare_preview が
+    // theme=None にしてある（文書スタイル尊重）。色文字列の安全化検証は wrap_preview_document が担う。
+    let html = wrap_preview_document(
+        &doc.response.body,
+        &doc.response.nonce,
+        doc.response.flavor,
+        doc.theme.as_ref(),
+    );
     // CSP は pika-core が組んだ値（既定外部遮断・nonce・オプトイン緩和は img/font のみ）。
     Response::builder()
         .status(StatusCode::OK)
@@ -624,6 +677,64 @@ mod tests {
         );
         assert!(!resp.body.contains("<script"));
         assert!(resp.csp.contains("script-src 'none'"));
+    }
+
+    /// テスト用のライトテーマ DTO→PreviewTheme（配線テスト用）。
+    fn theme_for_test(dark: bool) -> PreviewTheme {
+        PreviewTheme::from(PreviewThemeDto {
+            bg: "#fafafb".into(),
+            fg: "#26262b".into(),
+            muted: "#5a5a62".into(),
+            border: "#cacace".into(),
+            accent: "#4f74a8".into(),
+            sunken: "#e6e6ea".into(),
+            dark,
+        })
+    }
+
+    #[test]
+    fn document_response_は系統aの_theme_を本文に注入する() {
+        // Stage ③: PreparedDoc.theme が document_response→wrap_preview_document へ渡り、
+        // :root{--pk-*} 定義として別WebView 文書に乗ることを配線レベルで観測する（design doc 10章）。
+        let resp = prepare_markdown_preview("# 見出し\n\n本文", &ExternalResourceAllow::blocked());
+        let doc = PreparedDoc {
+            response: resp,
+            base_dir: None,
+            theme: Some(theme_for_test(false)),
+        };
+        let out = document_response(&doc);
+        assert_eq!(out.status(), StatusCode::OK);
+        let html = String::from_utf8_lossy(out.body());
+        assert!(
+            html.contains("--pk-bg:#fafafb"),
+            "theme 変数が本文に無い: {html}"
+        );
+        // CSP はレスポンスヘッダで強制し続ける（theme 注入で緩めない）。
+        assert!(
+            out.headers().get(header::CONTENT_SECURITY_POLICY).is_some(),
+            "CSP ヘッダが消えた"
+        );
+    }
+
+    #[test]
+    fn document_response_は系統bには_theme_を注入しない() {
+        // 系統B（HTML）は文書スタイル尊重（要件11.3）。prepare_preview で theme=None になる前提だが、
+        // 万一 theme が積まれても wrap が系統B では --pk-* を出さないことを二重に担保する。
+        let resp = prepare_html_preview(
+            "<div style=\"color:red\">x</div>",
+            &ExternalResourceAllow::blocked(),
+        );
+        let doc = PreparedDoc {
+            response: resp,
+            base_dir: None,
+            theme: Some(theme_for_test(true)),
+        };
+        let out = document_response(&doc);
+        let html = String::from_utf8_lossy(out.body());
+        assert!(
+            !html.contains(":root{--pk"),
+            "系統B に theme 変数定義が漏れた: {html}"
+        );
     }
 
     /// PNG ヘッダ（IHDR の width/height）を組み立てる（配線テスト用）。

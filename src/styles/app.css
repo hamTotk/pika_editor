@@ -128,12 +128,35 @@ body {
   background: var(--bg-raised);
 }
 
+/* プレビュー＋差分の左右並置（ui-design 8章「左＝整形プレビュー／右＝テキスト差分」）。
+   row2（grid-row:2）を 2 カラムに割り、DOM 順（diff-host が先）に依存せず
+   grid-column で preview を左・diff を右へ明示配置する。単独占有時は data-split が外れ
+   既存レイアウト（grid-row:2 を 1 要素が占有）に戻る（不変）。 */
+#editor-pane[data-split="preview-diff"] {
+  grid-template-columns: 1fr 1fr;
+}
+
+#editor-pane[data-split="preview-diff"] #preview-host {
+  grid-row: 2;
+  grid-column: 1;
+}
+
+#editor-pane[data-split="preview-diff"] #diff-host {
+  grid-row: 2;
+  grid-column: 2;
+  /* 差分側は左に細い境界を引き、左右の区切りを明示（色非依存の罫線・要件11.5）。 */
+  border-left: 1px solid var(--border-1);
+}
+
 #tabs {
   display: flex;
   gap: 2px;
   padding: 4px 4px 0;
   border-bottom: 1px solid var(--border-1);
   min-height: 30px;
+  /* タブ列は常に row1 全幅（row2 が分割で 2 カラムになっても tabs は全幅を保つ）。 */
+  grid-row: 1;
+  grid-column: 1 / -1;
 }
 
 #tabs [role="tab"] {
