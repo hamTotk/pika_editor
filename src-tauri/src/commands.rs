@@ -5,6 +5,7 @@
 //! ツリー列挙の除外/自然順・エンコーディング往復・自己保存抑制は後続スプリントで
 //! pika-core（workspace/document/watcher）へ移す（design doc 4章）。
 
+use crate::snapshot::SnapshotService;
 use crate::watcher::WatcherService;
 use serde::Serialize;
 use std::hash::Hasher;
@@ -28,6 +29,7 @@ pub struct TreeEntry {
 pub fn open_workspace(
     path: String,
     watcher: State<'_, WatcherService>,
+    snapshot: State<'_, SnapshotService>,
 ) -> Result<Vec<TreeEntry>, String> {
     let dir = Path::new(&path);
     if !dir.is_dir() {
@@ -39,6 +41,11 @@ pub fn open_workspace(
         let p = ent.path();
         let name = ent.file_name().to_string_lossy().to_string();
         let is_dir = p.is_dir();
+        // 差分のベースライン内容を取得（全既読スタート＝要件8.1）。
+        // 機密/10MB以上/画像はハッシュのみ（pika-core::snapshot::policy が判定）。
+        if !is_dir {
+            capture_baseline_for(&p, &snapshot);
+        }
         entries.push(TreeEntry {
             name,
             path: p.to_string_lossy().to_string(),
@@ -51,6 +58,15 @@ pub fn open_workspace(
     // 監視を開始（ベースライン取得・外部変更の emit）。監視不能 FS はポーリングへ縮退する。
     watcher.watch_root(dir)?;
     Ok(entries)
+}
+
+/// 差分のベースライン内容を取得する（要件8.1）。テキスト読取に失敗（バイナリ等）は
+/// サイズだけ渡してハッシュのみベースライン化を pika-core 判定に委ねる。
+fn capture_baseline_for(path: &Path, snapshot: &SnapshotService) {
+    let path_str = path.to_string_lossy().to_string();
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    snapshot.capture_baseline(&path_str, &content, size);
 }
 
 /// ファイル内容を読む（最薄ループ）。エンコーディング判定は sprint 6 の document へ。

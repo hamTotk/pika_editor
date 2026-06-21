@@ -734,3 +734,36 @@
 - **状態**: 合成層は cargo test PASS・配線（監視スレッド/emit/ポーリング/F5）は cargo build 成立。
   **基準機での 100 件同時変更・オーバーフロー再現・notify の表面化有無・rename 実挙動は未実施（要実機）**。
   実測結果と FileId 補強の要否判断を本欄に追記する。
+
+## T-006 スナップショット/差分/確認済み（sprint 3・中心体験③④／系統C）
+
+- **重大度**: 高（最上位原則1「データを失わない」＝退避が最後の砦。確認済み/巻き戻しは破壊的操作）。
+- **対応章**: 要件8.2/8.3/8.4・9.1/9.2/9.3・7.3・design doc 7章/11章・19章 衝突退避不能ガード/状態復元。
+  acceptance.md TD1〜TD9。
+- **決定論側（cargo test 済み・50 件）**:
+  - **diff** — `pika-core::diff`（similar Myers＋語/grapheme フォールバック）。LF 正規化照合で改行のみの差を
+    出さない・空ファイル・新規=全行追加・全削除・累積差分・置換行の行内セグメント・日本語の文字単位強調・
+    結合文字を grapheme 境界で壊さない を観測。**自前なのは語境界不成立行→grapheme 切替の判定のみ**（design doc 7章）。
+  - **snapshot** — `pika-core::snapshot`。content-addressed object（twox-hash LF 正規化ハッシュ・改行のみ違いは同一 object）・
+    zstd 往復・退避4種（conflict/incoming/rollback/baseline-replace）の自己記述メタ・**index 破損時に object メタから
+    退避一覧を再生成**（実体欠落メタは復元しない）・ベースライン常に1件・**ハッシュのみは差分巻き戻し非対象**を観測。
+  - **容量管理** — `pika-core::snapshot::gc`／`store`。ファイルごと最新10件 LRU（未復元＞復元済み＞新しい）・
+    全体500MB＋90日 stale 判定・**未復元かつ14日以内は容量GC保護**（保護のみで上限超過なら削除せず超過バイトを返す）・
+    **共有 object は全参照（baselineHash/stash.hash）不在を確認後にのみ物理削除**・baseline-replace は10件枠と別 を観測。
+  - **機密/10MB境界** — `pika-core::snapshot::policy`。`.env`/`.env.*`/`*.key`/`*.pem`/`*secret*`・画像・**ちょうど10MBを含む
+    10MB以上**はハッシュのみ、10MB未満テキストのみ内容保存 を観測（境界＝「10MB未満のみ内容保存」）。
+  - **確認済み/巻き戻し判定** — `pika-core::review`。**確定直前の mtime/ハッシュ再照合で変化を検知し中断（再差分）**・
+    すべて確認済みは**実行開始時点をフリーズ・変化ファイルをスキップ（未読維持）・更新前を baseline-replace 退避**・
+    巻き戻しは**ベースライン内容あり かつ 現在内容退避可能**でのみ許可・**退避不能（10MB以上/画像）は既定ブロック**
+    （設定で強い確認のうえ許可）を観測。**退避（object 保存）失敗時はベースラインを進めず未読維持＝退避を握り潰さない**。
+- **配線（cargo build＋npm typecheck＋vite build 成立）**:
+  - command: `compute_file_diff`／`confirm_file`／`confirm_all`／`rollback_file`（src-tauri/src/snapshot.rs）。
+    ロジックは全て pika-core 委譲・command は薄い境界（FS 読取＋DTO 化）。
+  - frontend: `src/diff/index.ts`（read-only unified レンダラ・行頭±記号・変更語下線/太字・色非依存・F8/Shift+F8）。
+    `src/main.ts`（差分トグル Ctrl+\・Ctrl+E でソース復帰・確認済み/すべて確認済み/巻き戻しボタン）。
+- **本スプリントの限定（後続で解消）**:
+  - ベースライン内容 object は **メモリ保持で結線**（中心体験貫通を優先）。データルート配下への zstd 永続化＋
+    windows crate 厳格 DACL は後続で同じ pika-core 判定（policy/gc/store）を再利用して実装する（design doc 11章）。
+    したがって TD8（index 破損復元）・TD9（容量GC）の**実機検証は永続化実装後**。決定論ロジックは cargo test 済み。
+- **状態**: 決定論ゲート（cargo test 92 件）PASS・cargo build／npm typecheck／vite build 成立。
+  **基準機での差分実描画・確認済み/巻き戻し実操作・実 FS のベースライン/退避・退避不能ガード実挙動は未実施（要実機）**。

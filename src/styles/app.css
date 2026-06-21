@@ -123,8 +123,23 @@ body {
 }
 
 #editor-host {
+  grid-row: 2;
   overflow: auto;
   padding: 0;
+  min-height: 0;
+}
+
+/* 差分面はエディタ行と同じグリッドセルを占有する（トグルで hidden を切替）。 */
+#diff-host {
+  grid-row: 2;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-raised);
+}
+
+/* 差分 ON 時はエディタを隠し差分面だけ表示（占有はトグルで直交＝ui-design 8章）。 */
+#editor-host[hidden] {
+  display: none;
 }
 
 #editor-host textarea {
@@ -139,6 +154,91 @@ body {
   padding: 8px 12px;
   color: var(--text-1);
   background: var(--bg-raised);
+}
+
+/* read-only unified 差分（要件8.2・ui-design 11章）。
+   行頭 +/- 記号・変更語の下線/太字・色非依存（forced-colors でも記号で弁別）。 */
+.diff-view {
+  overflow: auto;
+  height: 100%;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+}
+
+.diff-lines {
+  display: block;
+  min-width: max-content;
+}
+
+.diff-line {
+  display: flex;
+  white-space: pre;
+  padding: 0 8px 0 0;
+}
+
+.diff-gutter {
+  color: var(--text-faint);
+  user-select: none;
+  padding: 0 8px;
+  white-space: pre;
+  flex: none;
+}
+
+.diff-mark {
+  width: 1.2em;
+  flex: none;
+  text-align: center;
+  user-select: none;
+}
+
+.diff-body {
+  flex: 1 1 auto;
+}
+
+.diff-insert {
+  background: var(--diff-add-bg);
+  color: var(--diff-add-tx);
+}
+
+.diff-insert .diff-gutter {
+  background: var(--diff-add-gut);
+}
+
+.diff-delete {
+  background: var(--diff-del-bg);
+  color: var(--diff-del-tx);
+}
+
+.diff-delete .diff-gutter {
+  background: var(--diff-del-gut);
+}
+
+/* 変更語/grapheme は色だけでなく下線＋太字で強調（要件8.2/11.5）。 */
+.diff-seg-changed {
+  text-decoration: underline;
+  font-weight: 700;
+}
+
+.diff-insert .diff-seg-changed {
+  background: var(--diff-add-word);
+}
+
+.diff-delete .diff-seg-changed {
+  background: var(--diff-del-word);
+}
+
+/* F8/Shift+F8 でジャンプした現在ブロックの一時ハイライト（枠で弁別＝色非依存）。 */
+.diff-block-current {
+  box-shadow: inset 2px 0 0 0 var(--accent-strong);
+}
+
+.diff-unavailable,
+.diff-empty {
+  color: var(--text-3);
+  padding: 12px 16px;
+  font-family: var(--font-ui);
 }
 
 /* 通知バー（非モーダル・最大3本＋他N件はキュー実装で sprint 7）。 */

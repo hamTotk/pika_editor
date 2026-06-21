@@ -94,6 +94,19 @@ export class UnreadStore {
     return this.files.size;
   }
 
+  /**
+   * 確認済み対象になる未読ファイルのパス一覧（要件8.3「すべて確認済み」）。
+   * 削除済み（removed）は確認対象外（差分・ベースラインの確定対象でない）。
+   * 「実行開始時点の未読集合をフリーズ」する用途のためスナップショットを配列で返す。
+   */
+  confirmTargets(): string[] {
+    const out: string[] = [];
+    for (const [path, kind] of this.files) {
+      if (kind !== "removed") out.push(path);
+    }
+    return out;
+  }
+
   private setFile(path: string, kind: UnreadKind): void {
     const norm = normalizeSep(path);
     const existed = this.files.has(norm);

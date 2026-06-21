@@ -14,3 +14,10 @@ workspace = true
 # 重要: 本クレートは Tauri / wry / WebView に一切依存しない（design doc 4章「コアは UI を知らない」）。
 # acceptance_criteria の「pika-core が Tauri に依存しない（dependencies に tauri/wry が無い）」を満たす。
 thiserror = { workspace = true }
+# diff: 行 LCS は similar、語境界不成立行の grapheme フォールバックは unicode-segmentation（design doc 7章）。
+similar = { workspace = true }
+unicode-segmentation = { workspace = true }
+# snapshot: content-addressed object の重複排除/同一性判定ハッシュ（design doc 11章 twox-hash 方針）。
+twox-hash = { workspace = true }
+# snapshot: object の zstd 圧縮（design doc 11章・要件9.1）。
+zstd = { workspace = true }
