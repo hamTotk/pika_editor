@@ -69,11 +69,9 @@
         />
         <button id="open-folder" type="button">フォルダを開く</button>
         <button id="save-file" type="button" disabled>保存</button>
-        <!-- 表示モード切替（ソース/分割/プレビュー＝要件6.1）。プレビューは権限ゼロ別WebView。 -->
-        <button id="toggle-preview" type="button" disabled aria-pressed="false">プレビュー</button>
-        <!-- 差分トグル（Ctrl+\）・確認済み（要件8.2/8.3）。差分面は読み取り専用。 -->
-        <button id="toggle-diff" type="button" disabled aria-pressed="false">差分</button>
-        <button id="confirm-file" type="button" disabled>確認済みにする</button>
+        <!-- 表示モード切替（ソース/分割/プレビュー）・差分トグル・確認済みは
+             タブバー右端の tab-tools（#editor-pane）へ移設した（UIブラッシュアップ T6・差分 C4）。
+             すべて確認済み/巻き戻しはフォルダ全体・回復導線でツールバーに残置（T8 まで）。 -->
         <button id="confirm-all" type="button">すべて確認済み</button>
         <button id="rollback-file" type="button" disabled>確認済み時点に戻す</button>
       </header>
@@ -114,7 +112,52 @@
           </div>
         </nav>
         <main id="editor-pane">
-          <div id="tabs" role="tablist" aria-label="開いているタブ"></div>
+          <!-- タブバー（ui-mock .tabbar・UIブラッシュアップ T6 差分 C4）。grid-row:1 を担うコンテナで、
+               タブ列（#tabs・renderTabs が replaceChildren する）＋ spring ＋ tab-tools（静的UI）を
+               flex で横並びにする。renderTabs は #tabs しか触らないので tab-tools は破壊されない。 -->
+          <div id="tabbar">
+            <div id="tabs" role="tablist" aria-label="開いているタブ"></div>
+            <!-- タブ列を左に詰め tab-tools を右端へ押す伸縮スペーサ（ui-mock .spring）。 -->
+            <span class="spring"></span>
+            <!-- タブバー右端のツール群（ui-mock .tab-tools・ui-design 8章）。
+                 [ソース|分割|プレビュー] のモード切替セグメント（排他）＋ 差分トグル（独立）＋
+                 ✓確認済みにする。「ブラウザで開く」「▸未読N」は別タスク（T9/T10）のため今回は置かない。 -->
+            <div id="tab-tools">
+              <!-- モード切替セグメント（排他・ui-mock .seg）。現在モードに .on が付く。 -->
+              <div class="seg" role="group" aria-label="表示モード">
+                <button id="mode-source" type="button" data-mode="source" aria-pressed="false">
+                  ソース
+                </button>
+                <button id="mode-split" type="button" data-mode="split" aria-pressed="false">
+                  分割
+                </button>
+                <button id="mode-preview" type="button" data-mode="preview" aria-pressed="false">
+                  プレビュー
+                </button>
+              </div>
+              <!-- 差分トグル（独立・ui-mock .diff-toggle）。ON は accent-strong 塗り（.on）。 -->
+              <button
+                id="toggle-diff"
+                type="button"
+                class="diff-toggle"
+                disabled
+                aria-pressed="false"
+                title="差分 Ctrl+Shift+D"
+              >
+                差分
+              </button>
+              <!-- 確認済みにする（ui-mock .iconbtn・要件8.3）。 -->
+              <button
+                id="confirm-file"
+                type="button"
+                class="iconbtn"
+                disabled
+                title="確認済みにする Ctrl+Enter"
+              >
+                ✓ 確認済みにする
+              </button>
+            </div>
+          </div>
           <!-- 差分トグル ON 時に表示する read-only unified 差分面（要件8.2）。既定は非表示。 -->
           <div id="editor-host" aria-label="エディタ"></div>
           <div id="diff-host" aria-label="差分" hidden></div>

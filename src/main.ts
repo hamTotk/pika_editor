@@ -121,7 +121,11 @@ const editorPane = () => document.getElementById("editor-pane") as HTMLElement;
 const editorHost = () => document.getElementById("editor-host") as HTMLElement;
 const diffHost = () => document.getElementById("diff-host") as HTMLElement;
 const previewHost = () => document.getElementById("preview-host") as HTMLElement;
-const togglePreviewBtn = () => document.getElementById("toggle-preview") as HTMLButtonElement;
+// タブバー右端 tab-tools（UIブラッシュアップ T6 差分 C4）。モード切替セグメント・差分トグル・確認ボタン。
+const modeButtons = () =>
+  Array.from(
+    document.querySelectorAll<HTMLButtonElement>("#tab-tools .seg button[data-mode]"),
+  );
 const toggleDiffBtn = () => document.getElementById("toggle-diff") as HTMLButtonElement;
 const confirmBtn = () => document.getElementById("confirm-file") as HTMLButtonElement;
 const confirmAllBtn = () => document.getElementById("confirm-all") as HTMLButtonElement;
@@ -130,8 +134,8 @@ const rollbackBtn = () => document.getElementById("rollback-file") as HTMLButton
 function refreshTabs(): void {
   renderTabs(state.tabs, state.active, activateTab, state.unread, closeTab);
   const hasActive = !!state.active;
-  togglePreviewBtn().disabled = !hasActive;
-  toggleDiffBtn().disabled = !hasActive;
+  // tab-tools（モード切替セグメント/差分トグル）の表示状態・有効/無効を同期する。
+  refreshViewTools();
   // 退避＋ベースライン更新を伴う操作（保存/確認/巻き戻し）は in-flight 中（busy）は無効に保つ
   // （内部 refreshTabs で再有効化して二重送信を許してしまわないため）。
   saveBtn().disabled = !hasActive || state.busy;
@@ -140,6 +144,30 @@ function refreshTabs(): void {
   // すべて確認済みはタブ非依存（フォルダ全体の未読集合に対する操作）。退避を伴うため
   // busy 中のみ無効化し、それ以外は常時有効（refreshTabs が in-flight 後の再有効化点）。
   confirmAllBtn().disabled = state.busy;
+}
+
+/**
+ * tab-tools（モード切替セグメント＋差分トグル）の表示状態を現在の state へ同期する
+ * （UIブラッシュアップ T6 差分 C4・ui-design 8章）。
+ *
+ * - モードセグメント: 現在の state.viewMode のボタンに .on＋aria-pressed=true を付ける（排他）。
+ * - 差分トグル: state.diffOn のとき .on（accent-strong 塗り）＋aria-pressed=true。
+ * - 有効/無効: アクティブタブが無い間はモード/差分とも無効（中心体験の起点が無いため）。
+ *
+ * setViewMode/onToggleDiff/applyOccupancy・ショートカット発火後にこれを呼んで UI を一致させる。
+ */
+function refreshViewTools(): void {
+  const hasActive = !!state.active;
+  for (const btn of modeButtons()) {
+    const on = btn.dataset.mode === state.viewMode;
+    btn.classList.toggle("on", on);
+    btn.setAttribute("aria-pressed", String(on));
+    btn.disabled = !hasActive;
+  }
+  const diffBtn = toggleDiffBtn();
+  diffBtn.disabled = !hasActive;
+  diffBtn.classList.toggle("on", state.diffOn);
+  diffBtn.setAttribute("aria-pressed", String(state.diffOn));
 }
 
 function refreshTree(): void {
@@ -555,11 +583,12 @@ async function saveOnce(
   }
 }
 
-/** 差分トグル（Ctrl+\・要件8.2）。ON でアクティブタブの差分を読み取り専用表示する。 */
+/** 差分トグル（Ctrl+Shift+D・要件8.2）。ON でアクティブタブの差分を読み取り専用表示する（独立トグル）。 */
 async function onToggleDiff(): Promise<void> {
   if (!state.active) return;
   state.diffOn = !state.diffOn;
-  toggleDiffBtn().setAttribute("aria-pressed", String(state.diffOn));
+  // tab-tools の差分トグル表示（.on＋aria-pressed）を実状態へ同期する。
+  refreshViewTools();
   if (state.diffOn) {
     await renderActiveDiff();
   } else {
@@ -592,26 +621,51 @@ function hideDiff(): void {
   state.diff?.destroy();
   state.diff = null;
   state.diffOn = false;
-  toggleDiffBtn().setAttribute("aria-pressed", "false");
+  // tab-tools の差分トグル表示（.on/aria-pressed）を OFF へ同期する。
+  refreshViewTools();
   // 差分 OFF 後はモードに応じてエディタ/プレビューへ占有を戻す（直交）。
   applyOccupancy();
 }
 
 /**
- * プレビュー表示の切替（要件6.1）。ソース ⇔ プレビューを切替える。
+ * 表示モードを設定する（ソース/分割/プレビュー＝要件6.1・ui-design 8章）。tab-tools セグメント・
+ * ショートカット双方の唯一の入口。モードは排他、差分トグル（state.diffOn）とは直交。
  *
- * 権限ゼロ別WebView へ custom protocol(pika-preview://)直配信する URL を backend から得て占有を更新する
- * （HTML 本体はメインWebView を一切経由しない＝design doc 6章）。系統A/B 切替は世代カウンタで直列化し、
- * 古い prepare_preview 結果が後から来ても破棄して前モード残留を防ぐ。
+ * プレビュー/分割は権限ゼロ別WebView へ custom protocol(pika-preview://)直配信した URL を backend から
+ * 得て占有を更新する（HTML 本体はメインWebView を一切経由しない＝design doc 6章）。系統A/B 切替は
+ * 世代カウンタで直列化し、古い prepare_preview 結果が後から来ても破棄して前モード残留を防ぐ。
+ *
+ * 占有を更新（applyOccupancy）した上で、プレビューを表示すべき占有（preview/split で showPreview）なら
+ * 別WebView を新内容へナビゲートする（renderActivePreview）。セグメント表示は refreshViewTools が同期。
+ */
+async function setViewMode(mode: ViewMode): Promise<void> {
+  if (!state.active) return;
+  state.viewMode = mode;
+  // tab-tools セグメントの .on/aria-pressed を実モードへ同期する。
+  refreshViewTools();
+  applyOccupancy();
+  // プレビューを占有するモード（preview / split 差分OFF）になったら別WebView をナビゲートする。
+  if (resolveOccupancy(state.viewMode, state.diffOn).showPreview) {
+    await renderActivePreview();
+  }
+}
+
+/**
+ * プレビュー表示の切替（Ctrl+E・要件6.1）。ソース ⇔ プレビューをトグルする（ショートカット用）。
+ * 分割中に Ctrl+E を押したらプレビュー単独へ寄せ、プレビュー中なら（編集できる）ソースへ戻す。
  */
 async function onTogglePreview(): Promise<void> {
   if (!state.active) return;
-  state.viewMode = state.viewMode === "preview" ? "source" : "preview";
-  togglePreviewBtn().setAttribute("aria-pressed", String(state.viewMode === "preview"));
-  applyOccupancy();
-  if (state.viewMode === "preview") {
-    await renderActivePreview();
-  }
+  await setViewMode(state.viewMode === "preview" ? "source" : "preview");
+}
+
+/**
+ * 分割表示の切替（Ctrl+\・代替 Ctrl+Shift+E・要件11.2）。ソース ⇔ 分割をトグルする（ショートカット用）。
+ * 分割中なら（編集に専念できる）ソースへ戻し、それ以外（ソース/プレビュー）なら分割へ寄せる。
+ */
+async function onToggleSplit(): Promise<void> {
+  if (!state.active) return;
+  await setViewMode(state.viewMode === "split" ? "source" : "split");
 }
 
 /** 3モード×差分トグルの直交占有を DOM へ適用する（要件6.1・ui-design 8章）。 */
@@ -620,11 +674,14 @@ function applyOccupancy(): void {
   editorHost().hidden = !occ.showEditor;
   diffHost().hidden = !occ.showDiff;
   previewHost().hidden = !occ.showPreview;
-  // プレビュー＋差分が両方表示のときは左右並置（左＝レンダリング／右＝テキスト差分＝ui-design 8章）。
-  // それ以外（単独占有）は分割クラスを外し、既存の単独レイアウト（grid-row:2 を 1 つが占有）に戻す。
-  const split = occ.showPreview && occ.showDiff;
-  if (split) {
+  // 左右並置（split）の出し分け（ui-design 8章）。occ は直交占有の結果なので、
+  //  - プレビュー＋差分（preview/split で差分ON）→ 左＝レンダリング／右＝テキスト差分。
+  //  - 分割＋差分OFF（split で showEditor && showPreview）→ 左＝エディタ／右＝プレビュー。
+  //  - それ以外（単独占有）→ data-split を外し既存の単独レイアウト（grid-row:2 を 1 要素が占有）に戻す。
+  if (occ.showPreview && occ.showDiff) {
     editorPane().setAttribute("data-split", "preview-diff");
+  } else if (occ.showPreview && occ.showEditor) {
+    editorPane().setAttribute("data-split", "editor-preview");
   } else {
     editorPane().removeAttribute("data-split");
   }
@@ -1151,12 +1208,14 @@ function dispatchAction(action: Action): boolean {
       void onOpenFolder();
       return true;
     case "toggle-preview":
-      // 差分表示中はソースへ戻す（差分は読み取り専用＝要件8.2）。それ以外はソース⇔プレビュー切替。
-      if (state.diffOn) hideDiff();
-      else void onTogglePreview();
+      // ソース ⇔ プレビュー切替（差分トグルは直交なのでそのまま維持）。setViewMode が占有・別WebView・
+      // tab-tools 表示（.on/aria-pressed）を一括同期する。
+      void onTogglePreview();
       return true;
     case "toggle-split":
-      void onToggleDiff();
+      // ソース ⇔ 分割切替（Ctrl+\・代替 Ctrl+Shift+E）。差分トグルとは直交（分割＋差分ON は
+      // applyOccupancy が左プレビュー＋右差分へ倒す）。
+      void onToggleSplit();
       return true;
     case "toggle-diff":
       void onToggleDiff();
@@ -1264,7 +1323,14 @@ async function main(): Promise<void> {
   initA11y();
   document.getElementById("open-folder")?.addEventListener("click", () => void onOpenFolder());
   saveBtn().addEventListener("click", () => void onSave());
-  togglePreviewBtn().addEventListener("click", () => void onTogglePreview());
+  // tab-tools: モード切替セグメント（ソース/分割/プレビュー）。data-mode を読んで setViewMode へ流す。
+  for (const btn of modeButtons()) {
+    btn.addEventListener("click", () => {
+      const mode = btn.dataset.mode as ViewMode | undefined;
+      if (mode) void setViewMode(mode);
+    });
+  }
+  // tab-tools: 差分トグル（独立）・確認済みにする。
   toggleDiffBtn().addEventListener("click", () => void onToggleDiff());
   confirmBtn().addEventListener("click", () => void onConfirm());
   confirmAllBtn().addEventListener("click", () => void onConfirmAll());
@@ -1274,6 +1340,9 @@ async function main(): Promise<void> {
   treeExpandBtn().addEventListener("click", () => setTreeCollapsed(false));
   // ツリーヘッダ（B4）の初期表示（フォルダ未オープン時は「エクスプローラー」のみ）。復元後に更新される。
   updateTreeHeader();
+  // tab-tools セグメントの初期表示（既定モード=ソースに .on を付け、タブ未オープン時は無効化する）。
+  // 以後はタブ操作/モード切替/差分トグルのたびに refreshViewTools が同期する。
+  refreshViewTools();
   // 主要ショートカットを単一のキーディスパッチ表で処理する（要件11.2・eval high: shortcuts 配線）。
   // 判定（どのキーが何の操作か・Ctrl+Enter 誤爆防止・代替割当）は shortcuts.resolveShortcut
   // （pika-core::shortcuts の写し）へ集約し、ここは結果（Action）を dispatchAction へ流すだけ。
