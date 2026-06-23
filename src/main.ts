@@ -3,6 +3,7 @@
 // 差分/プレビュー/単一インスタンス等は後続スプリントで肉付けする。
 import {
   openWorkspace,
+  listDir,
   readFile,
   pathKind,
   openDocument,
@@ -31,7 +32,7 @@ import {
 import { initTheme } from "./theme";
 import { initA11y, announce } from "./a11y";
 import { resolveShortcut, modsOf, normalizeKey, type Action, type Focus } from "./shortcuts";
-import { renderTree } from "./ui/tree";
+import { renderTree, resetTreeExpansion } from "./ui/tree";
 import { renderTabs, type TabModel } from "./ui/tabs";
 import { notify, notices } from "./ui/notifications";
 import { setStatus } from "./ui/status";
@@ -138,7 +139,8 @@ function refreshTabs(): void {
 }
 
 function refreshTree(): void {
-  renderTree(state.treeEntries, (entry) => void openFile(entry), state.unread);
+  // 子フォルダの遅延展開は副作用なし列挙（listDir）で取得する（監視ルート付け替え/ベースライン再取得をしない）。
+  renderTree(state.treeEntries, (entry) => void openFile(entry), listDir, state.unread);
 }
 
 /**
@@ -385,6 +387,8 @@ async function switchFolder(dir: string): Promise<void> {
     }
     state.folder = dir;
     state.treeEntries = entries;
+    // 別フォルダを開いたので前フォルダのツリー展開状態/子キャッシュを破棄する（誤展開防止）。
+    resetTreeExpansion();
     // 初回オープンは全既読スタート（要件8.1）。未読は外部変更（fs-changed）で付く。
     state.unread = new UnreadStore();
     refreshTree();
@@ -966,6 +970,7 @@ async function restoreOnStartup(): Promise<void> {
       const entries = await openWorkspace(outcome.workspace_path);
       state.folder = outcome.workspace_path;
       state.treeEntries = entries;
+      resetTreeExpansion();
       state.unread = new UnreadStore();
       refreshTree();
       setStatus(`${outcome.workspace_path}（${entries.length} 件）`);

@@ -1,51 +1,143 @@
-// ファイルツリー（要件4.1/4.2・ui-design 5/6章）。role=tree/treeitem の土台＋未読状態マーク。
-// sprint 7（design doc 17章）で ARIA 全Web再構築の一部として**キーボード操作性**を本実装する:
+// ファイルツリー（要件4.1/4.2・ui-design 5/6/7章）。role=tree/treeitem の土台＋未読状態マーク。
+// sprint 7（design doc 17章）で ARIA 全Web再構築の一部として**キーボード操作性**を本実装した:
 // - roving tabindex（ツリー内で常に 1 つだけ tabIndex=0・残りは -1）で Tab 一発でツリーへ入れる。
 // - ↑/↓ で treeitem 間移動・Home/End で先頭/末尾・Enter/Space でファイルを開く（要件11.4/11.5
 //   「マウスなしで中心フロー完走」＝ツリーが起点）。
 // - ディレクトリ treeitem に aria-expanded を付与する（sprint 7 must の明示要求）。
+// UI ブラッシュアップ T2（ui-design 7章）で **フォルダ開閉シェブロン（▾/▸）＋段階インデント展開**を実装:
+// - フォルダ行の先頭にトグル（▾=展開 / ▸=折りたたみ）を出し、ファイル行は同幅の空きでインデント整列する。
+// - フォルダ（シェブロン/行）クリックまたは Enter/Space/ArrowRight で子を ipc 経由で遅延取得し、その行の
+//   直後に深さ+1 で挿入する。再度トグルで折りたたむ。展開済みパス集合と取得済み子キャッシュは本モジュール
+//   内に保持し、外部変更等での再構築でも展開状態を保つ。aria-expanded は実値（true/false）に連動する。
+// - 段階インデントは深さに応じて行の左パディングを増やす（base + depth * 段差。CSS の calc で算出）。
 // 未読マーク（± 変更 / ◆ 新規 / 取消線 削除）とフォルダ伝播（淡い ±）の反映は sprint 2 から継続。
+// 絵文字は使わない（ui-design 7章: シェブロン＋種別アイコン＋名前＋状態マーク）。
 import type { TreeEntry } from "../ipc";
 import { UNREAD_MARK, type UnreadStore } from "./unread";
 
 const host = () => document.getElementById("tree") as HTMLElement;
 
-/** ツリー直下のエントリを描画する。クリック/Enter/Space でファイルを開く（onOpen 経由）。 */
+/** 子フォルダを ipc 経由で遅延取得する関数（副作用なし列挙＝ipc.listDir を渡す想定）。 */
+type FetchChildren = (path: string) => Promise<TreeEntry[]>;
+
+/** パス区切りを正規化する（Windows の \ と / を吸収し展開集合/キャッシュのキーを安定させる）。 */
+function normPath(path: string): string {
+  return path.replace(/\\/g, "/");
+}
+
+/**
+ * ツリーの描画状態（再構築をまたいで保持する単一源）。
+ * renderTree のたびに rootEntries/onOpen/fetch/unread を更新し、expanded/childCache は維持する。
+ */
+const treeState = {
+  rootEntries: [] as TreeEntry[],
+  onOpen: (_entry: TreeEntry) => {},
+  fetch: undefined as FetchChildren | undefined,
+  unread: undefined as UnreadStore | undefined,
+  /** 展開済みフォルダの正規化パス集合（再構築でも展開を保つ）。 */
+  expanded: new Set<string>(),
+  /** 取得済み子のキャッシュ（正規化パス→直下エントリ）。展開は同期的にここから組む。 */
+  childCache: new Map<string, TreeEntry[]>(),
+  /** 再描画後にフォーカスを戻す対象パス（キーボード展開/折りたたみの追従用）。 */
+  focusAfterRender: undefined as string | undefined,
+};
+
+/**
+ * ツリーを描画する。クリック/Enter/Space でファイルを開き（onOpen）、フォルダはトグルで開閉する。
+ *
+ * @param entries 直下（ルート）のエントリ。
+ * @param onOpen ファイルを開くコールバック（フォルダでは呼ばない）。
+ * @param fetchChildren 子フォルダの遅延取得（副作用なし列挙）。未指定なら展開不可（直下のみ）。
+ * @param unread 未読ストア（状態マーク/伝播）。
+ */
 export function renderTree(
   entries: TreeEntry[],
   onOpen: (entry: TreeEntry) => void,
+  fetchChildren?: FetchChildren,
   unread?: UnreadStore,
 ): void {
+  treeState.rootEntries = entries;
+  treeState.onOpen = onOpen;
+  treeState.fetch = fetchChildren;
+  treeState.unread = unread;
+  rebuild();
+}
+
+/**
+ * ツリーの展開状態と子キャッシュを破棄する（別フォルダを開く/切り替える時に呼ぶ）。
+ * 前フォルダのパスが新フォルダに残って誤展開するのを防ぐ（複数フォルダ同時オープンはしない＝要件14章）。
+ */
+export function resetTreeExpansion(): void {
+  treeState.expanded.clear();
+  treeState.childCache.clear();
+  treeState.focusAfterRender = undefined;
+}
+
+/**
+ * 現在の state（root＋展開集合＋子キャッシュ）からツリー DOM を**同期的に**組み直す。
+ * 子の取得は非同期（toggleExpand）でキャッシュ確定後にこれを呼ぶため、ここでは I/O しない。
+ */
+function rebuild(): void {
   const ul = host();
   ul.replaceChildren();
   // ツリー自体はキーボードフォーカスを内部の treeitem へ委譲する（roving tabindex）。
   // host の <ul role="tree"> は tabindex を持たず、必ず treeitem の 1 つが tabIndex=0 になる。
   ul.removeAttribute("tabindex");
-  for (const entry of entries) {
-    ul.appendChild(makeItem(entry, onOpen, unread));
+  for (const entry of treeState.rootEntries) {
+    appendSubtree(ul, entry, 0);
   }
-  // roving tabindex の初期化: 先頭 treeitem だけを Tab 到達可能（0）にし、残りは -1。
-  initRovingTabindex(ul);
+  // roving tabindex の初期化: 1 つだけ Tab 到達可能（0）にし、残りは -1。
+  // 直前のキーボード展開/折りたたみで残したい行があればそこへ、無ければ先頭へ。
+  initRovingTabindex(ul, treeState.focusAfterRender);
+  treeState.focusAfterRender = undefined;
 }
 
-function makeItem(
-  entry: TreeEntry,
-  onOpen: (entry: TreeEntry) => void,
-  unread?: UnreadStore,
-): HTMLLIElement {
+/** エントリ（＋展開済みなら子孫）を深さ depth で ul に追加する（同期・キャッシュ参照のみ）。 */
+function appendSubtree(ul: HTMLElement, entry: TreeEntry, depth: number): void {
+  const li = makeItem(entry, depth);
+  ul.appendChild(li);
+  if (entry.is_dir && treeState.expanded.has(normPath(entry.path))) {
+    const children = treeState.childCache.get(normPath(entry.path)) ?? [];
+    for (const child of children) {
+      appendSubtree(ul, child, depth + 1);
+    }
+  }
+}
+
+function makeItem(entry: TreeEntry, depth: number): HTMLLIElement {
   const li = document.createElement("li");
   li.setAttribute("role", "treeitem");
   li.setAttribute("aria-selected", "false");
-  // ディレクトリは aria-expanded を必ず付与する（sprint 7 must）。現状ツリーは 1 段表示で
-  // 子の遅延展開は未実装のため折りたたみ（false）として表現する（展開導線は後続で結線）。
-  if (entry.is_dir) {
-    li.setAttribute("aria-expanded", "false");
-  }
-  // roving tabindex: 既定は -1。renderTree 末尾で先頭だけ 0 にする。
-  li.tabIndex = -1;
   li.dataset.path = entry.path;
+  li.dataset.depth = String(depth);
+  // 段階インデント（ui-design 7章 indent1=24px/indent2=42px 目安）。深さ可変なので CSS の calc で
+  // base + depth * 段差を算出する（CSS 変数 --depth に深さを渡す）。
+  li.style.setProperty("--depth", String(depth));
+  const expanded = entry.is_dir && treeState.expanded.has(normPath(entry.path));
+  // ディレクトリは aria-expanded を**実値**で付与する（T2 must: 展開 true / 折りたたみ false）。
+  if (entry.is_dir) {
+    li.setAttribute("aria-expanded", expanded ? "true" : "false");
+  }
+  // roving tabindex: 既定は -1。rebuild 末尾で 1 つだけ 0 にする。
+  li.tabIndex = -1;
 
-  const mark = stateMark(entry, unread);
+  const mark = stateMark(entry, treeState.unread);
+
+  // 開閉シェブロン（ui-mock .trow .twist 相当）。フォルダは ▾/▸、ファイルは同幅の空き（整列用）。
+  // 装飾扱い（aria-hidden）。状態は aria-label / aria-expanded に集約する。
+  const twist = document.createElement("span");
+  twist.className = "tree-twist";
+  twist.setAttribute("aria-hidden", "true");
+  if (entry.is_dir) {
+    twist.textContent = expanded ? "▾" : "▸";
+    // シェブロン単独クリックでも開閉できる（行クリックと同経路だが伝播は止める）。
+    twist.addEventListener("click", (e) => {
+      e.stopPropagation();
+      selectItem(li);
+      void toggleExpand(entry);
+    });
+  }
+
   // アイコンと名前は別要素にする（F-028: 取り消し線をアイコンまで横切らせない）。
   // 取り消し線はファイル名 span にだけ掛け、アイコン/状態記号は装飾対象から外す。
   // アイコンは絵文字ではなくモノトーン線 SVG（ui-design 6章・案A）。currentColor でテーマ追従し
@@ -61,7 +153,7 @@ function makeItem(
   if (mark.removed) {
     nameSpan.classList.add("removed"); // 削除済みは取り消し線（ui-design 5章）。span のみに限定。
   }
-  li.append(iconSpan, nameSpan);
+  li.append(twist, iconSpan, nameSpan);
   applyAriaLabel(li, entry, mark);
   if (mark.propagated) {
     li.dataset.unread = "propagated"; // 伝播マーク（淡 ±）。視覚は CSS で淡色化。
@@ -69,21 +161,53 @@ function makeItem(
     li.dataset.unread = "self";
   }
 
-  // クリックでも開く（マウス操作・従来挙動）。
+  // クリック: ファイルは開く・フォルダは開閉トグル（ファイルのように開かない＝要件4.1）。
   li.addEventListener("click", () => {
     selectItem(li);
-    if (!entry.is_dir) onOpen(entry);
+    if (entry.is_dir) void toggleExpand(entry);
+    else treeState.onOpen(entry);
   });
   // フォーカスを得たら roving tabindex を当該行へ移し選択を反映する（矢印移動の追従）。
   li.addEventListener("focus", () => selectItem(li));
-  // キーボード操作（要件11.4/11.5: マウスなしで開く起点に到達）。
-  li.addEventListener("keydown", (e) => onItemKeydown(e, li, entry, onOpen));
+  // キーボード操作（要件11.4/11.5: マウスなしで中心フロー完走＋WAI-ARIA tree の展開/折りたたみ）。
+  li.addEventListener("keydown", (e) => onItemKeydown(e, li, entry));
   return li;
+}
+
+/**
+ * フォルダの展開/折りたたみをトグルする（遅延取得→キャッシュ→同期再構築）。
+ * 子取得は非同期だが、取得完了後にキャッシュ確定→rebuild（同期）で展開状態を反映する。
+ * 列挙失敗（権限/消失）でも UI は固めず、その行は展開しないまま残す（最上位「固まらない」）。
+ */
+async function toggleExpand(entry: TreeEntry): Promise<void> {
+  if (!entry.is_dir) return;
+  const key = normPath(entry.path);
+  if (treeState.expanded.has(key)) {
+    // 折りたたみ: 集合から外して再構築（子 DOM が消える）。キャッシュは保持して再展開を速くする。
+    treeState.expanded.delete(key);
+    treeState.focusAfterRender = entry.path; // 折りたたんだフォルダ自身へフォーカスを残す。
+    rebuild();
+    return;
+  }
+  // 展開: 未キャッシュなら遅延取得してからキャッシュへ。fetch 未指定なら展開不可（直下のみ運用）。
+  if (!treeState.childCache.has(key)) {
+    if (!treeState.fetch) return;
+    try {
+      const children = await treeState.fetch(entry.path);
+      treeState.childCache.set(key, children);
+    } catch {
+      // 取得失敗は展開しない（行はそのまま）。通知はフロント側方針に委ねここでは握り潰す。
+      return;
+    }
+  }
+  treeState.expanded.add(key);
+  treeState.focusAfterRender = entry.path; // 展開したフォルダ自身へフォーカスを残す。
+  rebuild();
 }
 
 // 拡張子→カテゴリ→アイコン symbol id のマッピング（ui-design 6章のカテゴリ集約表）。
 // 未知拡張子は generic file（ic-file）へフォールバックする。フォルダは展開/折りたたみに
-// かかわらず ic-folder（開閉シェブロンは別タスク）。
+// かかわらず ic-folder（開閉の弁別はシェブロン ▾/▸ が担う）。
 const ICON_BY_EXT: Readonly<Record<string, string>> = {
   // コード/マークアップ → file-code（<>）
   ts: "ic-code",
@@ -155,15 +279,26 @@ function applyAriaLabel(
   li.setAttribute("aria-label", `${entry.name} ${kind}${stateText}`);
 }
 
-/** roving tabindex の初期化（先頭 treeitem のみ Tab 到達可能・残りは -1）。 */
-function initRovingTabindex(ul: HTMLElement): void {
+/** roving tabindex の初期化（指定パス or 先頭 treeitem のみ Tab 到達可能・残りは -1）。 */
+function initRovingTabindex(ul: HTMLElement, focusPath?: string): void {
   const items = treeItems(ul);
+  if (items.length === 0) return;
+  let target = 0;
+  if (focusPath) {
+    const idx = items.findIndex((it) => it.dataset.path === focusPath);
+    if (idx >= 0) target = idx;
+  }
   items.forEach((it, i) => {
-    it.tabIndex = i === 0 ? 0 : -1;
+    it.tabIndex = i === target ? 0 : -1;
+    it.setAttribute("aria-selected", i === target && focusPath ? "true" : "false");
   });
+  // キーボード展開/折りたたみ直後はフォーカスも当該行へ戻す（操作位置を見失わない＝要件11.5）。
+  if (focusPath && items[target]) {
+    items[target].focus();
+  }
 }
 
-/** ツリー内の treeitem 一覧（DOM 順）。 */
+/** ツリー内の treeitem 一覧（DOM 順＝展開された子も含む）。 */
 function treeItems(ul: HTMLElement): HTMLElement[] {
   return Array.from(ul.querySelectorAll<HTMLElement>('[role="treeitem"]'));
 }
@@ -182,16 +317,18 @@ function selectItem(li: HTMLElement): void {
   li.tabIndex = 0;
 }
 
-/** treeitem 上のキー操作（↑/↓/Home/End 移動・Enter/Space で開く＝要件11.4/11.5）。 */
-function onItemKeydown(
-  e: KeyboardEvent,
-  li: HTMLElement,
-  entry: TreeEntry,
-  onOpen: (entry: TreeEntry) => void,
-): void {
+/**
+ * treeitem 上のキー操作（要件11.4/11.5・WAI-ARIA tree）。
+ * - ↑/↓: 表示中（展開済みの子を含む）の treeitem 間移動・Home/End: 先頭/末尾。
+ * - Enter/Space: ファイルは開く・フォルダは開閉トグル。
+ * - ArrowRight: 折りたたみフォルダは展開／展開済みフォルダは最初の子へ移動。
+ * - ArrowLeft: 展開済みフォルダは折りたたむ／それ以外は親フォルダへ移動。
+ */
+function onItemKeydown(e: KeyboardEvent, li: HTMLElement, entry: TreeEntry): void {
   const ul = host();
   const items = treeItems(ul);
   const idx = items.indexOf(li);
+  const expanded = entry.is_dir && treeState.expanded.has(normPath(entry.path));
   switch (e.key) {
     case "ArrowDown": {
       e.preventDefault();
@@ -201,6 +338,30 @@ function onItemKeydown(
     case "ArrowUp": {
       e.preventDefault();
       focusItemAt(items, Math.max(idx - 1, 0));
+      break;
+    }
+    case "ArrowRight": {
+      e.preventDefault();
+      if (entry.is_dir && !expanded) {
+        // 折りたたみフォルダ → 展開（toggleExpand が rebuild 後に当該行へフォーカスを戻す）。
+        void toggleExpand(entry);
+      } else if (entry.is_dir && expanded) {
+        // 展開済みフォルダ → 最初の子（DOM 順で次の行が深さ+1）へ移動。
+        const next = items[idx + 1];
+        if (next && depthOf(next) > depthOf(li)) focusItemAt(items, idx + 1);
+      }
+      break;
+    }
+    case "ArrowLeft": {
+      e.preventDefault();
+      if (entry.is_dir && expanded) {
+        // 展開済みフォルダ → 折りたたむ。
+        void toggleExpand(entry);
+      } else {
+        // ファイル or 折りたたみフォルダ → 親フォルダ（DOM をさかのぼり深さが 1 小さい直近行）へ移動。
+        const parentIdx = parentIndexOf(items, idx);
+        if (parentIdx >= 0) focusItemAt(items, parentIdx);
+      }
       break;
     }
     case "Home": {
@@ -215,13 +376,29 @@ function onItemKeydown(
     }
     case "Enter":
     case " ": {
-      // Space/Enter でファイルを開く（要件11.4「マウスなしで中心フロー完走」の起点）。
+      // Space/Enter: ファイルを開く（要件11.4「マウスなしで中心フロー完走」の起点）・フォルダは開閉。
       e.preventDefault();
       selectItem(li);
-      if (!entry.is_dir) onOpen(entry);
+      if (entry.is_dir) void toggleExpand(entry);
+      else treeState.onOpen(entry);
       break;
     }
   }
+}
+
+/** treeitem の深さ（data-depth）を取り出す。 */
+function depthOf(li: HTMLElement): number {
+  return Number(li.dataset.depth ?? "0");
+}
+
+/** 指定行の親フォルダ行の index（DOM をさかのぼり深さが 1 小さい直近行）。無ければ -1。 */
+function parentIndexOf(items: HTMLElement[], idx: number): number {
+  const myDepth = depthOf(items[idx]);
+  if (myDepth === 0) return -1;
+  for (let i = idx - 1; i >= 0; i--) {
+    if (depthOf(items[i]) === myDepth - 1) return i;
+  }
+  return -1;
 }
 
 /** 指定 index の treeitem へ roving フォーカスを移す。 */

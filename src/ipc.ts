@@ -30,6 +30,14 @@ export function openWorkspace(path: string): Promise<TreeEntry[]> {
   return invoke<TreeEntry[]>("open_workspace", { path });
 }
 
+/**
+ * 指定フォルダ直下のエントリ一覧を**副作用なし**で取得する（ツリーのサブフォルダ遅延展開・UI T2）。
+ * openWorkspace と異なり監視ルートの付け替えやベースライン取得を行わない（純粋な一段列挙）。
+ */
+export function listDir(path: string): Promise<TreeEntry[]> {
+  return invoke<TreeEntry[]>("list_dir", { path });
+}
+
 /** ファイル内容を読む。 */
 export function readFile(path: string): Promise<string> {
   return invoke<string>("read_file", { path });
