@@ -73,16 +73,88 @@ body {
   min-height: 0;
 }
 
+/* ツリー収納時（B5・ui-mock .body.tree-collapsed）。左ペインを約30pxの細いレールへ縮め、
+   メイン領域を拡幅する（Obsidian 流・ui-design 7章）。class はトグルで #workbench に付与する。 */
+#workbench.tree-collapsed {
+  grid-template-columns: 30px 1fr;
+}
+
 #tree-pane {
   background: var(--bg-sunken);
   border-right: 1px solid var(--border-1);
   overflow: auto;
 }
 
+/* ツリーヘッダ（B4・ui-mock .tree-head）。text-3・小さめ・letter-spacing・uppercase 風。
+   「エクスプローラー — <フォルダ名>」を grow ラベルで出し、右端に収納トグルを置く。 */
+#tree-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 8px;
+  color: var(--text-3);
+  font-size: 11.5px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  user-select: none;
+}
+
+#tree-head .grow {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 収納/引き出しトグル（ui-mock .tree-toggle）。枠なしの淡色ボタン・hover で前面化。 */
+.tree-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  width: 20px;
+  height: 20px;
+  line-height: 18px;
+  text-align: center;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  flex: none;
+  font-family: inherit;
+}
+
+.tree-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-1);
+}
+
+.tree-toggle:focus-visible {
+  outline: 2px solid var(--accent, Highlight);
+  outline-offset: -2px;
+}
+
+/* 引き出しレール（収納時のみ表示・ui-mock .tree-rail）。既定は非表示。 */
+#tree-rail {
+  display: none;
+}
+
+/* 収納時の出し分け（ui-mock）。ヘッダ/行を隠し、レールだけ中央に出す。 */
+#workbench.tree-collapsed #tree-head,
+#workbench.tree-collapsed #tree {
+  display: none;
+}
+
+#workbench.tree-collapsed #tree-rail {
+  display: flex;
+  justify-content: center;
+  padding-top: 5px;
+}
+
 #tree {
   list-style: none;
   margin: 0;
-  padding: 4px;
+  /* フルブリード選択（B6・ui-mock .trow padding:0 12px）。左右 padding は 0 にし、
+     行（treeitem）側に左右余白を持たせて hover/選択をペイン幅いっぱいに塗る。 */
+  padding: 4px 0;
 }
 
 #tree [role="treeitem"] {
@@ -90,11 +162,12 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  /* 段階インデント（ui-design 7章）。深さ可変なので base + depth * 段差で算出する。
-     --depth は tree.ts が行ごとに設定（root=0）。base=6px は従来の左パディング、段差=18px
-     （ui-mock indent1=24px/indent2=42px に概ね一致＝6+1*18=24 / 6+2*18=42）。 */
-  padding: 0 6px 0 calc(6px + var(--depth, 0) * 18px);
-  border-radius: var(--radius-sm);
+  /* フルブリード矩形（B6）。行は左端〜右端まで塗り、角丸は持たない（ui-mock .trow）。
+     段階インデント（ui-design 7章）は維持する。base はフルブリード化に伴い ui-mock の .trow
+     padding:0 12px へ合わせ 12px とし、深さ分の段差（18px）を加える（root=12px / depth1=30px …）。
+     右側も 12px の余白を確保して名前がペイン端へ密着しないようにする。
+     --depth は tree.ts が行ごとに設定（root=0）。 */
+  padding: 0 12px 0 calc(12px + var(--depth, 0) * 18px);
   cursor: pointer;
   color: var(--text-1);
   user-select: none;

@@ -113,6 +113,10 @@ const state = {
 };
 
 const saveBtn = () => document.getElementById("save-file") as HTMLButtonElement;
+const workbench = () => document.getElementById("workbench") as HTMLElement;
+const treeHeadLabel = () => document.getElementById("tree-head-label") as HTMLElement;
+const treeCollapseBtn = () => document.getElementById("tree-collapse") as HTMLButtonElement;
+const treeExpandBtn = () => document.getElementById("tree-expand") as HTMLButtonElement;
 const editorPane = () => document.getElementById("editor-pane") as HTMLElement;
 const editorHost = () => document.getElementById("editor-host") as HTMLElement;
 const diffHost = () => document.getElementById("diff-host") as HTMLElement;
@@ -141,6 +145,46 @@ function refreshTabs(): void {
 function refreshTree(): void {
   // 子フォルダの遅延展開は副作用なし列挙（listDir）で取得する（監視ルート付け替え/ベースライン再取得をしない）。
   renderTree(state.treeEntries, (entry) => void openFile(entry), listDir, state.unread);
+}
+
+/**
+ * ツリーヘッダ（B4・ui-design 7章）の表示を現在のフォルダに合わせて更新する。
+ * 「エクスプローラー — <フォルダ名>」を出す。未オープン時は「エクスプローラー」のみ。
+ * フォルダ名は state.folder（絶対パス）の末尾区切り以降（ベース名）を使う（末尾の \ や / は除く）。
+ */
+function updateTreeHeader(): void {
+  const label = treeHeadLabel();
+  const folder = state.folder;
+  if (!folder) {
+    label.textContent = "エクスプローラー";
+    label.removeAttribute("title");
+    return;
+  }
+  // 末尾の区切り文字を落としてからベース名を取る（C:\work\notes\ → notes、ドライブ直下 C:\ → C:）。
+  const trimmed = folder.replace(/[\\/]+$/, "");
+  const base = trimmed.split(/[\\/]/).pop() || trimmed;
+  label.textContent = `エクスプローラー — ${base}`;
+  // 省略表示でも全パスが分かるよう title（ツールチップ）に絶対パスを残す。
+  label.setAttribute("title", folder);
+}
+
+/**
+ * ツリーの収納/引き出し（B5・ui-design 7章）。
+ * #workbench に tree-collapsed を付け外しして左ペインをレールへ畳む/戻す。
+ * a11y: 収納/引き出しボタンの aria-expanded を実状態へ同期し、収納時は引き出しボタン（レール）へ、
+ * 引き出し時は収納ボタンへフォーカスを移して、キーボードのみでも操作位置を見失わないようにする
+ * （要件11.5: 収納してもキーボードで引き出しに到達できる）。
+ */
+function setTreeCollapsed(collapsed: boolean): void {
+  workbench().classList.toggle("tree-collapsed", collapsed);
+  // 両ボタンの aria-expanded はツリー（aria-controls=tree）の可視状態を表す。
+  treeCollapseBtn().setAttribute("aria-expanded", String(!collapsed));
+  treeExpandBtn().setAttribute("aria-expanded", String(!collapsed));
+  // 収納で消えるボタンにフォーカスが残ると到達不能になるため、見えている側のボタンへ移す。
+  if (collapsed) treeExpandBtn().focus();
+  else treeCollapseBtn().focus();
+  // 左ペインの幅が変わるのでプレビュー別WebView の矩形を追従させる（レイアウト確定後）。
+  requestAnimationFrame(() => syncPreviewBounds());
 }
 
 /**
@@ -392,6 +436,7 @@ async function switchFolder(dir: string): Promise<void> {
     // 初回オープンは全既読スタート（要件8.1）。未読は外部変更（fs-changed）で付く。
     state.unread = new UnreadStore();
     refreshTree();
+    updateTreeHeader();
     refreshTabs();
     setStatus(`${dir}（${entries.length} 件）`);
     // 最近使ったフォルダへ記録（要件10.2・ジャンプリスト反映は backend）。
@@ -973,6 +1018,7 @@ async function restoreOnStartup(): Promise<void> {
       resetTreeExpansion();
       state.unread = new UnreadStore();
       refreshTree();
+      updateTreeHeader();
       setStatus(`${outcome.workspace_path}（${entries.length} 件）`);
     } catch {
       // ワークスペースが開けなければ空状態へ落とす（安全遷移）。
@@ -1160,6 +1206,11 @@ async function main(): Promise<void> {
   confirmBtn().addEventListener("click", () => void onConfirm());
   confirmAllBtn().addEventListener("click", () => void onConfirmAll());
   rollbackBtn().addEventListener("click", () => void onRollback());
+  // ツリー収納/引き出しトグル（B5・ui-design 7章）。ヘッダ右端「‹」で収納、レール「›」で引き出す。
+  treeCollapseBtn().addEventListener("click", () => setTreeCollapsed(true));
+  treeExpandBtn().addEventListener("click", () => setTreeCollapsed(false));
+  // ツリーヘッダ（B4）の初期表示（フォルダ未オープン時は「エクスプローラー」のみ）。復元後に更新される。
+  updateTreeHeader();
   // 主要ショートカットを単一のキーディスパッチ表で処理する（要件11.2・eval high: shortcuts 配線）。
   // 判定（どのキーが何の操作か・Ctrl+Enter 誤爆防止・代替割当）は shortcuts.resolveShortcut
   // （pika-core::shortcuts の写し）へ集約し、ここは結果（Action）を dispatchAction へ流すだけ。
