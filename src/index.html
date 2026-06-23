@@ -8,6 +8,55 @@
     <link rel="stylesheet" href="./styles/app.css" />
   </head>
   <body>
+    <!-- ファイルタイプアイコンの SVG symbol スプライト（ui-design 6章・案A=モノトーン線）。
+         lucide(MIT) 風の path をモック（docs/ui-mock.html G節）から正確に写す。色は currentColor
+         でテーマ追従し、状態色（青/緑/赤）と干渉させない。視覚にも読み上げにも出さない不可視定義。 -->
+    <svg
+      aria-hidden="true"
+      style="position: absolute; width: 0; height: 0; overflow: hidden"
+    >
+      <defs>
+        <symbol id="ic-folder" viewBox="0 0 24 24">
+          <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+        </symbol>
+        <symbol id="ic-code" viewBox="0 0 24 24">
+          <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+          <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+          <path d="m10 13-2 2 2 2" />
+          <path d="m14 13 2 2-2 2" />
+        </symbol>
+        <symbol id="ic-braces" viewBox="0 0 24 24">
+          <path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5a2 2 0 0 0 2 2h1" />
+          <path d="M16 21h1a2 2 0 0 0 2-2v-5a2 2 0 0 1 2-2 2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1" />
+        </symbol>
+        <symbol id="ic-config" viewBox="0 0 24 24">
+          <path d="M20 7h-9" />
+          <path d="M14 17H5" />
+          <circle cx="17" cy="17" r="3" />
+          <circle cx="7" cy="7" r="3" />
+        </symbol>
+        <symbol id="ic-script" viewBox="0 0 24 24">
+          <path d="m4 17 6-6-6-6" />
+          <path d="M12 19h8" />
+        </symbol>
+        <symbol id="ic-image" viewBox="0 0 24 24">
+          <rect width="18" height="18" x="3" y="3" rx="2" />
+          <circle cx="9" cy="9" r="2" />
+          <path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21" />
+        </symbol>
+        <symbol id="ic-text" viewBox="0 0 24 24">
+          <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+          <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+          <path d="M16 13H8" />
+          <path d="M16 17H8" />
+          <path d="M10 9H8" />
+        </symbol>
+        <symbol id="ic-file" viewBox="0 0 24 24">
+          <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+          <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+        </symbol>
+      </defs>
+    </svg>
     <!-- アプリシェル。中心体験① の最薄ループ（フォルダを開く→ツリー→タブ→編集→保存）を貫通させる骨格。
          ARIA は design doc 17章で全Web再構築する（本スプリントは role の土台のみ）。 -->
     <div id="app">

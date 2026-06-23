@@ -45,14 +45,15 @@ function makeItem(
   li.tabIndex = -1;
   li.dataset.path = entry.path;
 
-  const icon = entry.is_dir ? "📁" : "📄";
   const mark = stateMark(entry, unread);
   // アイコンと名前は別要素にする（F-028: 取り消し線をアイコンまで横切らせない）。
   // 取り消し線はファイル名 span にだけ掛け、アイコン/状態記号は装飾対象から外す。
+  // アイコンは絵文字ではなくモノトーン線 SVG（ui-design 6章・案A）。currentColor でテーマ追従し
+  // 状態色（青/緑/赤）と干渉させない。symbol スプライト（index.html）を <use> で参照する。
   const iconSpan = document.createElement("span");
   iconSpan.className = "tree-icon";
   iconSpan.setAttribute("aria-hidden", "true"); // 状態はファイル名側 aria-label に集約する。
-  iconSpan.textContent = icon;
+  iconSpan.appendChild(makeIconSvg(iconIdFor(entry)));
   const nameSpan = document.createElement("span");
   nameSpan.className = "tree-name";
   // 状態マークは色だけに依存しない記号（要件11.5）。読み上げ用に aria-label へも集約する。
@@ -78,6 +79,65 @@ function makeItem(
   // キーボード操作（要件11.4/11.5: マウスなしで開く起点に到達）。
   li.addEventListener("keydown", (e) => onItemKeydown(e, li, entry, onOpen));
   return li;
+}
+
+// 拡張子→カテゴリ→アイコン symbol id のマッピング（ui-design 6章のカテゴリ集約表）。
+// 未知拡張子は generic file（ic-file）へフォールバックする。フォルダは展開/折りたたみに
+// かかわらず ic-folder（開閉シェブロンは別タスク）。
+const ICON_BY_EXT: Readonly<Record<string, string>> = {
+  // コード/マークアップ → file-code（<>）
+  ts: "ic-code",
+  js: "ic-code",
+  html: "ic-code",
+  htm: "ic-code",
+  xml: "ic-code",
+  // データ → braces（{}）
+  json: "ic-braces",
+  // 設定 → config（sliders）
+  yaml: "ic-config",
+  yml: "ic-config",
+  toml: "ic-config",
+  ini: "ic-config",
+  // スクリプト → script（terminal）
+  sh: "ic-script",
+  ps1: "ic-script",
+  bat: "ic-script",
+  // 画像 → image
+  png: "ic-image",
+  jpg: "ic-image",
+  jpeg: "ic-image",
+  gif: "ic-image",
+  webp: "ic-image",
+  bmp: "ic-image",
+  ico: "ic-image",
+  svg: "ic-image",
+  // テキスト/文書 → file-text
+  md: "ic-text",
+  markdown: "ic-text",
+  txt: "ic-text",
+  csv: "ic-text",
+  log: "ic-text",
+};
+
+/** エントリに対応するアイコン symbol id を返す（フォルダ優先・拡張子マップ・generic フォールバック）。 */
+function iconIdFor(entry: TreeEntry): string {
+  if (entry.is_dir) return "ic-folder";
+  const dot = entry.name.lastIndexOf(".");
+  // 先頭ドットのドットファイル（.env 等）や拡張子なしは generic file に倒す。
+  if (dot <= 0) return "ic-file";
+  const ext = entry.name.slice(dot + 1).toLowerCase();
+  return ICON_BY_EXT[ext] ?? "ic-file";
+}
+
+/** symbol を参照する <svg><use/></svg> を生成する（SVG なので createElementNS が必須）。 */
+function makeIconSvg(iconId: string): SVGSVGElement {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  const use = document.createElementNS(ns, "use");
+  // href は SVG2 標準。WebView2(Chromium) は href を解決するため xlink:href は不要。
+  use.setAttribute("href", `#${iconId}`);
+  svg.appendChild(use);
+  return svg;
 }
 
 /** 状態マークを aria-label に集約する（色/記号に依存しないテキスト表現＝要件11.5・sprint 7 must）。 */
