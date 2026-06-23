@@ -4,6 +4,8 @@ import { EditorState, type Extension, Annotation, Compartment } from "@codemirro
 import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { tags } from "@lezer/highlight";
 
 /** 外部リロードのトランザクションに付ける注釈。これが付いた変更は dirty 化しない（要件7.2/5.1）。 */
 const ExternalReload = Annotation.define<boolean>();
@@ -64,11 +66,37 @@ export interface EditorHandle {
   destroy(): void;
 }
 
+/**
+ * 控えめな構文ハイライト（UIブラッシュアップ T7・差分 E2・ui-mock .tok-* / ui-design 1章モノトーン基調）。
+ * 色は**直書きせず** class を割り当て、色値は src/styles/app.css 側でトークン変数（--text-1 等）で当てる。
+ * これにより html[data-theme] のライト/ダーク切替へ自動追従する（color 直書きだと追従できない）。
+ * 構文色は彩度を落として主張させすぎない（差分や強調の色と競合させない）。
+ */
+const pikaHighlightStyle = HighlightStyle.define([
+  // 見出し（tok-h 相当）= 太字＋text-1。
+  { tag: tags.heading, class: "cm-tok-heading" },
+  // 太字/強調はマークアップに準じて装飾のみ（色は付けずモノトーン基調を保つ）。
+  { tag: tags.strong, class: "cm-tok-strong" },
+  { tag: tags.emphasis, class: "cm-tok-emphasis" },
+  // キーワード（tok-k 相当）= accent 系（トークンで light/dark を吸収）。
+  { tag: tags.keyword, class: "cm-tok-keyword" },
+  // 文字列（tok-s 相当）= 落ち着いた色（専用変数が無いので app.css で light/dark 個別指定）。
+  { tag: tags.string, class: "cm-tok-string" },
+  // コメント（tok-c 相当）= text-3・italic。行/ブロックコメントも同扱い。
+  { tag: [tags.comment, tags.lineComment, tags.blockComment], class: "cm-tok-comment" },
+  // インラインコード/等幅は等幅のまま（淡背景は付けすぎない）。
+  { tag: tags.monospace, class: "cm-tok-monospace" },
+  // リンク/URL は accent（控えめ）。
+  { tag: [tags.link, tags.url], class: "cm-tok-link" },
+]);
+
 const baseExtensions: Extension[] = [
   lineNumbers(),
   highlightActiveLine(),
   history(),
   markdown(),
+  // 控えめな構文ハイライトを有効化（class 指定＝テーマ追従・色は app.css）。
+  syntaxHighlighting(pikaHighlightStyle),
   keymap.of([...defaultKeymap, ...historyKeymap]),
 ];
 

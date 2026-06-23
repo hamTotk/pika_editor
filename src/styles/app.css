@@ -723,6 +723,49 @@ body {
   font-family: var(--font-ui);
 }
 
+/* 控えめな構文ハイライト（UIブラッシュアップ T7・差分 E2・ui-mock .tok-* / ui-design 1章モノトーン基調）。
+   CM6 の HighlightStyle が割り当てた class に、トークン変数で色を当てる（src/editor/index.ts の
+   pikaHighlightStyle が class 指定。色は CM 側で直書きせずここで当てるため html[data-theme] の
+   ライト/ダーク切替へ自動追従する）。構文色は彩度を落として主張させすぎない（差分/強調の色と競合させない）。
+   string だけは tokens.css に該当変数が無いため、tokens.css を改変せず light/dark を個別指定する
+   （色値は ui-mock の .tok-s から：light #8a6a3a / dark #c0a070）。 */
+.cm-tok-heading {
+  color: var(--text-1);
+  font-weight: 700;
+}
+.cm-tok-strong {
+  font-weight: 700;
+}
+.cm-tok-emphasis {
+  font-style: italic;
+}
+.cm-tok-keyword {
+  color: var(--accent);
+}
+.cm-tok-comment {
+  color: var(--text-3);
+  font-style: italic;
+}
+.cm-tok-link {
+  color: var(--accent);
+}
+/* インラインコード/等幅はモノトーン基調を保つため淡色のみ（背景は付けない）。 */
+.cm-tok-monospace {
+  color: var(--text-2);
+}
+/* string（ui-mock .tok-s）。tokens.css 不改変で light/dark を個別指定する。 */
+.cm-tok-string {
+  color: #8a6a3a;
+}
+html[data-theme="dark"] .cm-tok-string {
+  color: #c0a070;
+}
+@media (prefers-color-scheme: dark) {
+  html[data-theme="system"] .cm-tok-string {
+    color: #c0a070;
+  }
+}
+
 #editor-host textarea {
   width: 100%;
   height: 100%;
