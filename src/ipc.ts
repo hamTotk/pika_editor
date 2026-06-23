@@ -509,3 +509,21 @@ export function replaceInText(
 export function logFolderPath(): Promise<string> {
   return invoke<string>("log_folder_path");
 }
+
+/**
+ * 指定ファイル/フォルダを OS 既定アプリで開く（要件6.2・design G「ブラウザで開く」）。
+ * 渡すのは **現在開いているファイルのパス** に限る（任意 URL を開く汎用導線は持たない）。
+ * backend が絶対パス＋実在を再検証し、不正は reject する（fail-closed）。opener の command ACL は
+ * frontend へ開放せず、backend の自前 command（open_in_default_app）経由でのみ起動する。
+ */
+export function openInDefaultApp(path: string): Promise<void> {
+  return invoke<void>("open_in_default_app", { path });
+}
+
+/**
+ * 診断ログフォルダ（<データルート>/logs/）を OS（エクスプローラー）で開く（要件12.3・design G）。
+ * パスは backend が確定・作成する（frontend からは受け取らない＝対象をログフォルダに固定）。
+ */
+export function openLogFolder(): Promise<void> {
+  return invoke<void>("open_log_folder");
+}

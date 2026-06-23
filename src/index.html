@@ -211,6 +211,18 @@
               >
                 ✓ 確認済みにする
               </button>
+              <!-- ブラウザで開く（ui-mock .iconbtn・要件6.2/design G「UIブラッシュアップ T9」）。
+                   クリックで**アクティブタブのファイル**を OS 既定アプリ（HTML なら既定ブラウザ等）で開く。
+                   アクティブタブが無い間は無効（refreshViewTools が活性を同期する）。任意 URL は開かない。 -->
+              <button
+                id="open-external"
+                type="button"
+                class="iconbtn"
+                disabled
+                title="既定のブラウザで開く"
+              >
+                ブラウザで開く
+              </button>
             </div>
           </div>
           <!-- 差分トグル ON 時に表示する read-only unified 差分面（要件8.2）。既定は非表示。 -->
