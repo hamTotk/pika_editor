@@ -40,31 +40,144 @@ body {
   border: 0;
 }
 
-#toolbar {
+/* カスタムメニューバー（UIブラッシュアップ T8・差分 A1/A2/A3・ui-mock .menubar）。
+   ツールバー(#toolbar)を廃止し、ファイル/編集/表示/移動/ヘルプ＋右端タイトルを並べる帯。
+   bg-window 地＋下端の区切り線。全Web描画（OS ネイティブメニュー非使用）。 */
+.menubar {
   display: flex;
-  gap: 8px;
-  padding: 6px 8px;
-  background: var(--bg-raised);
+  gap: 2px;
+  align-items: center;
+  padding: 4px 8px;
+  background: var(--bg-window);
   border-bottom: 1px solid var(--border-1);
+  font-size: 13px;
+  color: var(--text-2);
+  user-select: none;
 }
 
-#toolbar button {
+/* メニュー項目（ui-mock .menubar .mi）。button だが帯に馴染むよう枠/背景を消し、hover で前面化。 */
+.menubar .mi {
   font: inherit;
-  color: var(--text-1);
-  background: var(--bg-raised);
-  border: 1px solid var(--border-2);
+  font-size: 13px;
+  padding: 3px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
   border-radius: var(--radius-sm);
-  padding: 4px 10px;
   cursor: pointer;
 }
 
-#toolbar button:hover {
+.menubar .mi:hover,
+.menubar .mi[aria-expanded="true"] {
   background: var(--bg-hover);
+  color: var(--text-1);
 }
 
-#toolbar button:disabled {
+.menubar .mi:focus-visible {
+  outline: 2px solid var(--accent, Highlight);
+  outline-offset: -2px;
+}
+
+/* メニュー群を左に詰め、右端のウィンドウタイトルを押し出す伸縮スペーサ（ui-mock .menubar .grow）。 */
+.menubar .grow {
+  flex: 1;
+}
+
+/* 右端のウィンドウタイトル「<フォルダ名> — pika」（ui-mock .menubar .title）。淡色・小さめ・省略。 */
+.menubar .title {
+  color: var(--text-3);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 50%;
+  padding-left: 8px;
+}
+
+/* ドロップダウンを載せる絶対配置レイヤ。#app（position:relative）の左上基準で .menu-pop を配置する。
+   レイヤ自体はクリックを透過させ、中身（.menu-pop）だけがイベントを受ける。 */
+#menu-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
+}
+
+#menu-layer .menu-pop {
+  pointer-events: auto;
+}
+
+/* メニューポップ（ui-mock .menu-pop）。bg-window 地＋border-2 枠＋影。1 列の項目を縦に並べる。 */
+.menu-pop {
+  width: 280px;
+  max-width: 100%;
+  background: var(--bg-window);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
+  padding: 5px;
+  font-size: 13px;
+}
+
+/* 1 行（ui-mock .menu-pop .mrow）。左に ✓ 用の余白（26px）を空け、ラベル＋右端 acc（ショートカット）。 */
+.menu-pop .mrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px 5px 26px;
+  border-radius: var(--radius-sm);
+  color: var(--text-1);
+  position: relative;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.menu-pop .mrow:hover,
+.menu-pop .mrow:focus-visible {
+  background: var(--bg-active);
+  outline: none;
+}
+
+/* 現在状態（表示モード/テーマ/折り返し ON）の ✓（ui-mock .menu-pop .mrow.checked）。 */
+.menu-pop .mrow.checked::before {
+  content: "\2713"; /* ✓ */
+  position: absolute;
+  left: 9px;
+  color: var(--text-2);
+}
+
+/* ラベル（左）。 */
+.menu-pop .mrow .mlabel {
+  flex: 1;
+}
+
+/* ショートカット表記/現在値（右・ui-mock .menu-pop .mrow .acc）。淡色・小さめ。 */
+.menu-pop .mrow .acc {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 11.5px;
+  padding-left: 16px;
+}
+
+/* 無効項目（aria-disabled）。淡色・カーソル既定・hover で背景を付けない。 */
+.menu-pop .mrow[aria-disabled="true"] {
   color: var(--text-faint);
   cursor: default;
+}
+
+.menu-pop .mrow[aria-disabled="true"]:hover {
+  background: transparent;
+}
+
+.menu-pop .mrow[aria-disabled="true"] .acc {
+  color: var(--text-faint);
+}
+
+/* 区切り線（ui-mock .menu-pop .msep）。 */
+.menu-pop .msep {
+  height: 1px;
+  background: var(--border-1);
+  margin: 5px 8px;
 }
 
 #workbench {
@@ -809,7 +922,8 @@ body {
    forced-colors:active では独自トークンを降格し OS の system-color に委ねる
    （トークンがハイコントラストを上書きしない）。差分は color 非依存の記号/下線が効くので保持。 */
 @media (forced-colors: active) {
-  #toolbar button,
+  .menubar .mi,
+  .menu-pop,
   #tabs [role="tab"],
   #tree [role="treeitem"],
   #notifications .notice,
@@ -817,6 +931,12 @@ body {
     border-color: ButtonText;
     background: ButtonFace;
     color: ButtonText;
+  }
+  /* ドロップダウンの選択行は OS のハイライト色で示す（色非依存の ✓ と併用）。 */
+  .menu-pop .mrow:hover,
+  .menu-pop .mrow:focus-visible {
+    background: Highlight;
+    color: HighlightText;
   }
   #notifications .notice[data-kind="conflict"],
   #notifications .notice[data-kind="error"] {

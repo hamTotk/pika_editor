@@ -23,13 +23,16 @@ import {
   showPreview,
   hidePreview,
   setPreviewBounds,
+  logFolderPath,
   type TreeEntry,
   type OpenRequestPayload,
   type AppState,
   type DocEncoding,
+  type LineEnding,
   type PreviewRect,
 } from "./ipc";
-import { initTheme } from "./theme";
+import { initTheme, applyTheme, currentTheme, type ThemeMode } from "./theme";
+import { initMenuBar, type MenuItemSpec, type MenuSpec } from "./ui/menu";
 import { initA11y, announce } from "./a11y";
 import { resolveShortcut, modsOf, normalizeKey, type Action, type Focus } from "./shortcuts";
 import { renderTree, resetTreeExpansion } from "./ui/tree";
@@ -79,6 +82,11 @@ interface OpenTab extends TabModel {
   /** 開いたときに BOM があったか（保存時に維持する＝要件5.2）。 */
   hasBom: boolean;
   /**
+   * 開いたときに検出した改行コード（表示メニューの現在値表示用・要件5.2）。
+   * 変換 backend は未実装のため表示専用（要件14章「足さない」）。新規/不明時は "none"。
+   */
+  lineEnding: LineEnding;
+  /**
    * このタブで「許可して再読込」したオプトイン外部許可ホスト（要件6.2/6.3・2.4）。
    * 既定は undefined（外部遮断）。許可は **タブ単位** で保持し、別タブ/別文書では既定オフに戻る
    * （永続はしない＝要件6.2「既定は必ずオフに戻る」）。renderActivePreview がこれを buildPreview へ渡す。
@@ -110,9 +118,11 @@ const state = {
   // state.json が未知バージョン/破損で空起動したか（要件13）。true の間は保存を控える
   // ＝読めない状態を上書きしない（データを失わない）。復元判定は backend(pika-core)が下す。
   safeEmpty: false,
+  // 行の折り返し（表示メニューのトグル・UIブラッシュアップ T8）。アプリ全体で 1 つ。
+  // タブ切替でエディタを作り直しても createEditor の初期値で引き継ぐ。
+  lineWrapping: false,
 };
 
-const saveBtn = () => document.getElementById("save-file") as HTMLButtonElement;
 const workbench = () => document.getElementById("workbench") as HTMLElement;
 const treeHeadLabel = () => document.getElementById("tree-head-label") as HTMLElement;
 const treeCollapseBtn = () => document.getElementById("tree-collapse") as HTMLButtonElement;
@@ -128,22 +138,17 @@ const modeButtons = () =>
   );
 const toggleDiffBtn = () => document.getElementById("toggle-diff") as HTMLButtonElement;
 const confirmBtn = () => document.getElementById("confirm-file") as HTMLButtonElement;
-const confirmAllBtn = () => document.getElementById("confirm-all") as HTMLButtonElement;
-const rollbackBtn = () => document.getElementById("rollback-file") as HTMLButtonElement;
 
 function refreshTabs(): void {
   renderTabs(state.tabs, state.active, activateTab, state.unread, closeTab);
   const hasActive = !!state.active;
   // tab-tools（モード切替セグメント/差分トグル）の表示状態・有効/無効を同期する。
   refreshViewTools();
-  // 退避＋ベースライン更新を伴う操作（保存/確認/巻き戻し）は in-flight 中（busy）は無効に保つ
-  // （内部 refreshTabs で再有効化して二重送信を許してしまわないため）。
-  saveBtn().disabled = !hasActive || state.busy;
+  // 「確認済みにする」は tab-tools 右端に残るボタン（T6）。退避＋ベースライン更新を伴うため
+  // in-flight 中（busy）は無効に保つ（内部 refreshTabs で再有効化して二重送信を許さない）。
+  // 保存/すべて確認済み/巻き戻しはツールバー廃止（T8）でメニューへ移したため、活性はメニューを
+  // 開いた時点で都度算出する（ui/menu.ts の build が hasActive/busy を反映）。ここでは扱わない。
   confirmBtn().disabled = !hasActive || state.busy;
-  rollbackBtn().disabled = !hasActive || state.busy;
-  // すべて確認済みはタブ非依存（フォルダ全体の未読集合に対する操作）。退避を伴うため
-  // busy 中のみ無効化し、それ以外は常時有効（refreshTabs が in-flight 後の再有効化点）。
-  confirmAllBtn().disabled = state.busy;
 }
 
 /**
@@ -196,6 +201,28 @@ function updateTreeHeader(): void {
   label.setAttribute("title", folder);
 }
 
+/** メニューバー右端 #window-title。 */
+const windowTitleEl = () => document.getElementById("window-title") as HTMLElement;
+
+/**
+ * メニューバー右端のウィンドウタイトル（ui-mock .menubar .title・UIブラッシュアップ T8）を更新する。
+ * 「<フォルダ名> — pika」を出す（未オープン時は「pika」のみ）。フォルダ名は state.folder のベース名
+ *（ツリーヘッダと同じ規則）。省略表示でも分かるよう title（ツールチップ）に絶対パスを残す。
+ */
+function updateWindowTitle(): void {
+  const el = windowTitleEl();
+  const folder = state.folder;
+  if (!folder) {
+    el.textContent = "pika";
+    el.removeAttribute("title");
+    return;
+  }
+  const trimmed = folder.replace(/[\\/]+$/, "");
+  const base = trimmed.split(/[\\/]/).pop() || trimmed;
+  el.textContent = `${base} — pika`;
+  el.setAttribute("title", folder);
+}
+
 /**
  * ツリーの収納/引き出し（B5・ui-design 7章）。
  * #workbench に tree-collapsed を付け外しして左ペインをレールへ畳む/戻す。
@@ -235,12 +262,14 @@ async function withBusy(run: () => Promise<void>): Promise<void> {
   }
 }
 
-/** 退避を伴う操作ボタンをまとめて in-flight 抑止する（withBusy 用）。 */
+/**
+ * 退避を伴う操作の in-flight 抑止（withBusy 用）。
+ * ツールバー廃止（T8）で保存/すべて確認済み/巻き戻しはメニューへ移り、メニューは開いた時点で
+ * busy を反映するため常設ボタンは tab-tools の「確認済みにする」のみ。busy フラグ自体が
+ * メニュー項目（build）と dispatchAction の二重送信を弾く一次ガードになる。
+ */
 function setMutatingButtonsDisabled(disabled: boolean): void {
-  saveBtn().disabled = disabled;
   confirmBtn().disabled = disabled;
-  confirmAllBtn().disabled = disabled;
-  rollbackBtn().disabled = disabled;
 }
 
 async function activateTab(path: string): Promise<void> {
@@ -257,7 +286,13 @@ async function activateTab(path: string): Promise<void> {
   // 直近内容を空にしてエディタを出し「確認済み時点に戻す（rollback）」導線を保つ（eval high）。
   if (tab?.deleted) {
     state.editor?.destroy();
-    state.editor = createEditor(editorHost(), "", () => markDirty(path), () => refreshStatus());
+    state.editor = createEditor(
+      editorHost(),
+      "",
+      () => markDirty(path),
+      () => refreshStatus(),
+      state.lineWrapping,
+    );
     refreshTabs();
     setStatus(`削除済み: ${path}（［確認済み時点に戻す］で退避から復元できます）`);
     return;
@@ -268,12 +303,20 @@ async function activateTab(path: string): Promise<void> {
     const doc = await openDocument(path);
     const content = doc.text;
     if (tab) {
-      // 検出エンコーディング/BOM をタブに保持し、保存時 save_document へ渡す（暗黙 UTF-8 化の防止・eval medium）。
+      // 検出エンコーディング/BOM/改行コードをタブに保持し、保存時 save_document へ渡す
+      //（暗黙 UTF-8 化の防止・eval medium）。改行コードは表示メニューの現在値表示にも使う（要件5.2）。
       tab.encoding = doc.encoding;
       tab.hasBom = doc.has_bom;
+      tab.lineEnding = doc.line_ending;
     }
     state.editor?.destroy();
-    state.editor = createEditor(editorHost(), content, () => markDirty(path), () => refreshStatus());
+    state.editor = createEditor(
+      editorHost(),
+      content,
+      () => markDirty(path),
+      () => refreshStatus(),
+      state.lineWrapping,
+    );
     // 段階制で機能が縮退するとき（preview/diff/highlight 等の自動オフ）は理由を通知バー提示する（要件2.2）。
     notifyDegrade(path, doc.degrade);
     if (doc.decode_warning) {
@@ -414,18 +457,26 @@ function newTab(path: string, title: string): OpenTab {
     // 既定は BOM なし UTF-8（新規ファイル/不明時）。既存ファイルは open 時に open_document の判定で上書きする。
     encoding: "utf-8",
     hasBom: false,
+    // 改行コードは open 時に open_document の判定で上書きする（新規/不明時は none）。表示専用（要件5.2）。
+    lineEnding: "none",
   };
 }
 
 async function onOpenFolder(): Promise<void> {
-  // 最薄ループではパス入力でフォルダを開く（ネイティブ選択ダイアログは capability を増やすため後続）。
-  const input = document.getElementById("folder-path") as HTMLInputElement;
-  const dir = input.value.trim();
-  if (!dir) {
+  // パス入力欄(#folder-path)はツールバー廃止（T8）で撤去したため window.prompt で受け取る
+  //（ネイティブ選択ダイアログは capability を増やすため別途・最薄方針を踏襲）。
+  // 現在フォルダを既定値として提示し、キャンセル（null）時は何もしない。
+  const dir = window.prompt(
+    "開くフォルダのパスを入力してください（例 C:\\work\\notes）",
+    state.folder ?? "",
+  );
+  if (dir === null) return; // キャンセル＝何もしない。
+  const trimmed = dir.trim();
+  if (!trimmed) {
     notify("フォルダのパスを入力してください", "warn");
     return;
   }
-  await switchFolder(dir);
+  await switchFolder(trimmed);
 }
 
 /**
@@ -499,6 +550,7 @@ async function switchFolder(dir: string): Promise<void> {
     state.unread = new UnreadStore();
     refreshTree();
     updateTreeHeader();
+    updateWindowTitle();
     refreshTabs();
     // フォルダ名＋件数はツリーヘッダ（T3）へ移したのでステータスからは外す。ファイルを開くまでは
     // 表示するファイル計測値が無いのでステータスは空にする（開くと refreshStatus が構造化表示する）。
@@ -972,6 +1024,250 @@ async function onF5(): Promise<void> {
   }
 }
 
+// ── 表示メニューの追加操作（折り返し/テーマ/ログフォルダ・UIブラッシュアップ T8）─────────────
+
+/**
+ * 行の折り返しトグル（表示メニュー・UIブラッシュアップ T8）。アプリ全体で 1 つの設定を反転し、
+ * 現在エディタへ即時反映する（Compartment 差し替え＝内容/カーソル/スクロール/履歴を壊さない）。
+ * タブ切替でエディタを作り直しても createEditor の初期値で引き継ぐ。
+ */
+function onToggleWrap(): void {
+  state.lineWrapping = !state.lineWrapping;
+  state.editor?.setLineWrapping(state.lineWrapping);
+  notify(state.lineWrapping ? "折り返し: ON" : "折り返し: OFF", "info");
+}
+
+/** テーマを設定する（表示メニュー・ライト/ダーク/システム）。html[data-theme] を切替える。 */
+function onSetTheme(mode: ThemeMode): void {
+  applyTheme(mode);
+}
+
+/**
+ * ログフォルダを開く（ファイルメニュー・要件12.3）。OS シェルで開く opener は capability 拡張のため
+ * 別タスク（T9）。今回はパスを取得して通知バーで案内する暫定（行き止まりにしない）。
+ */
+async function onOpenLogFolder(): Promise<void> {
+  try {
+    const path = await logFolderPath();
+    notify(`ログフォルダ: ${path}（エクスプローラーで開く導線は今後対応）`, "info");
+  } catch (e) {
+    notify(`ログフォルダのパス取得に失敗: ${String(e)}`, "error");
+  }
+}
+
+/** バージョン表示（ヘルプメニュー）。 */
+function onShowVersion(): void {
+  notify("pika 0.1", "info");
+}
+
+/** アクティブタブのエンコーディング表記（表示メニューの現在値表示用・表示専用）。 */
+function encodingLabel(enc: DocEncoding, hasBom: boolean): string {
+  const base =
+    enc === "utf-8"
+      ? "UTF-8"
+      : enc === "utf-16le"
+        ? "UTF-16 LE"
+        : enc === "utf-16be"
+          ? "UTF-16 BE"
+          : "Shift_JIS";
+  return hasBom ? `${base} (BOM)` : base;
+}
+
+/** アクティブタブの改行コード表記（表示メニューの現在値表示用・表示専用）。 */
+function lineEndingLabel(le: LineEnding): string {
+  switch (le) {
+    case "lf":
+      return "LF";
+    case "crlf":
+      return "CRLF";
+    case "cr":
+      return "CR";
+    case "mixed":
+      return "混在";
+    default:
+      return "—";
+  }
+}
+
+/**
+ * 5つのメニュー（ファイル/編集/表示/移動/ヘルプ）の定義を組み立てる（UIブラッシュアップ T8）。
+ * build は**開くたびに**評価され checked/disabled/現在値（エンコーディング/改行/テーマ/折り返し）を反映する。
+ * 各項目は既存ハンドラへ結線する。backend 未実装（エンコーディング再オープン・改行変換・OS で開く）は
+ * 項目を出さない or 案内に留める（要件14章「足さない」を厳守）。
+ */
+function buildMenuSpecs(): MenuSpec[] {
+  const hasActive = (): boolean => !!state.active;
+  const activeTab = (): OpenTab | undefined =>
+    state.tabs.find((t) => t.path === state.active);
+  // 「すべて確認済み」に対象があるか（無ければ無効化せず実行時に空案内する＝既存挙動を維持）。
+  return [
+    {
+      id: "file",
+      build: (): MenuItemSpec[] => [
+        { kind: "item", label: "フォルダを開く…", accel: "Ctrl+Shift+O", onSelect: () => void onOpenFolder() },
+        { kind: "item", label: "ファイルを開く…", accel: "Ctrl+O", onSelect: () => void onOpenFile() },
+        { kind: "separator" },
+        {
+          kind: "item",
+          label: "保存",
+          accel: "Ctrl+S",
+          disabled: !hasActive() || state.busy,
+          onSelect: () => void onSave(),
+        },
+        { kind: "separator" },
+        { kind: "item", label: "ログフォルダを開く", onSelect: () => void onOpenLogFolder() },
+      ],
+    },
+    {
+      id: "edit",
+      build: (): MenuItemSpec[] => [
+        {
+          kind: "item",
+          label: "すべて確認済み",
+          accel: "Ctrl+Alt+Enter",
+          disabled: state.busy,
+          onSelect: () => void onConfirmAll(),
+        },
+        {
+          kind: "item",
+          label: "確認済み時点に戻す",
+          disabled: !hasActive() || state.busy,
+          onSelect: () => void onRollback(),
+        },
+        { kind: "separator" },
+        {
+          kind: "item",
+          label: "検索",
+          accel: "Ctrl+F",
+          disabled: !hasActive(),
+          onSelect: () => dispatchAction("find"),
+        },
+        {
+          kind: "item",
+          label: "置換",
+          accel: "Ctrl+H",
+          disabled: !hasActive(),
+          onSelect: () => dispatchAction("replace"),
+        },
+      ],
+    },
+    {
+      id: "view",
+      build: (): MenuItemSpec[] => {
+        const enabled = hasActive();
+        const tab = activeTab();
+        const rows: MenuItemSpec[] = [
+          {
+            kind: "item",
+            label: "ソース",
+            disabled: !enabled,
+            checked: state.viewMode === "source",
+            onSelect: () => void setViewMode("source"),
+          },
+          {
+            kind: "item",
+            label: "分割",
+            accel: "Ctrl+\\",
+            disabled: !enabled,
+            checked: state.viewMode === "split",
+            onSelect: () => void setViewMode("split"),
+          },
+          {
+            kind: "item",
+            label: "プレビュー",
+            accel: "Ctrl+E",
+            disabled: !enabled,
+            checked: state.viewMode === "preview",
+            onSelect: () => void setViewMode("preview"),
+          },
+          {
+            kind: "item",
+            label: "差分",
+            accel: "Ctrl+Shift+D",
+            disabled: !enabled,
+            checked: state.diffOn,
+            onSelect: () => void onToggleDiff(),
+          },
+          { kind: "separator" },
+          {
+            kind: "item",
+            label: "折り返し",
+            disabled: !enabled,
+            checked: state.lineWrapping,
+            onSelect: () => onToggleWrap(),
+          },
+          { kind: "separator" },
+          // エンコーディング・改行コードは**現在値の表示のみ**（再オープン/変換 backend は未実装＝要件14章）。
+          // アクティブタブが無いときは出さない。disabled で操作不能にし誤クリックを防ぐ。
+          ...(tab
+            ? ([
+                {
+                  kind: "item",
+                  label: "エンコーディング",
+                  accel: encodingLabel(tab.encoding, tab.hasBom),
+                  disabled: true,
+                },
+                {
+                  kind: "item",
+                  label: "改行コード",
+                  accel: lineEndingLabel(tab.lineEnding),
+                  disabled: true,
+                },
+                { kind: "separator" },
+              ] as MenuItemSpec[])
+            : []),
+          {
+            kind: "item",
+            label: "テーマ: ライト",
+            checked: currentTheme() === "light",
+            onSelect: () => onSetTheme("light"),
+          },
+          {
+            kind: "item",
+            label: "テーマ: ダーク",
+            checked: currentTheme() === "dark",
+            onSelect: () => onSetTheme("dark"),
+          },
+          {
+            kind: "item",
+            label: "テーマ: システム",
+            checked: currentTheme() === "system",
+            onSelect: () => onSetTheme("system"),
+          },
+        ];
+        return rows;
+      },
+    },
+    {
+      id: "go",
+      build: (): MenuItemSpec[] => [
+        {
+          kind: "item",
+          label: "次の変更",
+          accel: "F8",
+          disabled: !state.diff,
+          onSelect: () => dispatchAction("next-change"),
+        },
+        {
+          kind: "item",
+          label: "前の変更",
+          accel: "Shift+F8",
+          disabled: !state.diff,
+          onSelect: () => dispatchAction("prev-change"),
+        },
+        { kind: "separator" },
+        { kind: "item", label: "再同期", accel: "F5", onSelect: () => void onF5() },
+      ],
+    },
+    {
+      id: "help",
+      build: (): MenuItemSpec[] => [
+        { kind: "item", label: "バージョン情報", onSelect: () => onShowVersion() },
+      ],
+    },
+  ];
+}
+
 /**
  * 単一インスタンス転送（要件3.4）。既に起動済みの pika に別プロセスが `pika <path>` を投げると
  * backend が named pipe で受け取り core 再検証した絶対パスを `open-request` で送ってくる。
@@ -1026,7 +1322,13 @@ function openNewFileTab(path: string, name: string): void {
   }
   state.active = path;
   state.editor?.destroy();
-  state.editor = createEditor(editorHost(), "", () => markDirty(path), () => refreshStatus());
+  state.editor = createEditor(
+    editorHost(),
+    "",
+    () => markDirty(path),
+    () => refreshStatus(),
+    state.lineWrapping,
+  );
   void captureTabHash(path, "");
   refreshTabs();
   // 新規ファイルは「保存で作成される」旨を一旦提示し、以後の編集（onCursorChange）で構造化ステータスへ移る。
@@ -1123,6 +1425,7 @@ async function restoreOnStartup(): Promise<void> {
       state.unread = new UnreadStore();
       refreshTree();
       updateTreeHeader();
+      updateWindowTitle();
       // フォルダ名＋件数はツリーヘッダ（T3）へ移したのでステータスからは外す。タブ復元・活性化後に
       // refreshStatus（activateTab 経由）が構造化ステータスを描画する。
       setStatus("");
@@ -1251,26 +1554,28 @@ function dispatchAction(action: Action): boolean {
     case "replace": {
       // 検索/置換バー UI はソース/分割向けに用意する（要件5.4）。検索バー実体は系統C（GUI 実機）。
       // ここではキーが死蔵されないよう導線（通知）を出し、core 側 search_in_text/replace_in_text へ繋ぐ枠を持つ。
+      // 編集メニューの検索/置換もこの dispatchAction を呼ぶ（実バーは未実装＝案内に留める）。
       const label = action === "find" ? "検索（Ctrl+F）" : "置換（Ctrl+H）";
-      notify(`${label}：検索バーは表示メニューから利用できます`, "info");
+      notify(`${label}：検索バーは今後対応します`, "info");
       return true;
     }
   }
 }
 
 /**
- * ファイルを開く（Ctrl+O・要件11.2）。最薄ループではパス入力で開く（ネイティブ選択ダイアログは
- * capability を増やすため後続）。フォルダパス入力欄を流用し、ファイルパスなら開く。
+ * ファイルを開く（Ctrl+O・要件11.2）。パス入力欄(#folder-path)はツールバー廃止（T8）で撤去したため
+ * window.prompt で受け取る（ネイティブ選択ダイアログは capability を増やすため別途・最薄方針を踏襲）。
+ * キャンセル（null）時は何もしない。存在しないパスは openPath が新規タブとして開く（要件3.2）。
  */
 async function onOpenFile(): Promise<void> {
-  const input = document.getElementById("folder-path") as HTMLInputElement;
-  const p = input.value.trim();
-  if (!p) {
+  const p = window.prompt("開くファイルのパスを入力してください", state.folder ?? "");
+  if (p === null) return; // キャンセル＝何もしない。
+  const trimmed = p.trim();
+  if (!trimmed) {
     notify("開くファイルのパスを入力してください", "warn");
-    input.focus();
     return;
   }
-  await openPath(p);
+  await openPath(trimmed);
 }
 
 /** アクティブタブを閉じる（Ctrl+W・要件11.2）。任意パス版 closeTab へ委譲する。 */
@@ -1310,7 +1615,7 @@ function closeTab(path: string): void {
     state.active = null;
     state.editor?.destroy();
     // 空のエディタを残す（タブが無くてもキーボード操作の到達先を保つ）。
-    state.editor = createEditor(editorHost(), "", () => undefined);
+    state.editor = createEditor(editorHost(), "", () => undefined, undefined, state.lineWrapping);
     refreshTabs();
     setStatus(emptyMessage("no-folder"));
   }
@@ -1321,8 +1626,12 @@ async function main(): Promise<void> {
   initTheme();
   // ARIA 全Web再構築の初期化（F6/Shift+F6 ペイン間フォーカス循環・ランドマーク確実化＝要件11.5・design doc 17章）。
   initA11y();
-  document.getElementById("open-folder")?.addEventListener("click", () => void onOpenFolder());
-  saveBtn().addEventListener("click", () => void onSave());
+  // カスタムメニューバー（UIブラッシュアップ T8）。ツールバー(#toolbar)は廃止し、フォルダを開く/保存/
+  // すべて確認済み/巻き戻し/表示モード/折り返し/テーマ/再同期/バージョンを HTML/CSS/TS のメニューへ集約する。
+  // 各メニューの活性・✓・現在値（エンコーディング/改行/テーマ/折り返し）は build が開くたびに評価する。
+  const menubarEl = document.getElementById("menubar") as HTMLElement;
+  const menuLayerEl = document.getElementById("menu-layer") as HTMLElement;
+  initMenuBar(menubarEl, menuLayerEl, buildMenuSpecs());
   // tab-tools: モード切替セグメント（ソース/分割/プレビュー）。data-mode を読んで setViewMode へ流す。
   for (const btn of modeButtons()) {
     btn.addEventListener("click", () => {
@@ -1330,16 +1639,15 @@ async function main(): Promise<void> {
       if (mode) void setViewMode(mode);
     });
   }
-  // tab-tools: 差分トグル（独立）・確認済みにする。
+  // tab-tools: 差分トグル（独立）・確認済みにする（T6 で移設済みの常設ボタン）。
   toggleDiffBtn().addEventListener("click", () => void onToggleDiff());
   confirmBtn().addEventListener("click", () => void onConfirm());
-  confirmAllBtn().addEventListener("click", () => void onConfirmAll());
-  rollbackBtn().addEventListener("click", () => void onRollback());
   // ツリー収納/引き出しトグル（B5・ui-design 7章）。ヘッダ右端「‹」で収納、レール「›」で引き出す。
   treeCollapseBtn().addEventListener("click", () => setTreeCollapsed(true));
   treeExpandBtn().addEventListener("click", () => setTreeCollapsed(false));
-  // ツリーヘッダ（B4）の初期表示（フォルダ未オープン時は「エクスプローラー」のみ）。復元後に更新される。
+  // ツリーヘッダ（B4）・ウィンドウタイトル（T8）の初期表示（未オープン時は素の文言）。復元後に更新される。
   updateTreeHeader();
+  updateWindowTitle();
   // tab-tools セグメントの初期表示（既定モード=ソースに .on を付け、タブ未オープン時は無効化する）。
   // 以後はタブ操作/モード切替/差分トグルのたびに refreshViewTools が同期する。
   refreshViewTools();

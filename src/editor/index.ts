@@ -1,6 +1,6 @@
 // CodeMirror 6 エディタ配線（design doc 5章・要件5.1/7.2）。
 // 外部リロード=単一トランザクション=1Undo境界・非dirty・スクロール/カーソル維持を結線する。
-import { EditorState, type Extension, Annotation } from "@codemirror/state";
+import { EditorState, type Extension, Annotation, Compartment } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
@@ -54,6 +54,12 @@ export interface EditorHandle {
    * カーソルは動かさない（カーソル復元は gotoPosition が担う）。行超過は最終行へクランプ。
    */
   scrollToLine(line: number): void;
+  /**
+   * 行の折り返し（lineWrapping）を動的に切替える（表示メニューの「折り返し」トグル・UIブラッシュアップ T8）。
+   * Compartment で差し替えるのでエディタは作り直さず、内容/カーソル/スクロール/履歴は維持される
+   *（外部リロード非dirty・カーソル維持の既存挙動を壊さない）。
+   */
+  setLineWrapping(on: boolean): void;
   /** 破棄する。 */
   destroy(): void;
 }
@@ -73,14 +79,20 @@ const baseExtensions: Extension[] = [
  * @param onChange 編集（dirty 化）通知。保存ボタンの活性に使う
  * @param onCursorChange カーソル/選択/内容の変化通知。右下ステータスの追従更新に使う（要件11.1）。
  *   selectionSet（カーソル移動・選択）または docChanged（編集）のたびに発火する。
+ * @param lineWrapping 初期の折り返し ON/OFF（表示メニューのトグルが保持する現在値・既定 false）。
+ *   タブ切替でエディタを作り直しても現在の折り返し設定を引き継ぐために初期値で渡す。
  */
 export function createEditor(
   parent: HTMLElement,
   initialDoc: string,
   onChange: () => void,
   onCursorChange?: () => void,
+  lineWrapping = false,
 ): EditorHandle {
   parent.replaceChildren();
+
+  // 折り返しを動的に差し替えるための Compartment（setLineWrapping で reconfigure する）。
+  const wrapCompartment = new Compartment();
 
   const view = new EditorView({
     parent,
@@ -88,6 +100,7 @@ export function createEditor(
       doc: initialDoc,
       extensions: [
         ...baseExtensions,
+        wrapCompartment.of(lineWrapping ? EditorView.lineWrapping : []),
         EditorView.updateListener.of((update) => {
           // カーソル移動（selectionSet）または編集（docChanged）でステータスを追従させる（要件11.1）。
           // 外部リロードも選択/内容が変わるので拾い、新しい行数・文字数・位置を反映させる。
@@ -168,6 +181,12 @@ export function createEditor(
       const lineInfo = view.state.doc.line(target);
       // 指定行を上端に寄せる（カーソルは変えない＝復元時の位置近似）。
       view.dispatch({ effects: EditorView.scrollIntoView(lineInfo.from, { y: "start" }) });
+    },
+    setLineWrapping: (on: boolean) => {
+      // Compartment を reconfigure するだけ＝内容/カーソル/スクロール/履歴は保持される。
+      view.dispatch({
+        effects: wrapCompartment.reconfigure(on ? EditorView.lineWrapping : []),
+      });
     },
     destroy: () => view.destroy(),
   };

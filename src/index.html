@@ -60,21 +60,76 @@
     <!-- アプリシェル。中心体験① の最薄ループ（フォルダを開く→ツリー→タブ→編集→保存）を貫通させる骨格。
          ARIA は design doc 17章で全Web再構築する（本スプリントは role の土台のみ）。 -->
     <div id="app">
-      <header id="toolbar">
-        <input
-          id="folder-path"
-          type="text"
-          placeholder="フォルダのパスを入力（例 C:\\work\\notes）"
-          aria-label="開くフォルダのパス"
-        />
-        <button id="open-folder" type="button">フォルダを開く</button>
-        <button id="save-file" type="button" disabled>保存</button>
-        <!-- 表示モード切替（ソース/分割/プレビュー）・差分トグル・確認済みは
-             タブバー右端の tab-tools（#editor-pane）へ移設した（UIブラッシュアップ T6・差分 C4）。
-             すべて確認済み/巻き戻しはフォルダ全体・回復導線でツールバーに残置（T8 まで）。 -->
-        <button id="confirm-all" type="button">すべて確認済み</button>
-        <button id="rollback-file" type="button" disabled>確認済み時点に戻す</button>
+      <!-- カスタムメニューバー（UIブラッシュアップ T8・差分 A1/A2/A3・ui-mock .menubar）。
+           pika は「全Web描画」原則のため OS ネイティブメニューではなく HTML/CSS/TS で実装する。
+           ツールバー(#toolbar)は完全廃止し、フォルダを開く/保存/確認済み/巻き戻し等は
+           ここの各メニューへ移した。各 .mi クリックで直下に .menu-pop（ドロップダウン）を開く。
+           DOM 骨格のみここに置き、ドロップダウンの中身・開閉・キーボード操作は main.ts(ui/menu) が司る。 -->
+      <header id="menubar" class="menubar" role="menubar" aria-label="メインメニュー">
+        <button
+          type="button"
+          class="mi"
+          id="menu-file"
+          role="menuitem"
+          aria-haspopup="true"
+          aria-expanded="false"
+          data-menu="file"
+        >
+          ファイル
+        </button>
+        <button
+          type="button"
+          class="mi"
+          id="menu-edit"
+          role="menuitem"
+          aria-haspopup="true"
+          aria-expanded="false"
+          data-menu="edit"
+        >
+          編集
+        </button>
+        <button
+          type="button"
+          class="mi"
+          id="menu-view"
+          role="menuitem"
+          aria-haspopup="true"
+          aria-expanded="false"
+          data-menu="view"
+        >
+          表示
+        </button>
+        <button
+          type="button"
+          class="mi"
+          id="menu-go"
+          role="menuitem"
+          aria-haspopup="true"
+          aria-expanded="false"
+          data-menu="go"
+        >
+          移動
+        </button>
+        <button
+          type="button"
+          class="mi"
+          id="menu-help"
+          role="menuitem"
+          aria-haspopup="true"
+          aria-expanded="false"
+          data-menu="help"
+        >
+          ヘルプ
+        </button>
+        <!-- メニュー群を左に詰め、右端のウィンドウタイトルを押し出す伸縮スペーサ（ui-mock .menubar .grow）。 -->
+        <span class="grow"></span>
+        <!-- 右端のウィンドウタイトル「<フォルダ名> — pika」（ui-mock .menubar .title）。
+             フォルダ名は main.ts(updateWindowTitle) が state.folder のベース名で更新する。 -->
+        <span class="title" id="window-title">pika</span>
       </header>
+      <!-- 開いているドロップダウンの実体を載せるレイヤ（メニュー直下に絶対配置する）。
+           外側クリック/Esc を拾えるよう #app 直下に置き、ui/menu.ts が menu-pop を出し入れする。 -->
+      <div id="menu-layer"></div>
       <div id="workbench">
         <nav id="tree-pane" aria-label="ファイルツリー">
           <!-- ツリーヘッダ（ui-mock .tree-head・ui-design 7章）。「エクスプローラー — <フォルダ名>」を
