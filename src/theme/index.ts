@@ -9,6 +9,15 @@ export function applyTheme(mode: ThemeMode): void {
   document.documentElement.setAttribute("data-theme", mode);
 }
 
+/**
+ * 現在のテーマモード（html[data-theme]）を返す（表示メニューの ✓ 表示に使う・UIブラッシュアップ T8）。
+ * 未設定/不正値は system 扱い。
+ */
+export function currentTheme(): ThemeMode {
+  const v = document.documentElement.getAttribute("data-theme");
+  return v === "light" || v === "dark" ? v : "system";
+}
+
 /** 起動時の初期テーマを適用する。state.json 連携前は system 固定。 */
 export function initTheme(): void {
   applyTheme("system");
