@@ -142,6 +142,10 @@ const toggleDiffBtn = () => document.getElementById("toggle-diff") as HTMLButton
 const confirmBtn = () => document.getElementById("confirm-file") as HTMLButtonElement;
 // 「ブラウザで開く」（tab-tools・UIブラッシュアップ T9）。アクティブタブのファイルを OS 既定アプリで開く。
 const openExternalBtn = () => document.getElementById("open-external") as HTMLButtonElement;
+// タブ列（横スクロールするコンテナ）。隠れ未読バッジ（T10）の可視判定に scrollLeft/clientWidth を読む。
+const tabsEl = () => document.getElementById("tabs") as HTMLElement;
+// 隠れた差分あり（未読）タブ数のバッジ（T10・差分 C5・ui-mock .hidden-unread）。
+const hiddenUnreadBadge = () => document.getElementById("hidden-unread") as HTMLButtonElement;
 
 function refreshTabs(): void {
   renderTabs(state.tabs, state.active, activateTab, state.unread, closeTab);
@@ -153,6 +157,87 @@ function refreshTabs(): void {
   // 保存/すべて確認済み/巻き戻しはツールバー廃止（T8）でメニューへ移したため、活性はメニューを
   // 開いた時点で都度算出する（ui/menu.ts の build が hasActive/busy を反映）。ここでは扱わない。
   confirmBtn().disabled = !hasActive || state.busy;
+  // タブ描画が変わると可視範囲も変わるので隠れ未読バッジを再計算する（更新タイミング(b)）。
+  scheduleHiddenUnread();
+}
+
+/**
+ * 隠れた差分あり（未読）タブ数のバッジ更新を rAF でまとめる（T10・差分 C5）。
+ * scroll/resize/再描画/レイアウト変化のたびに呼ばれるので、同一フレーム内の連続呼び出しを
+ * 1 回の計測へ畳んでレイアウトスラッシング（読み書き交互）と過剰計算を避ける（制約: 計算は軽量に）。
+ */
+let hiddenUnreadRaf = 0;
+function scheduleHiddenUnread(): void {
+  if (hiddenUnreadRaf) return; // 既にこのフレームの計測を予約済み。
+  hiddenUnreadRaf = requestAnimationFrame(() => {
+    hiddenUnreadRaf = 0;
+    updateHiddenUnread();
+  });
+}
+
+/**
+ * 横スクロールで画面外に隠れた「差分あり（未読）」タブ数を数え、「▸ 未読N」バッジへ反映する
+ * （要件5.3「隠れた差分ありタブはタブバー端のバッジで示す」・ui-mock .hidden-unread）。
+ *
+ * 隠れ判定: #tabs（overflow-x:auto）の可視窓 [scrollLeft, scrollLeft+clientWidth] に対し、
+ * 各タブ要素の [offsetLeft, offsetLeft+offsetWidth] が **完全にはみ出して見えていない**（左へ
+ * スクロールアウト or 右へスクロールアウト）ものを隠れタブとする。一部でも窓に重なれば可視扱い。
+ * そのうち未読（unread.get(path) が modified/created）のものを数える。削除済み(removed)は対象外
+ * （差分あり＝modified/created。ui-design 5章の状態記号と一致）。
+ *
+ * 計測は読み取りのみを連続で行い（書き込みは最後の DOM 反映 1 回）、スラッシングを避ける。
+ */
+function updateHiddenUnread(): void {
+  const badge = hiddenUnreadBadge();
+  const container = tabsEl();
+  // ---- 読み取りフェーズ（レイアウトプロパティをまとめて読む）----
+  const viewLeft = container.scrollLeft;
+  const viewRight = viewLeft + container.clientWidth;
+  const tabEls = Array.from(container.querySelectorAll<HTMLElement>('[role="tab"]'));
+  let hiddenUnread = 0;
+  let firstHiddenUnread: HTMLElement | null = null;
+  for (const el of tabEls) {
+    const path = el.dataset.path;
+    if (!path) continue;
+    const kind = state.unread.get(path);
+    if (kind !== "modified" && kind !== "created") continue; // 差分あり（未読）のみ対象。
+    const left = el.offsetLeft;
+    const right = left + el.offsetWidth;
+    // 可視窓と全く重ならない（右端 <= 窓左 or 左端 >= 窓右）＝隠れている。1px の丸めは許容。
+    const hidden = right <= viewLeft + 1 || left >= viewRight - 1;
+    if (hidden) {
+      hiddenUnread += 1;
+      if (!firstHiddenUnread) firstHiddenUnread = el;
+    }
+  }
+  // クリックで最初の隠れ未読タブへスクロールするための参照を保持（親切機能・任意）。
+  hiddenUnreadTarget = firstHiddenUnread;
+  // ---- 書き込みフェーズ（DOM 反映は 1 回だけ）----
+  if (hiddenUnread > 0) {
+    badge.textContent = `▸ 未読${hiddenUnread}`;
+    badge.setAttribute("aria-label", `画面外に差分ありのタブが ${hiddenUnread} 件`);
+    badge.hidden = false;
+  } else {
+    badge.hidden = true;
+    badge.removeAttribute("aria-label");
+    hiddenUnreadTarget = null;
+  }
+}
+
+/** バッジクリックでスクロールする先（最初の隠れ未読タブ要素）。updateHiddenUnread が更新する。 */
+let hiddenUnreadTarget: HTMLElement | null = null;
+
+/**
+ * 隠れ未読バッジのクリックで、最初の隠れ未読タブが見える位置まで #tabs を横スクロールする
+ * （T10 親切機能・任意）。scrollIntoView は縦スクロールも誘発しうるので、横方向のみを
+ * 自前で計算してずらす（タブ列は横スクロール専用）。スクロール後の scroll イベントで
+ * scheduleHiddenUnread が走り、バッジは自然に再計算される。
+ */
+function scrollToHiddenUnread(): void {
+  const target = hiddenUnreadTarget;
+  if (!target) return;
+  // 対象タブが可視窓の左端に来るよう寄せる（少し余白を残して窓内に確実に収める）。
+  tabsEl().scrollTo({ left: Math.max(0, target.offsetLeft - 12), behavior: "smooth" });
 }
 
 /**
@@ -246,6 +331,9 @@ function setTreeCollapsed(collapsed: boolean): void {
   else treeCollapseBtn().focus();
   // 左ペインの幅が変わるのでプレビュー別WebView の矩形を追従させる（レイアウト確定後）。
   requestAnimationFrame(() => syncPreviewBounds());
+  // ツリー収納/引き出しでタブ列の幅が変わる＝可視タブ範囲が変わるので隠れ未読バッジを再計算する
+  // （更新タイミング(d): レイアウト変化時）。scheduleHiddenUnread が rAF でまとめる。
+  scheduleHiddenUnread();
 }
 
 /**
@@ -1681,6 +1769,11 @@ async function main(): Promise<void> {
   confirmBtn().addEventListener("click", () => void onConfirm());
   // tab-tools: ブラウザで開く（T9）。アクティブタブのファイルを OS 既定アプリで開く。
   openExternalBtn().addEventListener("click", () => void onOpenExternal());
+  // 隠れ未読バッジ（T10・差分 C5）。タブ列の横スクロールで可視範囲が変わるたびに再計算する
+  // （更新タイミング(a)）。scroll は高頻度なので rAF デバウンスへ流す。passive で滑らかに。
+  tabsEl().addEventListener("scroll", () => scheduleHiddenUnread(), { passive: true });
+  // バッジクリック（親切機能）: 最初の隠れ未読タブが見える位置へ #tabs をスクロールする。
+  hiddenUnreadBadge().addEventListener("click", () => scrollToHiddenUnread());
   // ツリー収納/引き出しトグル（B5・ui-design 7章）。ヘッダ右端「‹」で収納、レール「›」で引き出す。
   treeCollapseBtn().addEventListener("click", () => setTreeCollapsed(true));
   treeExpandBtn().addEventListener("click", () => setTreeCollapsed(false));
@@ -1709,7 +1802,13 @@ async function main(): Promise<void> {
   // プレビュー非表示中は syncPreviewBounds が無害化する（占有チェック）。
   const previewResizeObserver = new ResizeObserver(() => syncPreviewBounds());
   previewResizeObserver.observe(previewHost());
-  window.addEventListener("resize", () => syncPreviewBounds());
+  window.addEventListener("resize", () => {
+    syncPreviewBounds();
+    // ウィンドウ幅が変わると可視タブ範囲も変わるので隠れ未読バッジを再計算する（更新タイミング(c)）。
+    scheduleHiddenUnread();
+  });
+  // 初期表示時にも一度バッジ状態を確定させる（復元でタブが復元されている場合に備える）。
+  scheduleHiddenUnread();
   // 外部変更/監視モードの購読（backend の emit を受ける）。
   await onFsChanged((payload) => onExternalChange(payload.changes));
   await onWatchMode((message) => notify(message, "info"));

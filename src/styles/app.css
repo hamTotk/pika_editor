@@ -426,6 +426,40 @@ body {
   min-width: 0;
 }
 
+/* 隠れた差分あり（未読）タブ数のバッジ（UIブラッシュアップ T10・差分 C5・ui-mock .hidden-unread）。
+   横スクロールで画面外に隠れた未読タブがあるとき「▸ 未読N」を spring と tab-tools の間に出す。
+   ui-mock は span だが、クリックで隠れ未読タブへスクロールできるよう button にしている。
+   button 既定の枠/フォントを打ち消し、ui-mock .hidden-unread の見た目（淡色・bg-active 地・丸み）に揃える。 */
+#hidden-unread {
+  align-self: center;
+  flex: none;
+  margin: 0 6px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--bg-active);
+  border: 0;
+  border-radius: 9px;
+  padding: 0 8px;
+  line-height: 17px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#hidden-unread:hover {
+  color: var(--text-1);
+}
+
+#hidden-unread:focus-visible {
+  outline: 2px solid var(--accent, Highlight);
+  outline-offset: 1px;
+}
+
+/* hidden 属性で非表示にする（N=0 のとき）。flex 子なので display:none を明示する。 */
+#hidden-unread[hidden] {
+  display: none;
+}
+
 /* タブバー右端のツール群（ui-mock .tab-tools）。左に細い境界を引き、
    モード切替セグメント・差分トグル・確認ボタンを gap で並べる。 */
 #tab-tools {
