@@ -258,19 +258,159 @@ body {
   border-left: 1px solid var(--border-1);
 }
 
-/* タブバー（C1 フラット化・ui-mock .tabbar）。角丸カード調をやめ、帯は bg-window・
-   下端に区切り線。タブは border-right で区切り、アクティブは面の明るさ（bg-raised）で示す。 */
+/* 分割（差分OFF）の左右並置（ui-design 8章「左＝エディタ／右＝整形プレビュー」）。
+   row2 を 2 カラムに割り、エディタを左・プレビュー（別WebView 配置先）を右に置く。
+   差分トグルを ON にすると applyOccupancy が preview-diff へ倒す（左プレビュー＋右差分）。 */
+#editor-pane[data-split="editor-preview"] {
+  grid-template-columns: 1fr 1fr;
+}
+
+#editor-pane[data-split="editor-preview"] #editor-host {
+  grid-row: 2;
+  grid-column: 1;
+}
+
+#editor-pane[data-split="editor-preview"] #preview-host {
+  grid-row: 2;
+  grid-column: 2;
+  /* プレビュー側は左に細い境界を引き、エディタとの区切りを明示（色非依存の罫線・要件11.5）。 */
+  border-left: 1px solid var(--border-1);
+}
+
+/* タブバー（C1 フラット化・ui-mock .tabbar・UIブラッシュアップ T6 差分 C4）。
+   grid-row:1 を担うコンテナ。bg-window 帯＋下端の区切り線はここで引く。
+   中に「タブ列(#tabs) … spring … tab-tools(#tab-tools)」を flex で横並べる。
+   row2 が分割で 2 カラムになっても tabbar は全幅（grid-column:1/-1）を保つ。 */
+#tabbar {
+  grid-row: 1;
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: stretch;
+  background: var(--bg-window);
+  border-bottom: 1px solid var(--border-1);
+  min-height: 35px;
+  /* タブ列が溢れても tab-tools を隠さない（タブ列側だけ横スクロール/省略する）。 */
+  min-width: 0;
+}
+
+/* タブ列（ui-mock .tabbar 内のタブ群）。tabbar の flex 子として伸縮し、
+   タブが多いと横スクロールする。renderTabs が replaceChildren で全消去するため
+   tab-tools はこの外（#tabbar 直下）に置く（破壊されない）。 */
 #tabs {
   display: flex;
   align-items: stretch;
   gap: 0;
   padding: 0;
-  background: var(--bg-window);
-  border-bottom: 1px solid var(--border-1);
-  min-height: 35px;
-  /* タブ列は常に row1 全幅（row2 が分割で 2 カラムになっても tabs は全幅を保つ）。 */
-  grid-row: 1;
-  grid-column: 1 / -1;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* タブ列を左へ詰め tab-tools を右端へ押す伸縮スペーサ（ui-mock .tabbar .spring）。 */
+#tabbar .spring {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* タブバー右端のツール群（ui-mock .tab-tools）。左に細い境界を引き、
+   モード切替セグメント・差分トグル・確認ボタンを gap で並べる。 */
+#tab-tools {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-left: 1px solid var(--border-1);
+}
+
+/* モード切替セグメント（排他・ui-mock .seg）。枠で囲んだ連結ボタン。 */
+#tab-tools .seg {
+  display: flex;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+#tab-tools .seg button {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 3px 11px;
+  border: 0;
+  border-right: 1px solid var(--border-2);
+  background: var(--bg-raised);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+#tab-tools .seg button:last-child {
+  border-right: 0;
+}
+
+/* 現在モードのボタン（ui-mock .seg button.on）。モノトーンの薄掛け（bg-active）。 */
+#tab-tools .seg button.on {
+  background: var(--bg-active);
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+#tab-tools .seg button:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+/* 差分トグル（独立・ui-mock .diff-toggle）。OFF は枠線ボタン、ON は accent-strong 塗り・白文字。 */
+#tab-tools .diff-toggle {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 3px 11px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#tab-tools .diff-toggle.on {
+  background: var(--accent-strong);
+  color: #fff;
+  border-color: var(--accent-strong);
+}
+
+#tab-tools .diff-toggle:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+/* 確認済みにする（ui-mock .iconbtn）。モノトーンの枠線ボタン。 */
+#tab-tools .iconbtn {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-1);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#tab-tools .iconbtn:hover:not(:disabled),
+#tab-tools .diff-toggle:hover:not(:disabled):not(.on),
+#tab-tools .seg button:hover:not(:disabled):not(.on) {
+  background: var(--bg-hover);
+}
+
+#tab-tools .iconbtn:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+/* tab-tools 各ボタンのキーボードフォーカス可視化（要件11.5）。 */
+#tab-tools button:focus-visible {
+  outline: 2px solid var(--accent, Highlight);
+  outline-offset: -2px;
 }
 
 /* 個々のタブ（ui-mock .tab）。フラット・角丸なし・border-right の区切り・gap:7px・
