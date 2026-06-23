@@ -97,9 +97,27 @@ body {
   user-select: none;
 }
 
-/* アイコンと状態記号は装飾の対象外（F-028: 取り消し線はファイル名 span のみに限定する）。 */
+/* アイコンと状態記号は装飾の対象外（F-028: 取り消し線はファイル名 span のみに限定する）。
+   ファイルタイプアイコンはモノトーン線 SVG（ui-design 6章・案A）。色は text-2 に固定し
+   currentColor 経由でテーマ追従させ、状態色（青/緑/赤）と干渉させない（カラー絵文字を残さない）。 */
 #tree [role="treeitem"] .tree-icon {
   flex: none;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-2);
+}
+
+#tree [role="treeitem"] .tree-icon svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* 削除済みの取り消し線はファイル名（とその状態記号サフィックス）だけに掛ける（ui-design 5章）。 */
