@@ -128,7 +128,7 @@ const confirmAllBtn = () => document.getElementById("confirm-all") as HTMLButton
 const rollbackBtn = () => document.getElementById("rollback-file") as HTMLButtonElement;
 
 function refreshTabs(): void {
-  renderTabs(state.tabs, state.active, activateTab, state.unread);
+  renderTabs(state.tabs, state.active, activateTab, state.unread, closeTab);
   const hasActive = !!state.active;
   togglePreviewBtn().disabled = !hasActive;
   toggleDiffBtn().disabled = !hasActive;
@@ -1165,10 +1165,17 @@ async function onOpenFile(): Promise<void> {
   await openPath(p);
 }
 
-/** アクティブタブを閉じる（Ctrl+W・要件11.2）。未保存があれば破棄確認を挟む（データを失わない）。 */
+/** アクティブタブを閉じる（Ctrl+W・要件11.2）。任意パス版 closeTab へ委譲する。 */
 function onCloseActiveTab(): void {
   if (!state.active) return;
-  const path = state.active;
+  closeTab(state.active);
+}
+
+/**
+ * 任意のタブを閉じる（Ctrl+W／タブの × クリック・要件11.2）。未保存があれば破棄確認を挟む
+ * （データを失わない＝確認を必ず通す）。閉じたのがアクティブタブなら隣へアクティブを移す。
+ */
+function closeTab(path: string): void {
   const tab = state.tabs.find((t) => t.path === path);
   if (!tab) return;
   if (tab.dirty) {
@@ -1179,8 +1186,15 @@ function onCloseActiveTab(): void {
     if (!ok) return;
   }
   const idx = state.tabs.findIndex((t) => t.path === path);
+  const wasActive = state.active === path;
   state.tabs = state.tabs.filter((t) => t.path !== path);
-  // 隣のタブへアクティブを移す（無ければエディタを畳む）。
+  if (!wasActive) {
+    // 非アクティブタブを閉じた場合はアクティブを維持し、タブ列だけ更新する。
+    refreshTabs();
+    void persistAppState();
+    return;
+  }
+  // アクティブを閉じたので隣のタブへアクティブを移す（無ければエディタを畳む）。
   const next = state.tabs[idx] ?? state.tabs[idx - 1] ?? null;
   if (next) {
     void activateTab(next.path);
