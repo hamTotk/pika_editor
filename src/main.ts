@@ -35,7 +35,7 @@ import { resolveShortcut, modsOf, normalizeKey, type Action, type Focus } from "
 import { renderTree, resetTreeExpansion } from "./ui/tree";
 import { renderTabs, type TabModel } from "./ui/tabs";
 import { notify, notices } from "./ui/notifications";
-import { setStatus } from "./ui/status";
+import { setStatus, renderStatus } from "./ui/status";
 import { UnreadStore } from "./ui/unread";
 import { isImageExt } from "./ui/image";
 import { degradeReasonsFromFlags, degradeMessage, emptyMessage } from "./ui/viewstate";
@@ -229,7 +229,7 @@ async function activateTab(path: string): Promise<void> {
   // 直近内容を空にしてエディタを出し「確認済み時点に戻す（rollback）」導線を保つ（eval high）。
   if (tab?.deleted) {
     state.editor?.destroy();
-    state.editor = createEditor(editorHost(), "", () => markDirty(path));
+    state.editor = createEditor(editorHost(), "", () => markDirty(path), () => refreshStatus());
     refreshTabs();
     setStatus(`削除済み: ${path}（［確認済み時点に戻す］で退避から復元できます）`);
     return;
@@ -245,7 +245,7 @@ async function activateTab(path: string): Promise<void> {
       tab.hasBom = doc.has_bom;
     }
     state.editor?.destroy();
-    state.editor = createEditor(editorHost(), content, () => markDirty(path));
+    state.editor = createEditor(editorHost(), content, () => markDirty(path), () => refreshStatus());
     // 段階制で機能が縮退するとき（preview/diff/highlight 等の自動オフ）は理由を通知バー提示する（要件2.2）。
     notifyDegrade(path, doc.degrade);
     if (doc.decode_warning) {
@@ -259,6 +259,8 @@ async function activateTab(path: string): Promise<void> {
       state.editor.scrollToLine(tab.scrollTop);
     }
     refreshTabs();
+    // 開いた直後の構造化ステータス（差分あり数・行数・文字数・カーソル位置）を描画する（D2/D3）。
+    refreshStatus();
     // 差分トグル ON のままタブを切替えたら新しいアクティブタブの差分を再描画する。
     if (state.diffOn) await renderActiveDiff();
     // プレビュー表示中（preview/split）のままタブを切替えたら、新アクティブタブのプレビューへ追従させる
@@ -279,6 +281,38 @@ async function captureTabHash(path: string, content: string): Promise<void> {
     tab.contentHash = await hashContent(content);
   } catch {
     // ハッシュ取得失敗は致命でない（content_hash 空＝復元時は安全側で一致扱い）。
+  }
+}
+
+/**
+ * 右下の構造化ステータス（ui-mock .status）を現在状態から組み立てて描画する（D2/D3・要件11.1）。
+ *
+ * 内容＝差分あり（未読）数＋全体「行数・文字数」＋カーソル位置「行・文字目」。全体は text-2、
+ * カーソル位置は accent で色分けする（CSS）。プレビュー/差分などカーソルが無いモードでは
+ * 全体（差分/行/文字）のみ出し、カーソル位置は出さない（ui-design 9章）。
+ *
+ * アクティブタブが無い（フォルダ未オープン/全タブを閉じた）ときは状況メッセージ（setStatus）に委ね、
+ * ここでは何もしない（呼び出し側が setStatus を出している）。
+ */
+function refreshStatus(): void {
+  if (!state.active || !state.editor) return;
+  const unreadCount = state.unread.unreadCount();
+  // カーソルを持つのはソース編集中のみ（エディタが占有しているとき）。プレビュー/差分占有時は全体のみ。
+  const occ = resolveOccupancy(state.viewMode, state.diffOn);
+  if (occ.showEditor) {
+    const m = state.editor.getMetrics();
+    renderStatus({
+      unreadCount,
+      lines: m.lines,
+      chars: m.chars,
+      cursorLine: m.cursorLine,
+      cursorColumn: m.cursorColumn,
+      selectionChars: m.selectionChars,
+    });
+  } else {
+    // プレビュー/差分占有中はカーソルが無いので全体（差分・行・文字）のみ。行/文字はバッファ計測値を流用。
+    const m = state.editor.getMetrics();
+    renderStatus({ unreadCount, lines: m.lines, chars: m.chars });
   }
 }
 
@@ -438,7 +472,9 @@ async function switchFolder(dir: string): Promise<void> {
     refreshTree();
     updateTreeHeader();
     refreshTabs();
-    setStatus(`${dir}（${entries.length} 件）`);
+    // フォルダ名＋件数はツリーヘッダ（T3）へ移したのでステータスからは外す。ファイルを開くまでは
+    // 表示するファイル計測値が無いのでステータスは空にする（開くと refreshStatus が構造化表示する）。
+    setStatus("");
     // 最近使ったフォルダへ記録（要件10.2・ジャンプリスト反映は backend）。
     void noteRecent("folder", dir).catch(() => undefined);
     void persistAppState();
@@ -512,6 +548,7 @@ async function saveOnce(
     state.unread.clearFile(path);
     refreshTabs();
     refreshTree();
+    refreshStatus(); // 差分あり数（差分 N）を更新。
     notify("保存しました");
   } catch (e) {
     notify(`保存に失敗しました: ${String(e)}`, "error");
@@ -541,7 +578,8 @@ async function renderActiveDiff(): Promise<void> {
     state.diff = renderDiff(diffHost(), diff);
     // 占有はモード×差分トグルの直交で解決する（プレビュー+差分は左右並置＝ui-design 8章）。
     applyOccupancy();
-    setStatus(`差分: 変更 ${diff.change_count} 件`);
+    // 差分占有時は構造化ステータスを全体（差分あり数・行・文字）のみで描画する（カーソルは出さない）。
+    refreshStatus();
     // 表示専用ステータスとは別に、スクリーンリーダーへ差分件数を polite で読ませる（要件11.5・eval medium）。
     announce(`差分 変更 ${diff.change_count} 件`);
   } catch (e) {
@@ -590,6 +628,9 @@ function applyOccupancy(): void {
   } else {
     editorPane().removeAttribute("data-split");
   }
+  // 占有（ソース/差分/プレビュー）が変わったらステータスのカーソル有無も切り替える（要件11.1）。
+  // ソース占有のみカーソル位置を出し、差分/プレビュー占有では全体（差分・行・文字）のみにする。
+  refreshStatus();
   // 占有がプレビュー非表示なら別WebView を隠す（表示は renderActivePreview の show_preview が担う）。
   // 占有がプレビュー表示でも、ここでは bounds 追従のみ更新する（ナビゲートは renderActivePreview）。
   if (!occ.showPreview) {
@@ -705,7 +746,8 @@ async function renderActivePreview(): Promise<void> {
     previewHost().setAttribute("data-preview-flavor", ready.flavor);
     await showPreview(previewRect(), ready.url);
     setPreviewState("ready");
-    setStatus(`プレビュー: ${path}`);
+    // プレビュー占有時は構造化ステータスを全体（差分あり数・行・文字）のみで描画する（カーソルは出さない）。
+    refreshStatus();
   } catch (e) {
     setPreviewState("error");
     notify(`プレビューの準備に失敗: ${String(e)}`, "error");
@@ -731,6 +773,7 @@ async function onConfirm(): Promise<void> {
         state.unread.clearFile(path);
         refreshTree();
         refreshTabs();
+        refreshStatus(); // 差分あり数（差分 N）を更新。
         if (state.diffOn) await renderActiveDiff(); // 新ベースライン基準で再描画。
         notify("確認済みにしました");
       } else {
@@ -777,6 +820,7 @@ async function onConfirmAll(): Promise<void> {
       // スキップがある場合は安全側で未確定を未読のまま残す（退避は取れているのでデータ喪失なし）。
       refreshTree();
       refreshTabs();
+      refreshStatus(); // 差分あり数（差分 N）を更新。
       if (state.diffOn) await renderActiveDiff();
       notify(
         `すべて確認済み: ${result.updated} 件確定 / ${result.skipped} 件スキップ（更新前は一括退避済み）`,
@@ -813,6 +857,7 @@ async function onRollback(): Promise<void> {
       state.unread.clearFile(path);
       refreshTree();
       refreshTabs();
+      refreshStatus(); // 差分あり数（差分 N）を更新（巻き戻しは内容も変わるので行/文字も再計測）。
       if (state.diffOn) await renderActiveDiff();
       notify("確認済み時点に戻しました（戻す前の内容は退避済み）");
     } catch (e) {
@@ -830,10 +875,11 @@ function onExternalChange(changes: import("./ipc").FsChange[]): void {
   void autoReloadCleanTabs(changes);
   refreshTree();
   refreshTabs();
-  // ステータスに件数を出す。表示専用ステータスとは別に未読件数を読み上げ領域へ announce する（要件11.5）。
+  // 差分あり数が変わったので構造化ステータス（差分 N …）を更新する。表示専用ステータスとは別に
+  // 未読件数を読み上げ領域へ announce する（要件11.5）。
   if (state.folder) {
     const count = state.unread.unreadCount();
-    setStatus(`${state.folder}（未読 ${count} 件）`);
+    refreshStatus();
     announce(`差分あり ${count} 件`);
   }
 }
@@ -923,9 +969,10 @@ function openNewFileTab(path: string, name: string): void {
   }
   state.active = path;
   state.editor?.destroy();
-  state.editor = createEditor(editorHost(), "", () => markDirty(path));
+  state.editor = createEditor(editorHost(), "", () => markDirty(path), () => refreshStatus());
   void captureTabHash(path, "");
   refreshTabs();
+  // 新規ファイルは「保存で作成される」旨を一旦提示し、以後の編集（onCursorChange）で構造化ステータスへ移る。
   setStatus(`新規ファイル（保存で作成）: ${path}`);
   persistAppState();
 }
@@ -1019,7 +1066,9 @@ async function restoreOnStartup(): Promise<void> {
       state.unread = new UnreadStore();
       refreshTree();
       updateTreeHeader();
-      setStatus(`${outcome.workspace_path}（${entries.length} 件）`);
+      // フォルダ名＋件数はツリーヘッダ（T3）へ移したのでステータスからは外す。タブ復元・活性化後に
+      // refreshStatus（activateTab 経由）が構造化ステータスを描画する。
+      setStatus("");
     } catch {
       // ワークスペースが開けなければ空状態へ落とす（安全遷移）。
     }
