@@ -79,7 +79,39 @@
       </header>
       <div id="workbench">
         <nav id="tree-pane" aria-label="ファイルツリー">
+          <!-- ツリーヘッダ（ui-mock .tree-head・ui-design 7章）。「エクスプローラー — <フォルダ名>」を
+               左に grow で出し、右端に収納トグル（‹）を置く。フォルダ名は main.ts が更新する。 -->
+          <div id="tree-head">
+            <span id="tree-head-label" class="grow">エクスプローラー</span>
+            <!-- 収納ボタン（‹）。展開時のみ見え、押すとツリーをレールへ収納する（B5）。 -->
+            <button
+              id="tree-collapse"
+              type="button"
+              class="tree-toggle"
+              aria-label="ツリーを収納"
+              aria-expanded="true"
+              aria-controls="tree"
+              title="ツリーを収納"
+            >
+              ‹
+            </button>
+          </div>
           <ul id="tree" role="tree" aria-label="ファイルツリー"></ul>
+          <!-- 収納時の引き出しレール（ui-mock .tree-rail）。収納時だけ表示され、押すと展開へ戻す。
+               収納してもこのボタンは Tab 到達可能（要件11.5・キーボードで引き出しへ到達できる）。 -->
+          <div id="tree-rail">
+            <button
+              id="tree-expand"
+              type="button"
+              class="tree-toggle"
+              aria-label="ツリーを引き出す"
+              aria-expanded="false"
+              aria-controls="tree"
+              title="ツリーを引き出す"
+            >
+              ›
+            </button>
+          </div>
         </nav>
         <main id="editor-pane">
           <div id="tabs" role="tablist" aria-label="開いているタブ"></div>
