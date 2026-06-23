@@ -276,3 +276,55 @@ pub fn restore_app_state() -> Result<RestoreOutcomeDto, String> {
         safe_empty: outcome.safe_empty,
     })
 }
+
+// ── 「OS 既定アプリで開く」導線（要件6.2・design G）─────────────────────────────
+//
+// 【セキュリティ境界・最小権限】opener plugin の command ACL は **frontend へ一切開放しない**
+// （capabilities/main.json は core:default のみ・opener permission は付与しない）。frontend は
+// ここの自前 #[tauri::command] を invoke するだけで、その内部からのみ opener の Rust API
+// （`open_path`）を呼ぶ。これにより「任意 URL/任意パスを開く汎用導線」を作らず、対象を
+// **現在開いているファイル / pika のログフォルダ** に限定できる（design doc 15章「足さない」）。
+// 別WebView（プレビュー・権限ゼロ）からの到達は main.rs の発信元ラベル検査で全拒否される
+// （自前 command も choke point で塞がれる＝多層防御）。
+
+/// パスを「OS 既定アプリで開いてよいか」を backend 側で再検証する（fail-closed）。
+///
+/// frontend からの値は信頼せず、ここで **絶対パス** かつ **実在** を確認する（不正は拒否）。
+/// 相対パス・存在しないパスは開かない（要件: パス妥当性チェック・最上位原則の防御的入力検証）。
+/// 種別（ファイル/フォルダ）は問わない（既定アプリ＝ファイルなら関連付けアプリ、フォルダなら
+/// エクスプローラーで開く）。
+fn validate_openable(path: &str) -> Result<&Path, String> {
+    let p = Path::new(path);
+    if !p.is_absolute() {
+        return Err("絶対パスではありません".to_string());
+    }
+    if !p.exists() {
+        return Err("対象が存在しません".to_string());
+    }
+    Ok(p)
+}
+
+/// 指定ファイル/フォルダを OS 既定アプリで開く（要件6.2・design G「ブラウザで開く」の正規導線）。
+///
+/// frontend は **現在アクティブなタブのファイルパス** だけを渡す規約（任意 URL は受けない）。
+/// backend でも絶対パス＋実在を再検証し（[`validate_openable`]）、不正は Err で拒否する（fail-closed）。
+/// `open_path(.., None)` は既定アプリで detached 起動するため UI スレッドを塞がない（固まらない）。
+#[tauri::command]
+pub fn open_in_default_app(path: String) -> Result<(), String> {
+    let p = validate_openable(&path)?;
+    // with=None で OS 既定アプリ（HTML なら既定ブラウザ等）。detached 起動。
+    // 接頭辞は frontend で一元付与するため、ここでは素の原因のみ返す（F-027 二重接頭辞回避）。
+    tauri_plugin_opener::open_path(p, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// 診断ログフォルダ（`<データルート>/logs/`）を OS（エクスプローラー）で開く（要件12.3・design G）。
+///
+/// パスは backend が確定（無ければ作成）する（[`crate::diagnostic::log_folder_path`] と同じ算出）。
+/// frontend からパスを受け取らない＝対象を pika のログフォルダに固定し、任意フォルダ閲覧の導線にしない。
+#[tauri::command]
+pub fn open_log_folder() -> Result<(), String> {
+    // ログフォルダのパス確定＋作成は診断モジュールに集約（重複算出を避ける）。
+    let dir = crate::diagnostic::log_folder_path()?;
+    let p = validate_openable(&dir)?;
+    tauri_plugin_opener::open_path(p, None::<&str>).map_err(|e| e.to_string())
+}

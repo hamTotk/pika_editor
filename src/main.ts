@@ -24,6 +24,8 @@ import {
   hidePreview,
   setPreviewBounds,
   logFolderPath,
+  openInDefaultApp,
+  openLogFolder,
   type TreeEntry,
   type OpenRequestPayload,
   type AppState,
@@ -138,6 +140,8 @@ const modeButtons = () =>
   );
 const toggleDiffBtn = () => document.getElementById("toggle-diff") as HTMLButtonElement;
 const confirmBtn = () => document.getElementById("confirm-file") as HTMLButtonElement;
+// 「ブラウザで開く」（tab-tools・UIブラッシュアップ T9）。アクティブタブのファイルを OS 既定アプリで開く。
+const openExternalBtn = () => document.getElementById("open-external") as HTMLButtonElement;
 
 function refreshTabs(): void {
   renderTabs(state.tabs, state.active, activateTab, state.unread, closeTab);
@@ -173,6 +177,8 @@ function refreshViewTools(): void {
   diffBtn.disabled = !hasActive;
   diffBtn.classList.toggle("on", state.diffOn);
   diffBtn.setAttribute("aria-pressed", String(state.diffOn));
+  // 「ブラウザで開く」はアクティブタブのファイルが対象。アクティブが無い間は無効にする（誤クリック防止）。
+  openExternalBtn().disabled = !hasActive;
 }
 
 function refreshTree(): void {
@@ -1043,15 +1049,46 @@ function onSetTheme(mode: ThemeMode): void {
 }
 
 /**
- * ログフォルダを開く（ファイルメニュー・要件12.3）。OS シェルで開く opener は capability 拡張のため
- * 別タスク（T9）。今回はパスを取得して通知バーで案内する暫定（行き止まりにしない）。
+ * ログフォルダを開く（ファイルメニュー・要件12.3/design G・UIブラッシュアップ T9）。
+ * backend の自前 command（open_log_folder）が OS（エクスプローラー）で <データルート>/logs/ を開く。
+ * 対象は pika のログフォルダに固定（frontend からパスを渡さない＝任意フォルダ閲覧の導線にしない）。
+ * 失敗時はパス取得にフォールバックして案内し、行き止まりにしない。
  */
 async function onOpenLogFolder(): Promise<void> {
   try {
-    const path = await logFolderPath();
-    notify(`ログフォルダ: ${path}（エクスプローラーで開く導線は今後対応）`, "info");
+    await openLogFolder();
   } catch (e) {
-    notify(`ログフォルダのパス取得に失敗: ${String(e)}`, "error");
+    // 開けなかったときはせめてパスを案内する（行き止まりにしない・要件11.1）。
+    try {
+      const path = await logFolderPath();
+      notify(`ログフォルダを開けませんでした: ${String(e)}（場所: ${path}）`, "error");
+    } catch {
+      notify(`ログフォルダを開けませんでした: ${String(e)}`, "error");
+    }
+  }
+}
+
+/**
+ * 「ブラウザで開く」（tab-tools・要件6.2/design G・UIブラッシュアップ T9）。
+ * **現在アクティブなタブのファイル**を OS 既定アプリ（HTML なら既定ブラウザ等）で開く。
+ * backend の自前 command（open_in_default_app）が絶対パス＋実在を再検証して起動する（fail-closed）。
+ *
+ * 新規（未保存で未作成）タブはディスクに実体が無く backend が拒否するため、保存を促して中断する
+ * （行き止まりにしない）。任意 URL は開かない（対象は開いているファイルのみ）。
+ */
+async function onOpenExternal(): Promise<void> {
+  const path = state.active;
+  if (!path) return;
+  const tab = state.tabs.find((t) => t.path === path);
+  // 削除済み/未保存新規は実体が無い → 開く前に案内（backend も実在チェックで弾くが先に親切な導線を出す）。
+  if (tab?.deleted) {
+    notify("削除済みのファイルは開けません（［確認済み時点に戻す］で復元できます）", "warn");
+    return;
+  }
+  try {
+    await openInDefaultApp(path);
+  } catch (e) {
+    notify(`既定アプリで開けませんでした: ${String(e)}`, "error");
   }
 }
 
@@ -1642,6 +1679,8 @@ async function main(): Promise<void> {
   // tab-tools: 差分トグル（独立）・確認済みにする（T6 で移設済みの常設ボタン）。
   toggleDiffBtn().addEventListener("click", () => void onToggleDiff());
   confirmBtn().addEventListener("click", () => void onConfirm());
+  // tab-tools: ブラウザで開く（T9）。アクティブタブのファイルを OS 既定アプリで開く。
+  openExternalBtn().addEventListener("click", () => void onOpenExternal());
   // ツリー収納/引き出しトグル（B5・ui-design 7章）。ヘッダ右端「‹」で収納、レール「›」で引き出す。
   treeCollapseBtn().addEventListener("click", () => setTreeCollapsed(true));
   treeExpandBtn().addEventListener("click", () => setTreeCollapsed(false));

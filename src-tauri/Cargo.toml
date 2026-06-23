@@ -34,6 +34,11 @@ include_dir = "0.7"
 # 合成ロジック（デバウンス/rename/自己保存抑制/オーバーフロー）は pika-core::watcher。
 notify = { workspace = true }
 twox-hash = { workspace = true }
+# 「ブラウザで開く」「ログフォルダを開く」= OS 既定アプリ起動（要件6.2/design G）。Tauri 公式・軽量。
+# **frontend へ opener の command ACL は一切開放しない**。自前の薄い #[tauri::command]
+# （commands::open_in_default_app / open_log_folder）の内部からのみ Rust API（open_path）を呼ぶ。
+# detached 起動なので UI スレッドを塞がない（design doc 1章「固まらない」）。
+tauri-plugin-opener = "2"
 
 [target.'cfg(windows)'.dependencies]
 # WebView2 Runtime 不在検出（レジストリ読取）・最小ネイティブ MessageBox（design doc 18章）、

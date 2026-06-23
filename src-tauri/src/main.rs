@@ -66,6 +66,8 @@ fn run() {
         commands::hash_content,
         commands::note_recent,
         commands::path_kind,
+        commands::open_in_default_app,
+        commands::open_log_folder,
         snapshot::compute_file_diff,
         snapshot::confirm_file,
         snapshot::confirm_all,
@@ -83,6 +85,13 @@ fn run() {
     ];
 
     let app = tauri::Builder::default()
+        // opener plugin（「ブラウザで開く」「ログフォルダを開く」= OS 既定アプリ起動・要件6.2/design G）。
+        // 【最小権限】plugin を登録しても **その command ACL は capability で一切開放しない**
+        // （capabilities/main.json は core:default のみ・opener permission 不付与＝frontend から
+        // plugin command を直接 invoke できない）。利用は commands::open_in_default_app /
+        // open_log_folder（自前の薄い command）の内部から opener の Rust API を呼ぶ経路に限定する。
+        // プレビュー別WebView（権限ゼロ）へは当然付与しない（capability ファイル不在＝ゼロのまま）。
+        .plugin(tauri_plugin_opener::init())
         // プレビュー custom protocol（pika-preview://）= Rust から別WebView へサニタイズ済み HTML を
         // 直配信する（HTML を JS のメインワールドに通さない＝design doc 6章）。CSP はレスポンスヘッダで強制。
         // この protocol が読むのは PreviewService（サニタイズ済み素材）のみで、Tauri command には到達しない。
