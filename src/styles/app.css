@@ -90,10 +90,25 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 0 6px;
+  /* 段階インデント（ui-design 7章）。深さ可変なので base + depth * 段差で算出する。
+     --depth は tree.ts が行ごとに設定（root=0）。base=6px は従来の左パディング、段差=18px
+     （ui-mock indent1=24px/indent2=42px に概ね一致＝6+1*18=24 / 6+2*18=42）。 */
+  padding: 0 6px 0 calc(6px + var(--depth, 0) * 18px);
   border-radius: var(--radius-sm);
   cursor: pointer;
   color: var(--text-1);
+  user-select: none;
+}
+
+/* 開閉シェブロン（ui-mock .trow .twist 相当・ui-design 7章）。フォルダは ▾/▸、ファイルは同幅の空きで
+   名前を縦に揃える。装飾扱い（aria-hidden）。色は text-3・小さめで主張させない。 */
+#tree [role="treeitem"] .tree-twist {
+  flex: none;
+  width: 12px;
+  text-align: center;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-3);
   user-select: none;
 }
 

@@ -57,6 +57,7 @@ fn run() {
     // （command ディスパッチ）へ渡さない。
     let app_invoke: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
         commands::open_workspace,
+        commands::list_dir,
         commands::read_file,
         commands::save_file,
         commands::f5_resync,

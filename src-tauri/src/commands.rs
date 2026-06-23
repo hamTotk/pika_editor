@@ -37,17 +37,47 @@ pub fn open_workspace(
     if !dir.is_dir() {
         return Err(format!("フォルダではありません: {path}"));
     }
+    // 列挙・並び順は list_dir と同一規則を共有する（enumerate_dir）。
+    let entries = enumerate_dir(dir)?;
+    // 直下ファイルの差分ベースライン内容を取得する（全既読スタート＝要件8.1）。
+    // 機密/10MB以上/画像はハッシュのみ（pika-core::snapshot::policy が判定）。
+    for entry in &entries {
+        if !entry.is_dir {
+            capture_baseline_for(Path::new(&entry.path), &snapshot);
+        }
+    }
+
+    // 監視を開始（ベースライン取得・外部変更の emit）。監視不能 FS はポーリングへ縮退する。
+    watcher.watch_root(dir)?;
+    Ok(entries)
+}
+
+/// 指定フォルダ直下のエントリ一覧を**副作用なし**で列挙する（ツリーの子フォルダ遅延展開・UI T2）。
+///
+/// `open_workspace` は監視開始（`watch_root`）とベースライン取得という**副作用**を持つため、
+/// ツリーのサブフォルダ展開にそのまま流用すると監視ルートが子フォルダへ付け替わってしまう。
+/// 子の段階展開は「ワークスペース内の純粋な一段列挙」なので、ここでは I/O を読み取りのみに限定し
+/// 監視/スナップショットには一切触れない（design doc 3章: command 層は薄い境界）。
+/// 列挙・並び順は `open_workspace` と同一規則（`enumerate_dir`）を共有する。
+#[tauri::command]
+pub fn list_dir(path: String) -> Result<Vec<TreeEntry>, String> {
+    let dir = Path::new(&path);
+    if !dir.is_dir() {
+        return Err(format!("フォルダではありません: {path}"));
+    }
+    enumerate_dir(dir)
+}
+
+/// フォルダ直下のエントリを列挙し、安定順（フォルダ先・名前昇順）で返す。
+/// `open_workspace`（監視開始＋ベースライン取得つき）と `list_dir`（副作用なし展開）で共有する。
+/// 除外リスト/自然順/シンボリックリンク循環検出は後続スプリントで workspace モジュールへ移す。
+fn enumerate_dir(dir: &Path) -> Result<Vec<TreeEntry>, String> {
     let mut entries = Vec::new();
     let read = std::fs::read_dir(dir).map_err(|e| format!("読み取りに失敗: {e}"))?;
     for ent in read.flatten() {
         let p = ent.path();
         let name = ent.file_name().to_string_lossy().to_string();
         let is_dir = p.is_dir();
-        // 差分のベースライン内容を取得（全既読スタート＝要件8.1）。
-        // 機密/10MB以上/画像はハッシュのみ（pika-core::snapshot::policy が判定）。
-        if !is_dir {
-            capture_baseline_for(&p, &snapshot);
-        }
         entries.push(TreeEntry {
             name,
             path: p.to_string_lossy().to_string(),
@@ -56,9 +86,6 @@ pub fn open_workspace(
     }
     // 暫定の安定順（自然順は後続スプリントの workspace モジュールで実装）。
     entries.sort_by(|a, b| (b.is_dir, &a.name).cmp(&(a.is_dir, &b.name)));
-
-    // 監視を開始（ベースライン取得・外部変更の emit）。監視不能 FS はポーリングへ縮退する。
-    watcher.watch_root(dir)?;
     Ok(entries)
 }
 
