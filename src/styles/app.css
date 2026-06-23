@@ -634,15 +634,35 @@ body {
   cursor: pointer;
 }
 
-/* ステータスは右下固定・表示専用（ui-design §9）。クリック透過。 */
+/* ステータスは右下隅に貼り付く灰背景の帯（ui-design §9・ui-mock .status）。
+   右辺・下辺は画面端まで塗り、左上だけ角丸（Obsidian流）。表示専用＝クリック透過。
+   #app が position:relative なのでアプリ全体の右下隅に固定される。 */
 #status {
   position: absolute;
-  right: 8px;
-  bottom: 4px;
-  color: var(--text-3);
-  font-size: 12px;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-sunken);
+  color: var(--text-2);
+  font-size: 11.5px;
+  padding: 2px 10px;
+  border-top: 1px solid var(--border-1);
+  border-left: 1px solid var(--border-1);
+  border-radius: 7px 0 0 0;
   pointer-events: none;
   user-select: none;
+}
+
+/* セグメント（差分/行/文字）は淡色（text-2）。padding は帯側の gap で確保するため 0。 */
+#status .seg-s {
+  padding: 0;
+}
+
+/* カーソル位置だけ accent 色で色分けする（全体＝text-2 と弁別・ui-mock .status .cursor）。 */
+#status .cursor {
+  color: var(--accent);
 }
 
 /* ハイコントラスト/強制配色（要件11.5・design doc 10章/17章）。

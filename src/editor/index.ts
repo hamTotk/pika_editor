@@ -14,11 +14,26 @@ export interface CursorPos {
   column: number;
 }
 
+/** ステータス表示用のエディタ計測値（行数・文字数・カーソル・選択文字数＝要件11.1）。 */
+export interface EditorMetrics {
+  /** 総行数。 */
+  lines: number;
+  /** 総文字数（CM6 の doc.length＝コードユニット長）。 */
+  chars: number;
+  /** カーソル位置（1 始まり行・桁）。 */
+  cursorLine: number;
+  cursorColumn: number;
+  /** 選択中の文字数（未選択は 0）。 */
+  selectionChars: number;
+}
+
 export interface EditorHandle {
   /** 現在のバッファ内容を取得する（保存に使う）。 */
   getContent(): string;
   /** 現在のカーソル位置（1 始まり行・桁）を取得する（state.json 保存用・要件10.1）。 */
   getCursor(): CursorPos;
+  /** ステータス表示用の計測値（行数・文字数・カーソル・選択文字数）を取得する（要件11.1）。 */
+  getMetrics(): EditorMetrics;
   /** スクロール位置（先頭の表示行番号 1 始まり近似）を取得する（state.json 保存用・要件10.1）。 */
   getScrollTop(): number;
   /** 内容を差し替える（タブ切替時）。 */
@@ -56,11 +71,14 @@ const baseExtensions: Extension[] = [
  * @param parent エディタを描画する DOM 要素
  * @param initialDoc 初期内容
  * @param onChange 編集（dirty 化）通知。保存ボタンの活性に使う
+ * @param onCursorChange カーソル/選択/内容の変化通知。右下ステータスの追従更新に使う（要件11.1）。
+ *   selectionSet（カーソル移動・選択）または docChanged（編集）のたびに発火する。
  */
 export function createEditor(
   parent: HTMLElement,
   initialDoc: string,
   onChange: () => void,
+  onCursorChange?: () => void,
 ): EditorHandle {
   parent.replaceChildren();
 
@@ -71,6 +89,9 @@ export function createEditor(
       extensions: [
         ...baseExtensions,
         EditorView.updateListener.of((update) => {
+          // カーソル移動（selectionSet）または編集（docChanged）でステータスを追従させる（要件11.1）。
+          // 外部リロードも選択/内容が変わるので拾い、新しい行数・文字数・位置を反映させる。
+          if (update.selectionSet || update.docChanged) onCursorChange?.();
           // 外部リロード由来の変更は dirty 化しない（要件7.2: リロードは dirty にしない）。
           if (!update.docChanged) return;
           const isExternal = update.transactions.some((tr) => tr.annotation(ExternalReload));
@@ -91,6 +112,19 @@ export function createEditor(
       const head = view.state.selection.main.head;
       const line = view.state.doc.lineAt(head);
       return { line: line.number, column: head - line.from + 1 };
+    },
+    getMetrics: () => {
+      const doc = view.state.doc;
+      const sel = view.state.selection.main;
+      const line = doc.lineAt(sel.head);
+      return {
+        lines: doc.lines,
+        chars: doc.length,
+        cursorLine: line.number,
+        cursorColumn: sel.head - line.from + 1,
+        // 選択範囲の文字数（複数選択は主選択のみ・単純な end-start＝十分な近似）。
+        selectionChars: Math.abs(sel.to - sel.from),
+      };
     },
     getScrollTop: () => {
       // スクロール最上部に対応する行番号（1 始まり近似）。ピクセルでなく行で保持し、
