@@ -258,39 +258,116 @@ body {
   border-left: 1px solid var(--border-1);
 }
 
+/* タブバー（C1 フラット化・ui-mock .tabbar）。角丸カード調をやめ、帯は bg-window・
+   下端に区切り線。タブは border-right で区切り、アクティブは面の明るさ（bg-raised）で示す。 */
 #tabs {
   display: flex;
-  gap: 2px;
-  padding: 4px 4px 0;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  background: var(--bg-window);
   border-bottom: 1px solid var(--border-1);
-  min-height: 30px;
+  min-height: 35px;
   /* タブ列は常に row1 全幅（row2 が分割で 2 カラムになっても tabs は全幅を保つ）。 */
   grid-row: 1;
   grid-column: 1 / -1;
 }
 
+/* 個々のタブ（ui-mock .tab）。フラット・角丸なし・border-right の区切り・gap:7px・
+   padding は名前左に少しゆとり（0 8px 0 12px）。 */
 #tabs [role="tab"] {
   font: inherit;
+  font-size: 13px;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  border: 1px solid var(--border-1);
-  border-bottom: none;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-  background: var(--bg-sunken);
+  gap: 7px;
+  padding: 0 8px 0 12px;
+  border: none;
+  border-right: 1px solid var(--border-1);
+  border-radius: 0;
+  background: transparent;
   color: var(--text-2);
   cursor: pointer;
+  white-space: nowrap;
+  max-width: 200px;
 }
 
-/* 削除済みの取り消し線はタイトル span のみに掛け、未保存印 ● や削除記号 × には掛けない（F-028）。 */
+#tabs [role="tab"] .tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 削除済みの取り消し線はタイトル span のみに掛け、未保存印 ● や lead 記号には掛けない（F-028）。 */
 #tabs [role="tab"] .tab-title.removed {
   text-decoration: line-through;
+  color: var(--text-2);
 }
 
+/* アクティブは面の明るさで示す（下線アクセントなし・ui-mock .tab.active）。 */
 #tabs [role="tab"][aria-selected="true"] {
   background: var(--bg-raised);
   color: var(--text-1);
+}
+
+/* lead（タイトルの左）の状態記号（C3 配色）。差分あり ±＝accent・太字／新規 ◆＝diff-add 緑。 */
+#tabs [role="tab"] .tab-lead {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  flex: none;
+}
+
+#tabs [role="tab"] .tab-lead.new {
+  color: var(--diff-add-tx);
+}
+
+/* 閉じる位置（C3・ui-mock .tab .x）。通常は ✕（text-3）、ホバーで前面化。 */
+#tabs [role="tab"] .tab-x {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  user-select: none;
+}
+
+#tabs [role="tab"] .tab-x::before {
+  content: "\2715"; /* ✕ */
+}
+
+#tabs [role="tab"] .tab-x:hover {
+  background: var(--bg-hover);
+  color: var(--text-1);
+}
+
+/* 未保存＝閉じる位置に ●（accent）を出す（位置＋記号で弁別・色だけに依存しない）。
+   ホバー時は ✕ に変えて「閉じる」操作を示す（ui-mock .tab .x.dirty）。 */
+#tabs [role="tab"] .tab-x.dirty {
+  color: var(--accent);
+  font-size: 11px;
+}
+
+#tabs [role="tab"] .tab-x.dirty::before {
+  content: "\25CF"; /* ● */
+}
+
+#tabs [role="tab"] .tab-x.dirty:hover {
+  color: var(--text-1);
+  font-size: 12px;
+}
+
+#tabs [role="tab"] .tab-x.dirty:hover::before {
+  content: "\2715"; /* ホバーで ✕ へ＝閉じられることを示す */
+}
+
+/* 閉じるボタンのキーボードフォーカス可視化（要件11.5）。 */
+#tabs [role="tab"] .tab-x:focus-visible {
+  outline: 2px solid var(--accent, Highlight);
+  outline-offset: -2px;
 }
 
 /* タブのキーボードフォーカス可視化（←/→ 移動時に位置が分かる＝要件11.5）。 */
