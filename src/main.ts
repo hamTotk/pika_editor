@@ -95,6 +95,17 @@ interface OpenTab extends TabModel {
    * （永続はしない＝要件6.2「既定は必ずオフに戻る」）。renderActivePreview がこれを buildPreview へ渡す。
    */
   allowExternal?: string[];
+  /**
+   * 未保存編集の保持バッファ（eval high #11・最上位原則「データを失わない」）。
+   *
+   * タブは単一の CM6（state.editor）を共有し、タブ切替のたびに editor を destroy→再生成する。
+   * このため dirty タブから別タブへ切り替えると、退避先が無ければ編集中テキストが消える。さらに
+   * 再アクティブ化時に activateTab が openDocument でディスク内容を読み直して上書きすると未保存編集を
+   * 失う。これを防ぐため、**dirty タブから切り替える瞬間に編集中テキストをここへ退避**し、再アクティブ化
+   * では（dirty なら）ディスクでなくこの draft を CM6 へ載せる。保存（onSave）成功で dirty=false に
+   * なったら draft はクリアする（以後はディスク内容を正とする）。非 dirty タブは常に undefined。
+   */
+  draft?: string;
 }
 
 const state = {
@@ -405,11 +416,14 @@ async function activateTab(path: string): Promise<void> {
   if (tab) tab.allowExternal = undefined;
   // 削除済みタブはディスクから読めない。退避/ベースラインは snapshot に残るので、
   // 直近内容を空にしてエディタを出し「確認済み時点に戻す（rollback）」導線を保つ（eval high）。
+  // ただし削除済みタブを編集して別タブへ切り替えていた場合（dirty かつ draft あり）は、その未保存編集を
+  // 失わないよう draft を載せ直す（eval high #11・データを失わない）。
   if (tab?.deleted) {
+    const deletedContent = tab.dirty && tab.draft !== undefined ? tab.draft : "";
     state.editor?.destroy();
     state.editor = createEditor(
       editorHost(),
-      "",
+      deletedContent,
       () => markDirty(path),
       () => refreshStatus(),
       state.lineWrapping,
@@ -422,7 +436,11 @@ async function activateTab(path: string): Promise<void> {
     // open_document でエンコーディングを判定して開く（保存時に元エンコーディングを維持する＝要件5.2）。
     // 第2段階以降は text が空（仮想化ビューアは系統C）。通常/第1段階のテキストをエディタへ載せる。
     const doc = await openDocument(path);
-    const content = doc.text;
+    // 最新性チェック（eval high #10）: await 中に別タブへ切り替わっていたら以後の destroy/create を
+    // 一切行わずに抜ける。これをしないと、後着の openDocument 結果で現アクティブタブのエディタを
+    // 別パスの内容に作り替えてしまい、「アクティブタブと実エディタ内容がずれ」別タブ内容を別パスへ
+    // 保存しうる（最上位原則「データを失わない」）。古い起動は静かに破棄して構わない。
+    if (state.active !== path) return;
     if (tab) {
       // 検出エンコーディング/BOM/改行コードをタブに保持し、保存時 save_document へ渡す
       //（暗黙 UTF-8 化の防止・eval medium）。改行コードは表示メニューの現在値表示にも使う（要件5.2）。
@@ -430,6 +448,11 @@ async function activateTab(path: string): Promise<void> {
       tab.hasBom = doc.has_bom;
       tab.lineEnding = doc.line_ending;
     }
+    // 未保存編集を持つタブ（dirty かつ draft あり）は **ディスク内容で上書きしない**（eval high #11・
+    // データを失わない）。退避しておいた編集中テキスト（draft）を CM6 へ載せ直し、未保存状態を保つ。
+    // それ以外（非 dirty）は openDocument が読んだディスク/段階制テキストを正として載せる。
+    const hasDraft = tab?.dirty && tab.draft !== undefined;
+    const content = hasDraft ? (tab as OpenTab).draft! : doc.text;
     state.editor?.destroy();
     state.editor = createEditor(
       editorHost(),
@@ -444,7 +467,9 @@ async function activateTab(path: string): Promise<void> {
       notify(`エンコーディングを自動判定できず UTF-8 で開きました: ${tab?.title ?? path}`, "warn");
     }
     // 開いた内容の実ハッシュを記録する（復元の別物=未読判定に使う・eval high）。
-    void captureTabHash(path, content);
+    // draft（未保存編集）を載せたときはディスクと異なるので記録しない（contentHash はディスク/保存内容
+    // を表す素のままにする＝復元の別物判定を歪めない）。非 dirty 時のみディスク内容のハッシュを記録する。
+    if (!hasDraft) void captureTabHash(path, content);
     // タブに保持した位置（復元/前回アクティブ時）へカーソル/スクロールを戻す（要件10.1）。
     if (tab && (tab.cursorLine > 1 || tab.cursorColumn > 1 || tab.scrollTop > 1)) {
       state.editor.gotoPosition(tab.cursorLine, tab.cursorColumn);
@@ -508,7 +533,14 @@ function refreshStatus(): void {
   }
 }
 
-/** アクティブエディタのカーソル/スクロールを現在タブへ写す（保存前に呼ぶ・要件10.1）。 */
+/**
+ * アクティブエディタのカーソル/スクロール（と dirty 時の編集中テキスト）を現在タブへ写す。
+ * 保存前・タブ切替前（activateTab 冒頭）・状態保存前（collectAppState）に呼ぶ（要件10.1）。
+ *
+ * eval high #11: dirty なタブから切り替える瞬間に編集中テキストを tab.draft へ退避する。これにより
+ * 単一 CM6 を共有していても未保存編集がタブ切替で失われない（再アクティブ化で draft を載せ直す）。
+ * 非 dirty なら draft は持たない（ディスク/ベースラインが正なので退避不要）。
+ */
 function captureActivePosition(): void {
   if (!state.active || !state.editor) return;
   const tab = state.tabs.find((t) => t.path === state.active);
@@ -517,6 +549,10 @@ function captureActivePosition(): void {
   tab.cursorLine = cur.line;
   tab.cursorColumn = cur.column;
   tab.scrollTop = state.editor.getScrollTop();
+  // 未保存編集があるタブのみ編集中テキストを退避する（データを失わない）。
+  if (tab.dirty) {
+    tab.draft = state.editor.getContent();
+  }
 }
 
 function markDirty(path: string): void {
@@ -734,6 +770,8 @@ async function saveOnce(
     }
     if (tab) {
       tab.dirty = false;
+      // 保存できたので未保存編集の退避バッファは不要（以後はディスク内容が正・eval high #11）。
+      tab.draft = undefined;
       // 保存内容を以後の復元基準にする（このセッションで開き直す/復元時の別物判定の素・eval high）。
       // 削除済みタブを保存し直したら実体が復活したので削除フラグを解除する。
       tab.deleted = false;
@@ -771,10 +809,18 @@ async function onToggleDiff(): Promise<void> {
 /** アクティブタブの差分（ベースライン vs 編集バッファ/ディスク）を計算し描画する（要件8.2）。 */
 async function renderActiveDiff(): Promise<void> {
   if (!state.active) return;
+  // 対象パスを冒頭で固定する（eval medium #28）。await（readFile/computeFileDiff）中にタブ切替・差分
+  // トグル連打が起きると state.active は別パスへ動きうる。プレビュー（previewSerializer）と同じ流儀で
+  // 最新性ガードを入れ、古い差分結果が後着して別タブの差分を描画するのを防ぐ。
+  const path = state.active;
   // タブで開いていれば編集バッファ、なければディスク内容を current に渡す（要件8.2）。
-  const current = state.editor ? state.editor.getContent() : await readFile(state.active);
+  const current = state.editor ? state.editor.getContent() : await readFile(path);
+  // readFile 後に別タブへ動いていたら破棄（後着の差分で別タブを汚さない）。
+  if (state.active !== path) return;
   try {
-    const diff = await computeFileDiff(state.active, current);
+    const diff = await computeFileDiff(path, current);
+    // computeFileDiff 後にも最新性を再確認（差分計算中の切替も破棄する）。
+    if (state.active !== path) return;
     state.diff?.destroy();
     state.diff = renderDiff(diffHost(), diff);
     // 占有はモード×差分トグルの直交で解決する（プレビュー+差分は左右並置＝ui-design 8章）。
@@ -1042,11 +1088,35 @@ async function onConfirmAll(): Promise<void> {
       );
       const result = await confirmAll(targets);
       // 確認済みになったものを未読から外す（スキップ分は未読維持＝要件8.3）。
-      // backend がスキップしたファイルは差分時点と変わっているので再差分が必要。
       if (result.skipped === 0) {
+        // 全件確定。フリーズ集合をそのまま未読解除する（最も単純で正しい）。
         for (const path of targets) state.unread.clearFile(path);
+      } else if (result.updated > 0) {
+        // 1件でもスキップがある混在ケース（eval medium #26）。
+        // 旧実装は「skipped===0 のときだけ全クリア」だったため、混在時は確定済み（updated 件）の
+        // 未読まで残し続け UI と backend が乖離していた。confirm_all の戻り値は件数のみで「どのパスを
+        // 確定したか」を返さないため、ここでは backend 真実へ再同期する：確定済みパスは backend が
+        // ベースラインを現ディスク内容へ更新済みなので、再度ディスク内容で差分を取れば change_count===0
+        // になる。スキップ（処理中に変化）したパスは依然差分が残る（>0）。この per-path 再照合で
+        // 確定できたパスだけを正確に未読解除する。退避は backend 側で取れているのでデータ喪失はない。
+        // 各パスは独立なので並行化して IPC ラウンドトリップの直列線形劣化を避ける。
+        const confirmedFlags = await Promise.all(
+          targets.map(async (path) => {
+            try {
+              const disk = await readFile(path);
+              const fresh = await computeFileDiff(path, disk);
+              return fresh.change_count === 0;
+            } catch {
+              // 再照合に失敗したパスは安全側で未読のまま残す（誤って既読化しない）。
+              return false;
+            }
+          }),
+        );
+        targets.forEach((path, i) => {
+          if (confirmedFlags[i]) state.unread.clearFile(path);
+        });
       }
-      // スキップがある場合は安全側で未確定を未読のまま残す（退避は取れているのでデータ喪失なし）。
+      // updated===0（全スキップ）のときは未読を一切触らない（全件未確定のまま残す）。
       refreshTree();
       refreshTabs();
       refreshStatus(); // 差分あり数（差分 N）を更新。
@@ -1425,16 +1495,20 @@ function buildMenuSpecs(): MenuSpec[] {
  * 受理操作=パスオープン限定なので、ここでは「ファイルを開く（あれば -g 位置へ）」だけを行う。
  */
 async function onOpenRequestEvent(payload: OpenRequestPayload): Promise<void> {
+  // -g カーソル位置は paths 先頭ファイルに対応する規約（ipc.rs OpenRequest）。
+  // 先頭パスを覚えておき、ループ内で「これが先頭か」を判定して goto を適用する（eval medium #27）。
+  // 旧実装はループ後に先頭を **もう一度** openPath して二重に開き、かつ goto 対象がレースで
+  // 別タブに当たりうる欠陥があった。ここでは二重オープンをやめ、各パスは一度だけ開く。
+  const gotoTarget = payload.goto && payload.paths.length > 0 ? payload.paths[0] : null;
   for (const path of payload.paths) {
     await openPath(path);
-  }
-  // -g カーソル位置は paths 先頭ファイルに対応する規約（ipc.rs OpenRequest）。
-  // 複数パス時はループ末尾でなく先頭タブをアクティブにしてからカーソルを置く（eval medium）。
-  if (payload.goto && payload.paths.length > 0) {
-    const first = payload.paths[0];
-    await openPath(first);
-    if (state.editor) {
-      state.editor.gotoPosition(payload.goto.line, payload.goto.column ?? 1);
+    // 先頭パスを開いた直後（このパスがアクティブ＝state.active）にだけ goto を適用する。
+    // openPath はファイルを開くとそのタブをアクティブ化する（openFile→activateTab・#10 の最新性
+    // ガード適用済み）。activateTab が別タブへ切り替わっていたら適用しない（取り違え防止）。
+    if (gotoTarget !== null && path === gotoTarget && payload.goto) {
+      if (state.active === path && state.editor) {
+        state.editor.gotoPosition(payload.goto.line, payload.goto.column ?? 1);
+      }
     }
   }
 }
@@ -1471,6 +1545,11 @@ function openNewFileTab(path: string, name: string): void {
     // 新規（未保存）なのでタブを dirty にせず、保存で実体を作る。空内容の hash を記録しておく。
     state.tabs.push(tab);
   }
+  // この経路は activateTab を通らず直接 editor を破棄/再生成する。切替前に現アクティブタブの未保存編集を
+  // draft へ退避しておく（eval high #11・データを失わない）。退避漏れがあると、dirty タブがアクティブな
+  // ときに「存在しないパス」を開くと editor 破棄で未保存編集が消え、戻っても draft===undefined で
+  // 黙ってディスク内容を読み直してしまう。activateTab/collectAppState と同じ前置きで全経路を airtight にする。
+  captureActivePosition();
   state.active = path;
   state.editor?.destroy();
   state.editor = createEditor(
@@ -1758,7 +1837,15 @@ function closeTab(path: string): void {
     return;
   }
   // アクティブを閉じたので隣のタブへアクティブを移す（無ければエディタを畳む）。
-  const next = state.tabs[idx] ?? state.tabs[idx - 1] ?? null;
+  //
+  // 意図（eval medium #29）: **右隣を優先**する。VSCode/一般エディタの慣習で、タブを閉じると
+  // すぐ右のタブへ移る（末尾を閉じたときだけ左隣＝新しい末尾へ移る）。
+  // フィルタ後の配列では、閉じたタブの右隣は元の id+1 が左へ詰まって **新配列の idx** に来る。
+  // 末尾を閉じた（idx === newTabs.length）ときは新配列に idx が無いので、Math.min で末尾
+  // （= 元の左隣）へクランプする。空配列（最後の1枚を閉じた）は -1 になり next=null へ落ちる。
+  const newTabs = state.tabs;
+  const nextIdx = newTabs.length === 0 ? -1 : Math.min(idx, newTabs.length - 1);
+  const next = nextIdx >= 0 ? newTabs[nextIdx] : null;
   if (next) {
     void activateTab(next.path);
   } else {
@@ -1856,7 +1943,16 @@ async function main(): Promise<void> {
   // 単一インスタンス転送（要件3.4）: 既存インスタンスへ後続プロセスが投げたパスを開く。
   await onOpenRequest((payload) => void onOpenRequestEvent(payload));
   // 終了直前にアプリ状態を保存（要件10.1。アトミック書込は backend）。デバウンス待ちでなく即時 flush。
-  window.addEventListener("beforeunload", () => void persistAppStateNow());
+  // 保留中のデバウンスタイマーを必ず先にクリアする（eval medium #30）。クリアしないと、終了直前の
+  // 即時 flush 後にデバウンス分が後から発火し、二重保存や（終了で UI が消えた後の）未完走で
+  // 終了直前保存が取りこぼされうる。タイマーを止めてから 1 回だけ確実に書く。
+  window.addEventListener("beforeunload", () => {
+    if (persistTimer !== null) {
+      window.clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+    void persistAppStateNow();
+  });
   // 起動時に state.json を復元（version 安全側・復元3分岐は backend が判定）。
   await restoreOnStartup();
   // Empty 3分岐の「フォルダ未オープン（no-folder）」文言（ui-design 15章）。
