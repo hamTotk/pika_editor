@@ -188,6 +188,24 @@ mod tests {
     }
 
     #[test]
+    fn 保護退避と削除可能退避が混在し削除しても上限に収まらない() {
+        // 削除可能退避を全部消しても保護退避が大きく上限超過が残るケース（#38）。
+        let cfg = small_config(); // 上限100・protect_window=1000
+                                  // a=削除可能(復元済み40)・b,c=保護(未復元かつ14日以内 各60)
+                                  // 合計 40+60+60=160 → 60 超過。
+        let objs = [
+            obj("a", 40, 100, false), // 復元済み＝削除可能。
+            obj("b", 60, 200, true),  // 未復元・now-created=300<=1000 で保護。
+            obj("c", 60, 300, true),  // 未復元・保護。
+        ];
+        let plan = plan_gc(&cfg, &objs, 0, 500);
+        // 削除は実行する（削除可能な a は消す）。
+        assert_eq!(plan.delete_objects, vec!["a".to_string()]);
+        // a を消しても 120 で上限100 を 20 超過＝保護退避分の超過バイトを返す（削除しない・要件9.3）。
+        assert_eq!(plan.protected_overflow_bytes, 20);
+    }
+
+    #[test]
     fn 保護期間を過ぎた未復元は削除候補() {
         let cfg = small_config(); // protect_window=1000
                                   // now=5000・created=100 → 経過4900>1000 で保護切れ。
