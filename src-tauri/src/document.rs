@@ -93,8 +93,16 @@ fn line_ending_dto(le: encoding::LineEnding) -> &'static str {
 }
 
 /// 文書を開く（巨大ファイル段階制＋エンコーディング自動判定・要件2.2/5.2）。
+///
+/// #5: 先頭で `access.verify_read` を通し、ワークスペース配下/許可ファイルへ封じ込める
+/// （任意パスを開けないようにする）。以後の I/O は canonicalize 済み実体パスで行う。
 #[tauri::command]
-pub fn open_document(path: String) -> Result<OpenedDocument, String> {
+pub fn open_document(
+    path: String,
+    access: State<'_, crate::access::AccessControl>,
+) -> Result<OpenedDocument, String> {
+    let canon = access.verify_read(&path)?;
+    let path = canon.to_string_lossy().to_string();
     let size = std::fs::metadata(&path)
         .map_err(|e| format!("メタデータ取得に失敗: {e}"))?
         .len();
@@ -190,7 +198,11 @@ pub fn save_document(
     force_utf8: bool,
     watcher: State<'_, crate::watcher::WatcherService>,
     snapshot: State<'_, crate::snapshot::SnapshotService>,
+    access: State<'_, crate::access::AccessControl>,
 ) -> Result<SaveResultDto, String> {
+    // #5/#46: 書込先を封じ込め（親ディレクトリの canonicalize で symlink/junction 経由の外部上書きも防ぐ）。
+    // 既存の退避先行（stash_incoming_before_overwrite）・atomic_write はこの後そのまま実行する。
+    access.verify_write(&path)?;
     let bytes = if force_utf8 {
         encoding::encode_as_utf8(&content)
     } else {
@@ -342,7 +354,11 @@ pub fn read_range(
     path: String,
     center: u64,
     window: Option<u64>,
+    access: State<'_, crate::access::AccessControl>,
 ) -> Result<RangeWindowDto, String> {
+    // #5: 範囲読取も封じ込めを通す（仮想化ビューアで任意パスを読めないようにする）。
+    let canon = access.verify_read(&path)?;
+    let path = canon.to_string_lossy().to_string();
     let size = std::fs::metadata(&path)
         .map_err(|e| format!("メタデータ取得に失敗: {e}"))?
         .len();

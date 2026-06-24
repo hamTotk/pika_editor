@@ -188,6 +188,13 @@ mod windows_impl {
                 if let Some(req) = read_and_validate(handle) {
                     // 受理操作=パスオープン限定。フロントへ「開け」を送り既存ウィンドウを前面化する。
                     let payload: OpenRequestPayload = req.into();
+                    // #5: emit より前に、転送パスをアクセス制御へ個別許可する（後続の openFile が通るよう
+                    // open-request 受信前に許可登録しておく）。ac 未登録（極端な異常系）でも emit は行う。
+                    if let Some(ac) = app.try_state::<crate::access::AccessControl>() {
+                        for p in &payload.paths {
+                            ac.allow_file(p);
+                        }
+                    }
                     let _ = app.emit("open-request", &payload);
                     bring_to_front(&app);
                 }

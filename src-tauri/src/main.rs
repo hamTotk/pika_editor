@@ -12,6 +12,7 @@
 // debug 時はパニックログを見たいので console を残す。
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
+mod access;
 mod commands;
 mod diagnostic;
 mod document;
@@ -59,7 +60,6 @@ fn run() {
         commands::open_workspace,
         commands::list_dir,
         commands::read_file,
-        commands::save_file,
         commands::f5_resync,
         commands::save_app_state,
         commands::restore_app_state,
@@ -129,6 +129,9 @@ fn run() {
             app.manage(watcher::WatcherService::new(app.handle().clone()));
             // スナップショット/差分/確認済みサービス（ベースライン索引＋内容 object）を登録する。
             app.manage(snapshot::SnapshotService::new());
+            // パスアクセス制御（任意ファイル読み書き封じ込め・#5/#46）。open_workspace で root を張り、
+            // open-request / restore タブで個別ファイルを許可する。I/O command はこのゲートを通す。
+            app.manage(access::AccessControl::new());
             // プレビューサービス（サニタイズ済みレスポンスを世代キーで保持・custom protocol が引く）。
             app.manage(preview::PreviewService::new());
             // 検索/置換のキャンセルトークン置き場（新しい検索で前のを打ち切る＝固まらない・要件5.4）。

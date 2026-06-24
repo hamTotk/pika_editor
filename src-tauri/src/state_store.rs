@@ -15,9 +15,30 @@ use pika_core::state::{
     TabState, WorkspaceRestore,
 };
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 /// データルート配下の state.json ファイル名。
 const STATE_FILE: &str = "state.json";
+
+/// state.json の read-modify-write を直列化するプロセス内ロック（#21 lost update 対策）。
+///
+/// `note_recent`（recent 追記）と `save_app_state`（タブ/ウィンドウ状態保存）は、いずれも
+/// `load_for_update → 加工 → save` の RMW を行う。両者が並行すると後勝ちで一方の更新を取りこぼす
+/// （recent が消える/タブ状態が巻き戻る）。RMW 区間全体をこのロックで囲んで不可分化する。
+static STATE_IO_LOCK: Mutex<()> = Mutex::new(());
+
+/// 一時ファイル名の連番カウンタ（#21 tmp 名衝突回避）。同一 PID 内で複数の save が並行しても
+/// tmp 名が衝突しないよう PID＋連番で一意化する（rename 元の相互上書きを構造的に防ぐ）。
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// state.json の RMW を直列化するロックを取得する（#21）。
+///
+/// `note_recent` / `save_app_state` の冒頭で `let _g = state_store::lock_io();` として保持し、
+/// load→save を不可分にする。ロックが毒化していても `into_inner` で続行する（保存を止めない）。
+pub fn lock_io() -> std::sync::MutexGuard<'static, ()> {
+    STATE_IO_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// 復元の総合結果（フロントへ渡す前の中間表現）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,8 +84,9 @@ pub fn save(root: &DataRoot, state: &AppState) -> Result<(), String> {
     std::fs::create_dir_all(&root.path).map_err(|e| format!("データルート作成に失敗: {e}"))?;
     let json = state.to_json().map_err(|e| format!("{e}"))?;
     let target = state_path(root);
-    // 一時ファイルは PID 固有名（同居プロセスの tmp 競合を構造的に排除）。
-    let tmp = target.with_extension(format!("json.{}.tmp", std::process::id()));
+    // 一時ファイルは PID＋連番固有名（同居プロセス／同一 PID 内の並行 save の tmp 競合を構造的に排除・#21）。
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = target.with_extension(format!("json.{}.{}.tmp", std::process::id(), seq));
     write_synced(&tmp, json.as_bytes()).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("一時ファイル書込に失敗: {e}")
