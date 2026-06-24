@@ -48,11 +48,6 @@ export function pathKind(path: string): Promise<"file" | "dir" | "missing"> {
   return invoke<"file" | "dir" | "missing">("path_kind", { path });
 }
 
-/** ファイルを保存する。保存後ハッシュで自己保存を抑制する（backend 側・要件7.1）。 */
-export function saveFile(path: string, content: string): Promise<void> {
-  return invoke<void>("save_file", { path, content });
-}
-
 /** F5（要件7.1/11.2）= オンデマンドの全体再スキャン＋再同期。検知件数を返す。 */
 export function f5Resync(): Promise<number> {
   return invoke<number>("f5_resync");

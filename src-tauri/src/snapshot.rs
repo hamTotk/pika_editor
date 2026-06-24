@@ -180,7 +180,12 @@ pub fn compute_file_diff(
     path: String,
     current: String,
     snapshot: State<'_, SnapshotService>,
+    _access: State<'_, crate::access::AccessControl>,
 ) -> Result<FileDiffDto, String> {
+    // #5: compute_file_diff は FS 読みをしない（current は frontend が渡す）。新規パスは canonicalize で
+    // 落ちうるため、ここでは健全性検査（絶対パス/制御文字/ADS/相対拒否）のみを通す。FS 読みのある
+    // confirm_file/rollback_file 側で verify_read による封じ込めを担保する（一貫性のための入口検査）。
+    pika_core::path_verify::verify_received_path(&path).map_err(|e| e.to_string())?;
     let mut inner = snapshot.inner.lock().map_err(|_| "snapshot ロック失敗")?;
     let key = normalize_path_key(&path);
 
@@ -222,7 +227,14 @@ pub fn compute_file_diff(
 /// 「確認済みにする」（要件8.3）。差分提示時点と現ディスクを再照合し、変化していなければ
 /// ベースラインを差分時点内容へ更新する。変化していれば中断して再差分を促す。
 #[tauri::command]
-pub fn confirm_file(path: String, snapshot: State<'_, SnapshotService>) -> Result<bool, String> {
+pub fn confirm_file(
+    path: String,
+    snapshot: State<'_, SnapshotService>,
+    access: State<'_, crate::access::AccessControl>,
+) -> Result<bool, String> {
+    // #5: ディスク再読みするため verify_read で封じ込める。索引キーは baseline 設定時と同じ
+    // 元パス（正規化前）由来にする（key の一致を保つ）。FS 読みは canon 実体パスで行う。
+    let canon = access.verify_read(&path)?;
     let mut inner = snapshot.inner.lock().map_err(|_| "snapshot ロック失敗")?;
     let key = normalize_path_key(&path);
 
@@ -232,7 +244,7 @@ pub fn confirm_file(path: String, snapshot: State<'_, SnapshotService>) -> Resul
 
     // 確定直前にディスクを実読みして再照合（mtime 据え置きの取りこぼし対策にハッシュも見る）。
     let disk_content =
-        std::fs::read_to_string(&path).map_err(|e| format!("ディスク再読みに失敗: {e}"))?;
+        std::fs::read_to_string(&canon).map_err(|e| format!("ディスク再読みに失敗: {e}"))?;
     let disk = DiskState {
         mtime_ms: file_mtime_ms(&path),
         content_hash: hash_normalized(&disk_content),
@@ -265,7 +277,13 @@ pub fn confirm_file(path: String, snapshot: State<'_, SnapshotService>) -> Resul
 /// 退避不能（ベースラインがハッシュのみ／現在内容が10MB以上・画像）はブロックする。
 /// 許可される場合は現在内容を rollback 退避してからベースライン内容を返す（呼び出し側が上書き）。
 #[tauri::command]
-pub fn rollback_file(path: String, snapshot: State<'_, SnapshotService>) -> Result<String, String> {
+pub fn rollback_file(
+    path: String,
+    snapshot: State<'_, SnapshotService>,
+    access: State<'_, crate::access::AccessControl>,
+) -> Result<String, String> {
+    // #5: ディスク再読みするため verify_read で封じ込める。索引キーは元パス由来（baseline と一致）。
+    let canon = access.verify_read(&path)?;
     let mut inner = snapshot.inner.lock().map_err(|_| "snapshot ロック失敗")?;
     let key = normalize_path_key(&path);
 
@@ -277,7 +295,7 @@ pub fn rollback_file(path: String, snapshot: State<'_, SnapshotService>) -> Resu
     };
 
     let disk_content =
-        std::fs::read_to_string(&path).map_err(|e| format!("ディスク再読みに失敗: {e}"))?;
+        std::fs::read_to_string(&canon).map_err(|e| format!("ディスク再読みに失敗: {e}"))?;
     let current_storable = baseline_policy(&path, disk_content.len() as u64).stores_content();
 
     // pika-core の退避不能ガードで判定（要件7.3）。

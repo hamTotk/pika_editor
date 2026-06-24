@@ -32,11 +32,14 @@ pub fn open_workspace(
     path: String,
     watcher: State<'_, WatcherService>,
     snapshot: State<'_, SnapshotService>,
+    access: State<'_, crate::access::AccessControl>,
 ) -> Result<Vec<TreeEntry>, String> {
     let dir = Path::new(&path);
     if !dir.is_dir() {
         return Err(format!("フォルダではありません: {path}"));
     }
+    // アクセス制御のルートを張る（#5）。以後この配下の read_file/open_document/save_document が通る。
+    access.set_root(&path);
     // 列挙・並び順は list_dir と同一規則を共有する（enumerate_dir）。
     let entries = enumerate_dir(dir)?;
     // 直下ファイルの差分ベースライン内容を取得する（全既読スタート＝要件8.1）。
@@ -89,37 +92,46 @@ fn enumerate_dir(dir: &Path) -> Result<Vec<TreeEntry>, String> {
     Ok(entries)
 }
 
-/// 差分のベースライン内容を取得する（要件8.1）。テキスト読取に失敗（バイナリ等）は
-/// サイズだけ渡してハッシュのみベースライン化を pika-core 判定に委ねる。
+/// 差分のベースライン内容を取得する（要件8.1・#20/#54）。
+///
+/// 機密/画像/10MB以上（policy=HashOnly）は **内容を read せず**ハッシュのみ経路へ倒す
+/// （機密ファイルの平文を read_to_string で展開しない＝#20）。StoreContent のときだけ全文を読み、
+/// バイナリ等で読めなければ内容保存に適さないため空内容のまま渡す（#54・データ最小化）。
 fn capture_baseline_for(path: &Path, snapshot: &SnapshotService) {
+    use pika_core::snapshot::baseline_policy;
     let path_str = path.to_string_lossy().to_string();
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    let content = std::fs::read_to_string(path).unwrap_or_default();
+    // policy 判定を read より先に行う（HashOnly なら平文を一切読まない）。
+    let content = if baseline_policy(&path_str, size).stores_content() {
+        // StoreContent でも読めない（バイナリ等）なら空内容で渡す（#54）。
+        std::fs::read_to_string(path).unwrap_or_default()
+    } else {
+        // HashOnly 方針（機密/画像/10MB以上）: 内容を読まない（#20 機密平文の展開回避）。
+        String::new()
+    };
     snapshot.capture_baseline(&path_str, &content, size);
 }
 
-/// ファイル内容を読む（最薄ループ）。エンコーディング判定は sprint 6 の document へ。
-#[tauri::command]
-pub fn read_file(path: String) -> Result<String, String> {
-    std::fs::read_to_string(&path).map_err(|e| format!("読み込みに失敗: {e}"))
-}
-
-/// ファイルを保存する。保存直前に自己保存トークンを登録し、watcher の自己イベントを抑制する。
+/// ファイル内容を読む（エンコーディング自動判定・封じ込め・巨大ファイルガード）。
 ///
-/// 自己保存抑制（要件7.1）: 保存内容を LF 正規化したハッシュをトークンとして登録する。
-/// watcher 側は現ディスク内容のハッシュ一致をもってワンショットで抑制する（未読を付けない）。
-/// アトミック書込（一時ファイル→置換）は sprint 6 で document へ移す。
+/// - #5: `access.verify_read` で「ワークスペース配下/許可ファイル」へ封じ込め、任意パスを塞ぐ。
+/// - #7: BOM/UTF-16/Shift_JIS を判定してデコードする（read_to_string の UTF-8 固定で Shift_JIS が
+///   破損していた欠陥の修正）。判定は pika-core::encoding（cargo test 済み）。
+/// - 巨大ファイルガード: 500MB 上限超は読み込まない（OOM 回避＝固まらない）。
 #[tauri::command]
-pub fn save_file(
+pub fn read_file(
     path: String,
-    content: String,
-    watcher: State<'_, WatcherService>,
-) -> Result<(), String> {
-    // 保存後ハッシュを先に算出して登録（watcher イベントより先に勝つ必要があるため保存前に登録）。
-    let saved_hash = hash_normalized_lf(content.as_bytes());
-    watcher.register_self_save(&path, &saved_hash);
-    // エラーは素の原因（OS エラー等）を返し、文脈の接頭辞は frontend で一元的に付ける（F-027 二重接頭辞回避）。
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+    access: State<'_, crate::access::AccessControl>,
+) -> Result<String, String> {
+    let canon = access.verify_read(&path)?;
+    let size = std::fs::metadata(&canon)
+        .map_err(|e| e.to_string())?
+        .len();
+    if !pika_core::huge::FileStage::from_size(size).can_open() {
+        return Err("ファイルが大きすぎて読み込めません".into());
+    }
+    let bytes = std::fs::read(&canon).map_err(|e| e.to_string())?;
+    Ok(pika_core::encoding::decode(&bytes).text)
 }
 
 /// 最近使った項目の種別（ファイル/フォルダ）。
@@ -141,6 +153,8 @@ pub fn note_recent(
     kind: RecentKind,
     path: String,
 ) -> Result<pika_core::recent::RecentList, String> {
+    // state.json の RMW を直列化（#21 lost update 対策）。save_app_state と同一ロックで保護する。
+    let _io = state_store::lock_io();
     let root = state_store::resolve()?;
     match state_store::load_for_update(&root) {
         // 既知バージョン or 初回（ファイル無し）→ 追記して保存する。
@@ -177,7 +191,7 @@ pub fn path_kind(path: String) -> String {
 
 /// 内容の LF 正規化ハッシュを返す（state.json のタブ content_hash 算出・要件10.1/13）。
 ///
-/// 自己保存抑制（save_file）・復元の別物判定（state_store::probe_path）と**同一規則**
+/// 自己保存抑制（save_document）・復元の別物判定（state_store::probe_path）と**同一規則**
 /// （pika_core::hashing）で計算する。フロントは開く/保存/外部リロード時にこれを呼んで
 /// タブの content_hash を実値で詰める（eval high: ダミー値固定の解消）。算出は cheap で
 /// 開く/保存時のみ呼ぶためホットパスではない。
@@ -203,6 +217,8 @@ pub fn f5_resync(watcher: State<'_, WatcherService>) -> Result<usize, String> {
 /// （フロントは recent を空で送る規約。二重管理による取りこぼしを構造的に防ぐ）。
 #[tauri::command]
 pub fn save_app_state(mut state: AppState) -> Result<(), String> {
+    // state.json の RMW を直列化（#21 lost update 対策）。note_recent と同一ロックで保護する。
+    let _io = state_store::lock_io();
     let root = state_store::resolve()?;
     if let state_store::LoadForUpdate::Editable(existing) = state_store::load_for_update(&root) {
         state.recent = existing.recent;
@@ -239,7 +255,9 @@ pub struct RestoreOutcomeDto {
 ///
 /// version 安全側・復元3分岐の判定はすべて pika-core::state。ここは FS 確認と DTO 変換のみ。
 #[tauri::command]
-pub fn restore_app_state() -> Result<RestoreOutcomeDto, String> {
+pub fn restore_app_state(
+    access: State<'_, crate::access::AccessControl>,
+) -> Result<RestoreOutcomeDto, String> {
     let root = state_store::resolve()?;
     let outcome = state_store::restore(&root);
 
@@ -249,7 +267,13 @@ pub fn restore_app_state() -> Result<RestoreOutcomeDto, String> {
         WorkspaceRestore::NoWorkspace => ("no-workspace".to_string(), None),
     };
 
-    let tabs = outcome
+    // 復元するワークスペース/タブをアクセス制御に許可する（#5）。後続の openFile/openDocument が
+    // 通るよう、DTO を返す**前に**登録する（frontend が復元タブを開くより必ず先になる）。
+    if let Some(ws) = &workspace_path {
+        access.set_root(ws);
+    }
+
+    let tabs: Vec<RestoredTabDto> = outcome
         .tabs
         .into_iter()
         .map(|t| match t {
@@ -267,6 +291,11 @@ pub fn restore_app_state() -> Result<RestoreOutcomeDto, String> {
             },
         })
         .collect();
+
+    // 各復元タブのパスを個別許可する（単体ファイル復元や workspace 外のタブも開けるように）。
+    for t in &tabs {
+        access.allow_file(&t.tab.path);
+    }
 
     Ok(RestoreOutcomeDto {
         workspace_status,
