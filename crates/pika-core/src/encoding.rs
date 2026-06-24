@@ -15,6 +15,13 @@
 //! 4. いずれも妥当でなければ **UTF-8 として開き警告**を立てる（誤判定対策の Reopen は表示メニュー）。
 //!    UTF-8 で開けてもヌルバイトを多く含むなら（UTF-16 取りこぼしの疑い）警告を立てて Reopen を促す。
 //!
+//! **低ヌルの日本語 UTF-16 は自動判定しない（警告のみ）**: 日本語（ひらがな/カタカナ U+3040〜30FF・
+//! 漢字 U+4E00〜 等）主体の BOM なし UTF-16 はヌルバイトをほぼ含まず（例 `"あいうえお"` の UTF-16LE は
+//! `42 30 44 30 …` でヌル 0 個）、しかもそのバイト列は妥当な ASCII/UTF-8（全バイト < 0x80）と**同一**に
+//! なり得る（`"B0D0F0H0J0"` と区別不能）。内容解析だけでは曖昧で、自動切替は正当な ASCII を逆に壊す。
+//! そこで**デコード既定（UTF-8）は変えず**、UTF-16 らしいシグネチャを検出したら `had_decode_warning` を
+//! 立てて利用者に再読込を委ねる（無言のデータ喪失だけは防ぐ＝最上位原則「データを失わない」）。
+//!
 //! 改行（要件5.2/5.6）: 読込時は元の改行をそのまま保持し（混在改行も統一しない）、保存時も
 //! バイト列として維持する。本モジュールは**文字エンコード変換のみ**を担い、改行の書き換えはしない。
 
@@ -130,10 +137,13 @@ pub fn decode(bytes: &[u8]) -> DecodedFile {
     for enc in [TextEncoding::Utf8, TextEncoding::ShiftJis] {
         if let Some(text) = decode_strict(enc, bytes) {
             let line_ending = classify_line_ending(&text);
-            // UTF-8 として妥当でもヌルバイトを多く含むなら UTF-16 取りこぼしの疑い＝警告して Reopen を促す
-            //（ヒューリスティックを通り抜けた縁ケースの保険・要件5.2）。
-            let had_decode_warning =
-                enc == TextEncoding::Utf8 && null_byte_ratio(bytes) >= UTF16_NULL_RATIO;
+            // UTF-8 として妥当でも UTF-16 取りこぼしの疑いがあれば警告して Reopen を促す（採用は UTF-8 のまま）:
+            //  (a) ヌルバイトを多く含む（自動切替ヒューリスティックを通り抜けた縁ケースの保険）。
+            //  (b) 低ヌルだが日本語 UTF-16 らしいシグネチャ（`"あいうえお"`(UTF-16LE) ≡ ASCII で
+            //      自動判定できない域。デコード既定は壊さず警告のみ＝無言喪失防止・要件5.2）。
+            let had_decode_warning = enc == TextEncoding::Utf8
+                && (null_byte_ratio(bytes) >= UTF16_NULL_RATIO
+                    || looks_like_bomless_utf16_text(bytes));
             return DecodedFile {
                 line_ending,
                 text,
@@ -165,12 +175,18 @@ impl DecodedFile {
     }
 }
 
-/// BOM なし UTF-16 と判定するヌルバイト比率の閾値（ASCII 主体の UTF-16 は約半分がヌル）。
+/// BOM なし UTF-16 を**自動切替**するヌルバイト比率の閾値（ASCII 主体の UTF-16 は約半分がヌル）。
 ///
 /// ASCII 文字 1 つが UTF-16 では 2 バイト（うち 1 バイトがヌル）になるため、英数主体テキストでは
-/// ヌルバイトがおよそ 50% を占める。日本語主体（U+3000 以上）はヌルが減るが、それでも UTF-8/Shift_JIS
-/// の通常テキスト（ヌルをほぼ含まない）とは明確に分離できる。誤判定（通常テキストを UTF-16 扱い）を
-/// 避けるため保守的に 0.25 を採る（通常テキストはヌルバイトを基本含まない＝0 付近）。
+/// ヌルバイトがおよそ 50% を占める。これは通常テキスト（ヌルをほぼ含まない）と曖昧性が低いので
+/// [`detect_bomless_utf16`] で**自動切替**してよい。誤判定（通常テキストを UTF-16 扱い）を避けるため
+/// 保守的に 0.25 を採る（通常テキストはヌルバイトを基本含まない＝0 付近）。
+///
+/// **注意**: 日本語主体（U+3040〜30FF のひらがな/カタカナ・U+4E00〜 の漢字 等）の UTF-16 はヌルが
+/// ほぼ無く（高位バイトが 0x30/0x4E〜0x7F でヌルにならない）、しかもそのバイト列は妥当な ASCII と
+/// **同一**になり得る（例 `"あいうえお"`(UTF-16LE) ≡ `"B0D0F0H0J0"`(ASCII)）。この域は本閾値では
+/// 掴めず、内容解析だけでは区別不能なため**自動切替しない**。代わりに [`looks_like_bomless_utf16_text`]
+/// でシグネチャを検出し、デコード既定（UTF-8）は変えずに警告のみ立てて利用者に再読込を委ねる。
 const UTF16_NULL_RATIO: f64 = 0.25;
 
 /// BOM なし UTF-16 LE/BE をヌルバイト分布で**ヒューリスティック**判定する（要件5.2 往復喪失防止）。
@@ -210,6 +226,112 @@ fn detect_bomless_utf16(bytes: &[u8]) -> Option<TextEncoding> {
         None
     }
 }
+
+/// 低ヌル・ASCII 互換だが「日本語 UTF-16 らしい」シグネチャを**警告目的でのみ**検出する。
+///
+/// 背景: 日本語（ひらがな/カタカナ U+3040〜30FF・漢字 U+4E00〜 等）主体の BOM なし UTF-16 はヌルが
+/// ほぼ無く、[`detect_bomless_utf16`] のヌル比率閾値に掛からない。さらにそのバイト列は妥当な ASCII と
+/// **同一**になり得る（例 `"あいうえお"`(UTF-16LE) ≡ `"B0D0F0H0J0"`(ASCII)）ため、内容解析だけでは
+/// 区別不能で**自動切替は危険**（正当な ASCII を逆に壊す）。本関数は判定だけ行い、採用エンコーディング・
+/// text は一切変えず `had_decode_warning` を立てる材料にする（無言のデータ喪失だけを防ぐ・要件5.2）。
+///
+/// 判定（保守的・誤検出を強く抑える）:
+/// - 偶数長かつ十分な長さ（最低 [`UTF16_SIGNATURE_MIN_BYTES`] バイト・短い断片は誤検出回避で除外）。
+/// - 全バイトが ASCII 範囲（< 0x80）に収まる（[`detect_bomless_utf16`] が掴む高ヌル UTF-16 ではなく、
+///   妥当な ASCII と紛れる低ヌル域だけを対象にする。1 バイトでも 0x80 以上があれば「ASCII と区別不能」
+///   という前提が崩れるため除外）。
+/// - 「高位バイト側」（LE なら奇数オフセット・BE なら偶数オフセット）に**ひらがな/カタカナの高位バイト
+///   0x30/0x31** が高比率（[`UTF16_KANA_HIGH_RATIO`] 以上）で現れる。**かなを鍵にする理由**: 漢字のみの
+///   高位バイト域（0x4E〜0x9F）は英文 ASCII（letters/digits も 0x4E〜0x7A）と統計的に重なり区別不能だが、
+///   かなの高位バイト 0x30/0x31 は英文 prose にほぼ現れない（0x30='0' は散発的）。実在の日本語文は助詞・
+///   送り仮名で必ずかなを含むため、これで「かな入り日本語 UTF-16」と「英文 ASCII」を実用上分離できる。
+///   （漢字のみで一切かなを含まない UTF-16 は英文と原理的に区別不能なため**あえて検出しない**＝誤検出を
+///   出すより無検出側に倒す。）
+/// - 念のため、その並びを実際に UTF-16LE/BE としてデコードし、日本語/CJK に該当するコードポイントが
+///   高比率（[`UTF16_CJK_RATIO`] 以上）であることを裏取りする（`"0000…"`=U+3030 連続のような、かな高位
+///   バイトを持つが日本語にデコードされない ASCII を弾く）。
+///
+/// LE/BE どちらのシグネチャでも検出する。該当しなければ `false`。
+fn looks_like_bomless_utf16_text(bytes: &[u8]) -> bool {
+    if bytes.len() < UTF16_SIGNATURE_MIN_BYTES || bytes.len() % 2 != 0 {
+        return false;
+    }
+    // この警告は「ASCII と紛れて UTF-8 strict が通った」低ヌル域だけが対象。1 バイトでも 0x80 以上を含めば
+    // 妥当な ASCII という前提が崩れる（UTF-8/Shift_JIS 通常テキスト・高ヌル UTF-16 は別経路）。
+    if bytes.iter().any(|&b| b >= 0x80) {
+        return false;
+    }
+    // LE（高位バイト＝奇数オフセット）・BE（高位バイト＝偶数オフセット）の双方を試す。
+    is_japanese_utf16_signature(bytes, false) || is_japanese_utf16_signature(bytes, true)
+}
+
+/// 指定エンディアンで「かな入り日本語 UTF-16 らしい」かを判定する（[`looks_like_bomless_utf16_text`] 下請け）。
+///
+/// `big_endian=false`（LE）は高位バイト＝奇数オフセット、`true`（BE）は高位バイト＝偶数オフセット。
+/// 高位バイトにかな域 0x30/0x31 が高比率で現れ、かつ実デコードで日本語/CJK が高比率なら `true`。
+fn is_japanese_utf16_signature(bytes: &[u8], big_endian: bool) -> bool {
+    let units = bytes.len() / 2;
+    if units == 0 {
+        return false;
+    }
+    // 高位バイトのオフセット（LE=奇数 / BE=偶数）。ひらがな U+3040〜309F・カタカナ U+30A0〜30FF の
+    // 高位バイトは 0x30、カタカナ・ひらがな拡張（U+31xx）は 0x31。これを「かな高位バイト」とみなす。
+    let high_offset = usize::from(!big_endian);
+    let mut kana_high = 0usize;
+    let mut i = high_offset;
+    while i < bytes.len() {
+        if matches!(bytes[i], 0x30 | 0x31) {
+            kana_high += 1;
+        }
+        i += 2;
+    }
+    // かな高位バイトの比率が閾値未満なら（英文 ASCII・漢字のみ等）UTF-16 とは見なさない（無検出に倒す）。
+    if (kana_high as f64) / (units as f64) < UTF16_KANA_HIGH_RATIO {
+        return false;
+    }
+    // 裏取り: 実際に UTF-16 としてデコードし、日本語/CJK コードポイントが高比率かを確認する
+    //（"0000…"=U+3030 連続のような、かな高位バイトを持つが日本語でない ASCII をここで弾く）。
+    let enc = if big_endian {
+        TextEncoding::Utf16Be
+    } else {
+        TextEncoding::Utf16Le
+    };
+    let Some(text) = decode_strict(enc, bytes) else {
+        return false;
+    };
+    let total = text.chars().count();
+    if total == 0 {
+        return false;
+    }
+    let cjk = text.chars().filter(|&c| is_cjk_or_japanese(c)).count();
+    (cjk as f64) / (total as f64) >= UTF16_CJK_RATIO
+}
+
+/// コードポイントが日本語/CJK（ひらがな・カタカナ・CJK 統合漢字・全角等）に該当するか。
+///
+/// [`is_japanese_utf16_signature`] のデコード裏取りに使う。範囲は誤検出を抑える主要域に限定する。
+fn is_cjk_or_japanese(c: char) -> bool {
+    matches!(c as u32,
+        0x3040..=0x30FF   // ひらがな・カタカナ
+        | 0x31F0..=0x31FF // カタカナ拡張
+        | 0x3400..=0x4DBF // CJK 統合漢字拡張A
+        | 0x4E00..=0x9FFF // CJK 統合漢字
+        | 0xF900..=0xFAFF // CJK 互換漢字
+        | 0xFF00..=0xFFEF // 全角・半角形
+    )
+}
+
+/// 警告シグネチャ判定の最小バイト長（短い断片は誤検出回避で対象外）。
+///
+/// 8 バイト＝かな 4 文字相当（例 `"あいうえ"`）。これ未満は統計が立たず誤検出が増えるため対象外。
+/// 一方で `"あいうえお"`(10B) のような短い日本語も拾えるよう、過度に長くはしない。
+const UTF16_SIGNATURE_MIN_BYTES: usize = 8;
+
+/// 高位バイトにかな域 0x30/0x31 が占める最低比率（かな入り日本語の鍵・誤検出抑制で保守的）。
+const UTF16_KANA_HIGH_RATIO: f64 = 0.5;
+
+/// UTF-16 として実デコードしたとき日本語/CJK コードポイントが占める最低比率（裏取り・誤検出抑制）。
+const UTF16_CJK_RATIO: f64 = 0.8;
 
 /// バイト列に占めるヌルバイト（0x00）の比率（0.0〜1.0）。空なら 0.0。
 fn null_byte_ratio(bytes: &[u8]) -> f64 {
@@ -537,6 +659,102 @@ mod tests {
         let d = decode("これは普通の日本語テキストです\nABC123".as_bytes());
         assert_eq!(d.encoding, TextEncoding::Utf8);
         assert!(!d.had_decode_warning);
+    }
+
+    #[test]
+    fn 低ヌル日本語utf16leは警告を立てるがデコードは壊さない() {
+        // "あいうえお" の BOM なし UTF-16LE（42 30 44 30 46 30 48 30 4A 30）はヌル 0 個・全バイト < 0x80 で
+        // 妥当な ASCII("B0D0F0H0J0") と**バイト同一**＝区別不能。自動切替は危険なので**採用は UTF-8 のまま**
+        // だが、かな高位バイト 0x30 のシグネチャ検出で警告を立てて再読込を促す（無言喪失の防止・要件5.2）。
+        let utf16 = utf16_bytes("あいうえお", false); // BOM なし LE・ヌル 0。
+        assert!(
+            utf16.iter().all(|&b| b != 0),
+            "前提崩れ: 低ヌルのはずがヌルを含む"
+        );
+        let d = decode(&utf16);
+        // デコード既定は変えない（UTF-8 として開く＝現状維持・新たな破壊ゼロ）。
+        assert_eq!(d.encoding, TextEncoding::Utf8);
+        assert!(
+            d.had_decode_warning,
+            "低ヌル日本語 UTF-16LE で警告が立たない（Reopen を促せず無言喪失の恐れ）: {:?}",
+            d
+        );
+    }
+
+    #[test]
+    fn 低ヌル日本語utf16beも警告を立てる() {
+        // BE（高位バイト＝偶数オフセット）の日本語 UTF-16 でもシグネチャ検出で警告が立つこと。
+        // 低バイトが ASCII 域（< 0x80）に収まるかな（U+3041〜305D 等）を使い、警告経路（UTF-8 strict 成立）
+        // に確実に乗せる（低バイトが 0x80 以上のかな〔"ん"=U+3093 等〕は UTF-8 不正で別経路になるため避ける）。
+        let utf16 = utf16_bytes("あいうえおかきくけこ", true); // BOM なし BE・全バイト < 0x80。
+        assert!(utf16.iter().all(|&b| b < 0x80), "前提崩れ: 全 ASCII でない");
+        let d = decode(&utf16);
+        assert_eq!(d.encoding, TextEncoding::Utf8);
+        assert!(
+            d.had_decode_warning,
+            "低ヌル日本語 UTF-16BE で警告が立たない: {:?}",
+            d
+        );
+    }
+
+    #[test]
+    fn 通常の英文asciiは警告を立てない_誤検出回避() {
+        // 普通の英文 ASCII はかな高位バイト 0x30/0x31 が集中しない（letters/space 主体）＝誤検出しない。
+        let d = decode(b"Hello, world! This is a plain ASCII test sentence.");
+        assert_eq!(d.encoding, TextEncoding::Utf8);
+        assert!(
+            !d.had_decode_warning,
+            "通常英文 ASCII を UTF-16 と誤検出して警告した: {:?}",
+            d
+        );
+    }
+
+    #[test]
+    fn markdownのasciiは警告を立てない_誤検出回避() {
+        // 記号混じりの Markdown も誤検出しない（かな高位バイトが集中しない）。
+        let md = "# Title\n\n- item one\n- item two\n\n```rust\nfn main() {}\n```\n";
+        let d = decode(md.as_bytes());
+        assert_eq!(d.encoding, TextEncoding::Utf8);
+        assert!(
+            !d.had_decode_warning,
+            "Markdown ASCII を誤検出した: {:?}",
+            d
+        );
+    }
+
+    #[test]
+    fn 短いascii断片は警告を立てない_誤検出回避() {
+        // 短すぎる断片（最小長 8 バイト未満）と、最小長以上でもかな高位バイトが無い通常断片は対象外。
+        for frag in ["ab", "test", "B0D0", "a code line"] {
+            let d = decode(frag.as_bytes());
+            assert!(
+                !d.had_decode_warning,
+                "短い/通常 ASCII 断片 {:?} を誤検出した: {:?}",
+                frag, d
+            );
+        }
+    }
+
+    #[test]
+    fn かな高位バイトでも日本語にならないasciiは警告を立てない_誤検出回避() {
+        // "00000000…" は高位バイトが 0x30 連続だが、UTF-16LE デコードは U+3030（CJK 記号・日本語域外）
+        // 連続になる。デコード裏取り（日本語/CJK 比率）でこれを弾く＝かな高位バイトだけでは誤検出しない。
+        let d = decode(b"0000000000000000");
+        assert_eq!(d.encoding, TextEncoding::Utf8);
+        assert!(
+            !d.had_decode_warning,
+            "日本語にデコードされない 0x30 連続 ASCII を誤検出した: {:?}",
+            d
+        );
+    }
+
+    #[test]
+    fn かなを含まない英数ascii列は警告を立てない_誤検出回避() {
+        // 英大文字＋数字の長い列。高位バイト（LE=奇数オフセット）はバラけ、かな域 0x30/0x31 が
+        // 過半に届かない＝誤検出しない（漢字のみ域 0x4E〜0x7A と英字は重なるが、かなを鍵にして弾く）。
+        let d = decode(b"Z9Y8X7W6V5U4T3S2R1Q0P9O8N7M6L5K4");
+        assert_eq!(d.encoding, TextEncoding::Utf8);
+        assert!(!d.had_decode_warning, "英数 ASCII 列を誤検出した: {:?}", d);
     }
 
     #[test]
