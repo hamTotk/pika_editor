@@ -18,9 +18,16 @@ function focusPane(id: string): boolean {
     return false;
   }
   // ペイン内のフォーカス可能要素があればそれへ、なければペイン自身を tabindex=-1 でフォーカス。
-  const focusable = el.querySelector<HTMLElement>(
-    '[tabindex]:not([tabindex="-1"]), button:not([disabled]), [role="treeitem"], [role="tab"]',
-  );
+  // roving tabindex を持つツリー/タブでは「選択中の行（tabindex=0 or aria-selected=true）」を
+  // 最優先で拾う。これを最初に試さないと、先頭行（tabindex=-1）へ飛んで選択位置を失う（eval #48・
+  // tree.ts は選択行を tabindex=0 にする）。見つからなければ従来のフォールバックへ。
+  const focusable =
+    el.querySelector<HTMLElement>(
+      '[tabindex="0"], [role="tab"][aria-selected="true"], [role="treeitem"][aria-selected="true"]',
+    ) ??
+    el.querySelector<HTMLElement>(
+      '[tabindex]:not([tabindex="-1"]), button:not([disabled]), [role="treeitem"], [role="tab"]',
+    );
   if (focusable) {
     focusable.focus();
   } else {
@@ -70,7 +77,15 @@ export function initFocusCycling(): void {
   );
 }
 
-/** 通知バー/ステータスの aria 属性を確実化する（index.html で土台付与済み・冪等な再保証）。 */
+/**
+ * 通知バー/ステータスの aria 属性を確実化する（index.html で土台付与済み・冪等な再保証）。
+ *
+ * ライブリージョンの用途分離（eval #47・二重読み上げ回避）:
+ * - #notifications … トースト/意味付き通知 **専用** の唯一の status ライブリージョン（主読み上げ経路）。
+ * - #sr-live …… 差分件数などステータスの **補助読み上げ専用**（role は持たず aria-live のみ・index.html）。
+ *   両者は別文言を流す（同一文言を両方へ流さない）ことで二度読みを断つ。announce() は #sr-live のみ、
+ *   notify()/notices は #notifications のみへ書き込む（経路を分離済み）。
+ */
 export function initLandmarks(): void {
   const notifications = document.getElementById("notifications");
   if (notifications) {

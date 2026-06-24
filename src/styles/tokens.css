@@ -34,6 +34,10 @@ html[data-theme="light"] {
   --accent: #4f74a8;
   --accent-strong: #3d63a0;
   --alert: #a8602a;
+  /* accent/警告色の塗り上に載せる前景（白固定）。app.css の生 #fff を置換する単一源。 */
+  --on-accent: #fff;
+  /* 構文ハイライトの文字列リテラル色（ui-mock .tok-s）。app.css の生16進を置換する単一源。 */
+  --syntax-string: #8a6a3a;
   --diff-add-bg: #e9f2ec;
   --diff-add-tx: #2f6b41;
   --diff-add-gut: #d6e6dc;
@@ -62,6 +66,8 @@ html[data-theme="dark"] {
   --accent: #7d9ec9;
   --accent-strong: #5b86bf;
   --alert: #c98a52;
+  --on-accent: #fff;
+  --syntax-string: #c0a070;
   --diff-add-bg: #18271d;
   --diff-add-tx: #6fb585;
   --diff-add-gut: #244430;
@@ -91,6 +97,8 @@ html[data-theme="dark"] {
     --accent: #7d9ec9;
     --accent-strong: #5b86bf;
     --alert: #c98a52;
+    --on-accent: #fff;
+    --syntax-string: #c0a070;
     --diff-add-bg: #18271d;
     --diff-add-tx: #6fb585;
     --diff-add-gut: #244430;
