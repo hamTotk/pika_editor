@@ -5,7 +5,7 @@
 //! 置換ブロック（削除直後に追加が続く塊）の行ペアには行内差分セグメント（[`crate::diff::inline`]）を
 //! 付け、フロントが変更語/grapheme を下線/太字で強調できるようにする（色非依存＝要件8.2/11.5）。
 
-use crate::diff::inline::{intra_line_segments, Segment};
+use crate::diff::inline::{intra_line_segments, intraline_too_large, Segment};
 use similar::{Algorithm, ChangeTag, TextDiff};
 
 /// 改行コードを LF へ正規化する（CRLF/CR → LF）。
@@ -200,6 +200,11 @@ fn attach_intraline_segments(lines: &mut [DiffLine]) {
         for k in 0..pair {
             let old_content = lines[del_start + k].content.clone();
             let new_content = lines[ins_start + k].content.clone();
+            // 巨大行（minified JSON 等）の置換ペアは行内差分が O(N·D) で UIスレッド予算を脅かすため、
+            // 行内セグメントを付けず純粋な追加/削除に倒す（#39・固まらない方を優先）。
+            if intraline_too_large(&old_content, &new_content) {
+                continue;
+            }
             let intra = intra_line_segments(&old_content, &new_content);
             lines[del_start + k].segments = intra.old_segments;
             lines[ins_start + k].segments = intra.new_segments;
@@ -276,6 +281,35 @@ mod tests {
             .map(|s| s.text.clone())
             .collect();
         assert_eq!(changed, "雨");
+    }
+
+    #[test]
+    fn 巨大行の置換は行内セグメントを付けず純粋な追加削除に倒す() {
+        // #39: 改行のない巨大行（minified 想定）の置換ペアは行内差分が O(N·D) で UIスレッドを脅かすため、
+        // 行内セグメントを付けず行単位の add/del に倒す（差分自体は出る・固まらない方を優先）。
+        use crate::diff::inline::MAX_INTRALINE_GRAPHEMES;
+        let old_line = format!("{}X\n", "a".repeat(MAX_INTRALINE_GRAPHEMES + 5));
+        let new_line = format!("{}Y\n", "a".repeat(MAX_INTRALINE_GRAPHEMES + 5));
+        let d = compute_diff(&old_line, &new_line);
+        // 置換（del+ins）として差分は出る。
+        assert!(d.lines.iter().any(|l| l.tag == DiffTag::Delete));
+        assert!(d.lines.iter().any(|l| l.tag == DiffTag::Insert));
+        // ただし巨大行なので行内セグメントは付かない。
+        let ins = d.lines.iter().find(|l| l.tag == DiffTag::Insert).unwrap();
+        assert!(
+            ins.segments.is_empty(),
+            "巨大行に行内セグメントが付いた（O(N·D) 爆発の温床）"
+        );
+        let del = d.lines.iter().find(|l| l.tag == DiffTag::Delete).unwrap();
+        assert!(del.segments.is_empty());
+    }
+
+    #[test]
+    fn 通常サイズの置換行には引き続き行内セグメントが付く() {
+        // #39 の閾値が通常行を巻き込まないことの回帰防止。
+        let d = compute_diff("the quick fox\n", "the slow fox\n");
+        let ins = d.lines.iter().find(|l| l.tag == DiffTag::Insert).unwrap();
+        assert!(!ins.segments.is_empty(), "通常行で行内セグメントが消えた");
     }
 
     #[test]

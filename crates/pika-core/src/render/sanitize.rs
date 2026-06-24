@@ -12,6 +12,7 @@
 //! comrak の中間 HTML は外へ出さず、必ず [`sanitize_html`] を通った文字列のみが配信される（呼び出し規約）。
 
 use ammonia::Builder;
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 /// プレビューの系統（design doc 6章）。サニタイズ/CSP の厳しさを切り替える。
@@ -55,8 +56,213 @@ pub fn markdown_to_unsafe_html(markdown: &str) -> String {
 /// - `<iframe>/<object>/<embed>/<base>/<meta>`（`<meta http-equiv>` の CSP/refresh も含む）
 /// - `id`/`name` 属性（DOM clobbering 防止）
 /// - SVG の `script`/`foreignObject`/`on*`/`xlink:href javascript:`
+///
+/// 系統B（HTML）で許可する CSS（`<style>` 本体・`style` 属性）は ammonia が値を検査しないため、
+/// 多層防御が CSP 単層依存にならないよう CSS の危険トークン（`url(`/`@import`/`expression(`/
+/// `image-set(`/`-moz-binding` 等の外部参照/危険関数）を [`sanitize_css_value`] / [`sanitize_style_element_body`]
+/// で除去する（要件2.4「外部取得は既定オフ」を CSP だけに委ねない）。`style` 属性は
+/// ammonia の `attribute_filter` で後処理し、`<style>` 本体はクリーン後の出力を後段で走査して落とす。
 pub fn sanitize_html(html: &str, flavor: PreviewFlavor) -> String {
-    build_sanitizer(flavor).clean(html).to_string()
+    let cleaned = build_sanitizer(flavor).clean(html).to_string();
+    // <style> 要素本体（系統B のみ許可）の CSS は ammonia の属性検査では触れないため、
+    // クリーン後の整形済み出力を走査して危険トークンを含む宣言/ルールを保守的に落とす。
+    if flavor == PreviewFlavor::HtmlNoJs {
+        sanitize_style_element_bodies(&cleaned)
+    } else {
+        cleaned
+    }
+}
+
+/// CSS の値に外部参照/スクリプト誘発トークンが含まれるか（保守的判定・大小無視）。
+///
+/// 完全な CSS パーサは過大なので「危険トークンを含むなら宣言/ルールごと捨てる」保守的方針を採る
+/// （取りこぼしより誤除去側に倒す＝多層防御の趣旨）。検出対象（要件2.4・CVE 系の経路封じ）:
+/// - `url(` … 外部リソース取得（背景画像/フォント/cursor 等）。既定オフを CSS で復活させない。
+/// - `@import` … 外部スタイルシート取り込み。
+/// - `expression(` … IE 系の動的式（任意 JS 実行経路）。
+/// - `image-set(` / `-webkit-image-set(` … 解像度別画像取得（url を含む外部取得）。
+/// - `-moz-binding` … XBL バインディング（スクリプト実行経路）。
+/// - `javascript:` … スキーム経由のスクリプト。
+///
+/// **CSS エスケープ回避対策（多層防御の第二層）**: ブラウザは `\75rl(` のような CSS 数値エスケープ
+/// （`\75` = `u`）をデコードして `url(` として実効するため、素の substring 検査だけでは回避される。
+/// 検査の前に [`decode_css_escapes`] で数値エスケープを実文字へデコードしてから判定する
+/// （正当な `content:"\2022"`（•）等は外部取得トークンを形成しないため誤除去されない）。
+fn css_has_dangerous_token(css: &str) -> bool {
+    let decoded = decode_css_escapes(css);
+    let lower = decoded.to_ascii_lowercase();
+    const DANGEROUS: &[&str] = &[
+        "url(",
+        "@import",
+        "expression(",
+        "image-set(",
+        "-moz-binding",
+        "javascript:",
+    ];
+    DANGEROUS.iter().any(|t| lower.contains(t))
+}
+
+/// CSS の数値エスケープ（`\` + 16 進 1〜6 桁 + 任意の空白 1 つ）を実文字へデコードする
+/// （危険トークン検査のエスケープ回避対策・多層防御の第二層）。
+///
+/// CSS 仕様の数値エスケープ（CSS Syntax Module §4.3.7）に従い、`\` の後に 16 進が 1〜6 桁続けば
+/// その符号位置の文字へ置換し、エスケープ直後の空白 1 つは区切りとして消費する。`\` の後が 16 進でない
+/// 場合（`\:` 等のリテラルエスケープ）は次の 1 文字をそのまま採る（コメント分断 `u/**/rl(` のような
+/// url-token を形成しないケースは CSS 仕様上無害なので対象外）。
+///
+/// 目的は危険トークン（`url(`/`@import`/`expression(` 等）のエスケープ回避を検出することなので、
+/// デコード結果を表示に使うわけではない（検査専用・誤除去を避けるため正当エスケープも忠実に復元する）。
+fn decode_css_escapes(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut chars = css.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        // バックスラッシュ。続く 16 進（最大 6 桁）を集める。
+        let mut hex = String::new();
+        while hex.len() < 6 {
+            match chars.peek() {
+                Some(&c) if c.is_ascii_hexdigit() => {
+                    hex.push(c);
+                    chars.next();
+                }
+                _ => break,
+            }
+        }
+        if hex.is_empty() {
+            // リテラルエスケープ（`\:` 等）。次の 1 文字をそのまま採る（無ければ `\` を落とす）。
+            if let Some(c) = chars.next() {
+                out.push(c);
+            }
+            continue;
+        }
+        // 数値エスケープ直後の空白 1 つは区切りとして消費する（CSS 仕様）。
+        if matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+            chars.next();
+        }
+        // 16 進を符号位置へ。不正/範囲外は U+FFFD（仕様の置換文字）に倒す。
+        let code = u32::from_str_radix(&hex, 16).unwrap_or(0xFFFD);
+        out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
+    }
+    out
+}
+
+/// `style` 属性値を宣言（`;` 区切り）単位で保守的に検査し、危険トークンを含む宣言を捨てる。
+///
+/// 例: `color:red;background:url(http://evil/x.png)` → `color:red`（背景宣言だけ落とす）。
+/// 全宣言が危険なら空文字を返す（呼び出し側＝`attribute_filter` が `style` 属性ごと除去する）。
+fn sanitize_css_value(value: &str) -> String {
+    value
+        .split(';')
+        .map(str::trim)
+        .filter(|decl| !decl.is_empty() && !css_has_dangerous_token(decl))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// クリーン済み HTML 内の `<style>...</style>` 本体を保守的に CSS サニタイズする。
+///
+/// ammonia は `<style>` 本体（テキストノード）を素通しするため、ここでクリーン後の整形済み出力から
+/// `<style>` の中身を取り出し、宣言/ルール単位で危険トークン（`url(`/`@import`/`expression(` 等）を含む
+/// ものを落とす。完全な CSS パーサは持たず、`;`/`}` 区切りの保守的分割で「危険なら捨てる」方針。
+/// 本文中に `<style>` が無ければ入力をそのまま返す（系統B でのみ呼ばれる）。
+fn sanitize_style_element_bodies(html: &str) -> String {
+    const OPEN: &str = "<style>";
+    const CLOSE: &str = "</style>";
+    // ammonia 出力の <style> は属性を持たない（generic/tag_attributes に style 要素属性を許可していない）。
+    if !html.contains(OPEN) {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(open_at) = rest.find(OPEN) {
+        let body_start = open_at + OPEN.len();
+        out.push_str(&rest[..body_start]);
+        let after_open = &rest[body_start..];
+        match after_open.find(CLOSE) {
+            Some(close_rel) => {
+                let css = &after_open[..close_rel];
+                out.push_str(&sanitize_css_block(css));
+                out.push_str(CLOSE);
+                rest = &after_open[close_rel + CLOSE.len()..];
+            }
+            None => {
+                // 閉じタグが無い（理論上 ammonia 出力では起きない）。残りをそのまま付けて終了。
+                out.push_str(after_open);
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `<style>` 本体の CSS を保守的にサニタイズする（ルール/宣言単位で危険トークンを捨てる）。
+///
+/// `@import url(...)` のような**ルール全体**が危険な場合と、`a{background:url(...)}` のように
+/// ブロック内の一部宣言だけが危険な場合の両方を、`{`/`}`/`;` の素朴な区切りで保守的に処理する。
+/// 取りこぼしより誤除去側に倒す（多層防御＝CSP に単層依存しないための念のための層）。
+fn sanitize_css_block(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut buf = String::new(); // セレクタ/at-rule のプレリュード蓄積。
+    let mut depth = 0usize;
+    let mut chars = css.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '{' if depth == 0 => {
+                // セレクタ部に危険トークン（@import 等）があればこのルールを丸ごと捨てる。
+                let prelude_dangerous = css_has_dangerous_token(&buf);
+                // ブロック本体を収集する（ネストは @media 等。素朴に深さで対応）。
+                let mut block = String::new();
+                depth = 1;
+                for inner in chars.by_ref() {
+                    match inner {
+                        '{' => {
+                            depth += 1;
+                            block.push(inner);
+                        }
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            block.push(inner);
+                        }
+                        _ => block.push(inner),
+                    }
+                }
+                if !prelude_dangerous {
+                    // ブロック内は宣言単位で危険なものだけ落とす（ネストルールも保守的にトークン検査）。
+                    let sanitized_block = sanitize_css_value(&block);
+                    out.push_str(buf.trim());
+                    out.push('{');
+                    out.push_str(&sanitized_block);
+                    out.push('}');
+                }
+                buf.clear();
+            }
+            ';' if depth == 0 => {
+                // ブロック外の文（`@import ...;` 等）。危険トークンを含むなら捨てる。
+                if !css_has_dangerous_token(&buf) {
+                    let trimmed = buf.trim();
+                    if !trimmed.is_empty() {
+                        out.push_str(trimmed);
+                        out.push(';');
+                    }
+                }
+                buf.clear();
+            }
+            _ => buf.push(ch),
+        }
+    }
+    // 末尾の余り（閉じられていない断片）は危険トークンが無いときだけ残す。
+    if !buf.trim().is_empty() && !css_has_dangerous_token(&buf) {
+        out.push_str(buf.trim());
+    }
+    out
 }
 
 /// 系統に応じた ammonia ビルダーを構築する。
@@ -159,6 +365,25 @@ fn build_sanitizer(flavor: PreviewFlavor) -> Builder<'static> {
     // rel="noopener noreferrer" を a[target] へ強制（タブナビング対策・外部リンクラッパは frontend）。
     builder.link_rel(Some("noopener noreferrer"));
 
+    // style 属性（系統B のみ許可）の CSS 値を後処理し、外部参照/危険関数を含む宣言を捨てる
+    // （ammonia は CSS 値を検査しない＝多層防御を CSP 単層に依存させない・要件2.4）。
+    // 系統A は style 属性を許可しないため、このフィルタは系統A の出力に影響しない。
+    if flavor == PreviewFlavor::HtmlNoJs {
+        builder.attribute_filter(|_element, attribute, value| {
+            if attribute == "style" {
+                let safe = sanitize_css_value(value);
+                if safe.is_empty() {
+                    // 全宣言が危険＝style 属性ごと除去する。
+                    None
+                } else {
+                    Some(Cow::Owned(safe))
+                }
+            } else {
+                Some(Cow::Borrowed(value))
+            }
+        });
+    }
+
     builder
 }
 
@@ -196,8 +421,10 @@ fn tag_attributes(
         map.insert(tag, HashSet::from(["data-sourcepos"]));
     }
 
-    // SVG サブセット属性（要件6.2・design doc 6章）。xlink:href は javascript: を URL スキームで弾く。
-    // 描画に必要な幾何/塗り属性のみ。on* は **一切含めない**。
+    // SVG サブセット属性（要件6.2・design doc 6章）。描画に必要な幾何/塗り属性のみ。on* は一切含めない。
+    // 注記（#41・実態との整合）: `<use>`/`<image>` の `href`/`xlink:href` は許可属性に**含めない**ため、
+    // ammonia が属性ごと除去する（URL スキーム検査で弾くのではなく、そもそも属性が通らない）。
+    // よって外部参照/`javascript:` も到達不能（許可しない方が単純で安全＝多層防御）。
     let svg_common = HashSet::from([
         "width",
         "height",
@@ -446,6 +673,128 @@ mod tests {
             out.contains("data-sourcepos"),
             "sourcepos がサニタイズで消えた: {out}"
         );
+    }
+
+    #[test]
+    fn 系統b_style属性の_url_は除去される_csp単層依存しない() {
+        // ammonia は CSS 値を検査しないため、属性フィルタで url() を含む宣言を落とす（要件2.4・多層防御）。
+        let out = sanitize_html(
+            r#"<div style="color:red;background:url(http://evil/x.png)">x</div>"#,
+            PreviewFlavor::HtmlNoJs,
+        );
+        assert!(!out.contains("url("), "style 属性の url() が残った: {out}");
+        assert!(!out.contains("evil"), "外部参照が残った: {out}");
+        // 危険でない宣言（color:red）は保持される。
+        assert!(out.contains("color:red"), "安全な宣言まで落ちた: {out}");
+    }
+
+    #[test]
+    fn 系統b_style属性が全て危険なら属性ごと除去される() {
+        let out = sanitize_html(
+            r#"<div style="background:url(http://evil/x.png)">x</div>"#,
+            PreviewFlavor::HtmlNoJs,
+        );
+        assert!(!out.contains("style="), "style 属性が残った: {out}");
+        assert!(!out.contains("url("), "url() が残った: {out}");
+    }
+
+    #[test]
+    fn 系統b_style属性の_expression_と_image_set_は除去される() {
+        let out = sanitize_html(
+            r#"<p style="color:blue;width:expression(alert(1))">x</p>"#,
+            PreviewFlavor::HtmlNoJs,
+        );
+        assert!(!out.contains("expression("), "expression() が残った: {out}");
+        assert!(out.contains("color:blue"), "安全な宣言まで落ちた: {out}");
+        let out2 = sanitize_html(
+            r#"<p style="background-image:image-set(url(a) 1x)">x</p>"#,
+            PreviewFlavor::HtmlNoJs,
+        );
+        assert!(!out2.contains("image-set("), "image-set() が残った: {out2}");
+    }
+
+    #[test]
+    fn 系統b_style要素本体の_import_は除去される() {
+        // <style>@import url(...)</style> は外部 CSS 取得経路。ルールごと落とす。
+        let out = sanitize_html(
+            r#"<style>@import url("http://evil/x.css");.a{color:red}</style><p>x</p>"#,
+            PreviewFlavor::HtmlNoJs,
+        );
+        assert!(out.contains("<style"), "<style> 要素自体は残る: {out}");
+        assert!(!out.contains("@import"), "@import が残った: {out}");
+        assert!(!out.contains("evil"), "外部 CSS 参照が残った: {out}");
+        // 危険でないルール（.a{color:red}）は保持される。
+        assert!(out.contains("color:red"), "安全なルールまで落ちた: {out}");
+    }
+
+    #[test]
+    fn 系統b_style要素本体の宣言内_url_は宣言だけ落とす() {
+        // ブロック内の一部宣言だけが危険な場合、そのブロックは残し危険宣言のみ捨てる。
+        let out = sanitize_html(
+            r#"<style>.b{color:green;background:url(http://evil/bg.png)}</style>"#,
+            PreviewFlavor::HtmlNoJs,
+        );
+        assert!(!out.contains("url("), "宣言内 url() が残った: {out}");
+        assert!(!out.contains("evil"), "外部参照が残った: {out}");
+        assert!(out.contains("color:green"), "安全な宣言まで落ちた: {out}");
+    }
+
+    #[test]
+    fn css_数値エスケープでの危険トークン回避を検出する() {
+        // ブラウザは `\75rl(` を `url(` にデコードして実効するため、検査前にデコードして弾く（多層防御の第二層）。
+        // `\75` = u（url のエスケープ回避）。
+        let out = sanitize_html(
+            r#"<div style="background:\75rl(http://evil/x.png)">x</div>"#,
+            PreviewFlavor::HtmlNoJs,
+        );
+        assert!(
+            !out.contains("75rl") && !out.contains("evil"),
+            "CSS エスケープ url() 回避が残った: {out}"
+        );
+        // `\40 import` = @import のエスケープ回避（直後の空白は区切り）。
+        let out2 = sanitize_html(
+            r#"<style>\40 import url("http://evil/x.css");.ok{color:red}</style>"#,
+            PreviewFlavor::HtmlNoJs,
+        );
+        assert!(
+            !out2.contains("40 import") && !out2.contains("evil"),
+            "CSS エスケープ @import 回避が残った: {out2}"
+        );
+        assert!(out2.contains("color:red"), "安全なルールまで落ちた: {out2}");
+        // `\65 xpression` = expression のエスケープ回避。
+        let out3 = sanitize_html(
+            r#"<div style="width:\65 xpression(alert(1))">x</div>"#,
+            PreviewFlavor::HtmlNoJs,
+        );
+        assert!(
+            !out3.contains("65 xpression"),
+            "CSS エスケープ expression() 回避が残った: {out3}"
+        );
+    }
+
+    #[test]
+    fn css_の無害な数値エスケープは過剰に壊さない() {
+        // content の `\2022`（•・bullet）は url-token を形成しない無害なエスケープ＝宣言を保持する。
+        let out = sanitize_html(
+            r#"<style>.q::before{content:"\2022";color:blue}</style>"#,
+            PreviewFlavor::HtmlNoJs,
+        );
+        assert!(
+            out.contains("\\2022") || out.contains("content"),
+            "無害な content エスケープまで落ちた: {out}"
+        );
+        assert!(out.contains("color:blue"), "無害な宣言まで落ちた: {out}");
+    }
+
+    #[test]
+    fn decode_css_escapes_は数値とリテラルを正しく展開する() {
+        // 単体回帰: 数値エスケープ（直後空白消費含む）とリテラルエスケープ。
+        assert_eq!(decode_css_escapes(r"\75rl("), "url(");
+        assert_eq!(decode_css_escapes(r"\40 import"), "@import");
+        assert_eq!(decode_css_escapes(r"\65 xpression"), "expression");
+        assert_eq!(decode_css_escapes(r"\2022"), "\u{2022}"); // •
+        assert_eq!(decode_css_escapes(r"\:"), ":"); // リテラルエスケープ。
+        assert_eq!(decode_css_escapes("plain"), "plain"); // エスケープ無しは素通し。
     }
 
     #[test]

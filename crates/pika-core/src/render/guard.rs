@@ -39,6 +39,9 @@ pub enum BlockReason {
     SvgPixels { pixels: u64, limit: u64 },
     /// SVG の要素数が上限超過。
     SvgElements { elements: u64, limit: u64 },
+    /// 画像ヘッダから寸法を判定できなかった（壊れ/細工/未知形式）。
+    /// 配信前ガードは fail-closed でブロックし「既定アプリで開く」へ誘導する（#24・nontext と統一）。
+    ImageDimensionsUnknown,
 }
 
 impl GuardDecision {
@@ -99,12 +102,16 @@ pub fn has_long_line(text: &str, limit_chars: usize) -> bool {
 /// ヘッダの width/height だけ読んで [`check_image_pixels`] で弾く（フルデコードしない）。
 ///
 /// 対応フォーマット（ヘッダ寸法を取れるもの）: PNG / GIF / JPEG / BMP / WebP(VP8/VP8L/VP8X)。
-/// 寸法を判定できない形式（SVG は [`check_svg_bytes`] 側）は安全側で [`GuardDecision::Allow`]
-/// （寸法不明＝ラスタでない/小さい想定。誤ブロックよりは通す。実消費は WebView 側で頭打ち）。
+///
+/// **寸法不明時の既定（#24・fail-closed）**: ヘッダから width/height を判定できない（壊れ/細工/未知形式）
+/// 場合は [`GuardDecision::Block`]（[`BlockReason::ImageDimensionsUnknown`]）でブロックし「既定アプリで開く」へ
+/// 誘導する。配信前ガードは「寸法不明＝デコード爆発の危険を否定できない」として**危険側でなく安全側
+/// （ブロック寄り）に倒す**。これは [`crate::nontext::decide_image_open`] の寸法不明時方針（外部誘導）と統一する
+/// （以前は guard=Allow（危険側）/nontext=外部誘導（安全側）で割れていた）。
 pub fn check_image_bytes(bytes: &[u8], pixel_limit: u64) -> GuardDecision {
     match image_dimensions(bytes) {
         Some((w, h)) => check_image_pixels(w, h, pixel_limit),
-        None => GuardDecision::Allow,
+        None => GuardDecision::Block(BlockReason::ImageDimensionsUnknown),
     }
 }
 
@@ -202,6 +209,13 @@ fn jpeg_dimensions(b: &[u8]) -> Option<(u64, u64)> {
             continue;
         }
         let len = be_u16(&b[i + 2..i + 4])? as usize;
+        // セグメント長は長さフィールド自身の 2 バイトを含む＝最小 2（JPEG 仕様）。
+        // `len < 2` は仕様違反の壊れ/細工 JPEG。前進量 `2 + len` が進まず無限ループ/誤読の温床になるため
+        // 走査を**即打ち切る**（None を返す＝寸法不明）。寸法不明時の既定は配信前ガードでブロック寄りに倒す
+        // （[`check_image_bytes`] の方針・#24・nontext::decide_image_open と統一）。
+        if len < 2 {
+            return None;
+        }
         // SOF0..SOF15（0xc0..0xcf）から DHT(0xc4)/DAC(0xcc)/JPG(0xc8) を除く＝実際の SOF。
         if (0xc0..=0xcf).contains(&marker) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
             // SOF: [len(2)][precision(1)][height(2)][width(2)]...
@@ -217,8 +231,13 @@ fn jpeg_dimensions(b: &[u8]) -> Option<(u64, u64)> {
     None
 }
 
-/// SVG の要素数（開きタグの数）を数える。コメント/属性値内の `<` は素朴には拾わないため、
-/// `<` の直後が英字（要素名開始）または `/`（閉じタグ）を起点に数える簡易計数。
+/// SVG の要素数（開始タグの数）を数える。コメント/属性値内の `<` は素朴には拾わないため、
+/// `<` の直後が英字（要素名開始）の出現を数える簡易計数。
+///
+/// 注記（#43・厳密化は不要）: **開始タグのみ計数**する（閉じタグ `</`・コメント `<!`・処理命令 `<?` は数えない）。
+/// 自己終了要素（`<rect/>`）も開始タグ 1 つとして数えるため、実際の要素数を厳密に反映するわけではないが、
+/// 計上は常に過小ではなく実要素数の近似（過検出側＝誤ブロックは低確率で安全側）に倒れる。要素数上限の
+/// 目的は暴走の早期遮断であり、厳密な要素計数は不要なため簡易計数のままとする。
 fn count_svg_elements(text: &str) -> u64 {
     let bytes = text.as_bytes();
     let mut count = 0u64;
@@ -439,9 +458,26 @@ mod tests {
     }
 
     #[test]
-    fn 寸法不明の画像は安全側で許可する() {
-        // マジック不一致（テキスト等）は寸法不明＝Allow（誤ブロックしない）。
-        assert!(check_image_bytes(b"not an image", DEFAULT_IMAGE_MAX_PIXELS).is_allowed());
+    fn 寸法不明の画像はfail_closedでブロックする() {
+        // #24: ヘッダから寸法を取れない（マジック不一致/壊れ/細工）画像は配信前ガードでブロックし
+        // 「既定アプリで開く」へ誘導する（nontext::decide_image_open の寸法不明時方針と統一）。
+        let d = check_image_bytes(b"not an image", DEFAULT_IMAGE_MAX_PIXELS);
+        assert_eq!(d, GuardDecision::Block(BlockReason::ImageDimensionsUnknown));
+    }
+
+    #[test]
+    fn jpeg_の不正なセグメント長は走査を打ち切りブロックする() {
+        // #24: len < 2 は JPEG 仕様違反（長さフィールド 2 バイトを含むため最小 2）。
+        // SOF を見つけられず寸法不明＝fail-closed でブロックする（無限ループ/誤読を防ぐ）。
+        let mut b = vec![0xff, 0xd8]; // SOI
+        b.extend_from_slice(&[0xff, 0xe0, 0x00, 0x00]); // APP0 だが len=0（不正・< 2）
+        b.extend_from_slice(&[0u8; 16]);
+        let d = check_image_bytes(&b, DEFAULT_IMAGE_MAX_PIXELS);
+        assert_eq!(
+            d,
+            GuardDecision::Block(BlockReason::ImageDimensionsUnknown),
+            "不正セグメント長 JPEG が寸法不明（ブロック）にならない: {d:?}"
+        );
     }
 
     #[test]

@@ -79,14 +79,29 @@ impl PreviewTheme {
     }
 
     /// 単一の色値文字列が安全か（英数 + `#(),%. -` と空白のみ・非空・長さ上限）。
+    ///
+    /// `(` `)` を含む関数記法は色関数（`rgb(`/`rgba(`/`hsl(`/`hsla(`）に限って許す。
+    /// `url(`/`image-set(`/`expression(`/`var(` 等の外部参照/動的関数は色文字以外を含まなくても
+    /// 明示的に拒否する（テーマ色は信頼値だが、防御の趣旨に沿って過剰許容を断つ＝#45）。
     fn is_safe_color(c: &str) -> bool {
         if c.is_empty() || c.len() > 64 {
             return false;
         }
-        c.chars().all(|ch| {
+        // 文字集合の検査（宣言区切り・タグ文字・URL 文字は弾く）。
+        let charset_ok = c.chars().all(|ch| {
             ch.is_ascii_alphanumeric()
                 || matches!(ch, '#' | '(' | ')' | ',' | '%' | '.' | '-' | ' ')
-        })
+        });
+        if !charset_ok {
+            return false;
+        }
+        // `(` を含む（関数記法）なら、許可する色関数で始まる場合のみ通す。
+        if c.contains('(') {
+            let lower = c.trim_start().to_ascii_lowercase();
+            const COLOR_FUNCS: &[&str] = &["rgb(", "rgba(", "hsl(", "hsla("];
+            return COLOR_FUNCS.iter().any(|f| lower.starts_with(f));
+        }
+        true
     }
 }
 
@@ -279,14 +294,29 @@ impl AssetNeeds {
 /// 判定はサニタイズ済み body の文字列 contains のみ（過検出は無害＝余分に読み込むだけ・取りこぼしは
 /// 描画されないだけで安全側に倒れる）。
 /// - Mermaid: comrak 出力の `<code class="language-mermaid">`（`language-mermaid` を含むか）。
-/// - 数式: KaTeX の区切り（`$` / `\(` / `\[`）が本文に出るか。
+/// - 数式: KaTeX の区切り（[`needs_katex`]）。通貨表記「$100」単独で全DOM走査が走らないよう
+///   `$` は対になっている可能性まで絞り（2 個以上）、`\(`/`\[` の検出は維持する（#23・DoS 寄り回避）。
 /// - コードハイライト: コードブロック（`<pre` または `<code class="language-`）が出るか。
 fn detect_assets(body: &str) -> AssetNeeds {
     AssetNeeds {
         mermaid: body.contains("language-mermaid"),
-        katex: body.contains('$') || body.contains("\\(") || body.contains("\\["),
+        katex: needs_katex(body),
         highlight: body.contains("<pre") || body.contains("<code class=\"language-"),
     }
+}
+
+/// 本文が KaTeX 注入を要するか（過検出抑制・#23）。
+///
+/// 旧実装は `$` 1 文字で発火し、通貨表記「$100」だけの文書でも KaTeX を読み込み全DOM走査する DoS 寄りの
+/// 挙動だった。KaTeX のインライン/ディスプレイ数式は `$...$` / `$$...$$` のように `$` が**対**で現れるため、
+/// `$` が 2 個以上あって初めて数式らしいとみなす（単独の通貨表記では発火しない）。`\(`/`\[` の検出は
+/// バックスラッシュ区切りの数式があり得るため維持する（取りこぼしは描画されないだけで安全側）。
+fn needs_katex(body: &str) -> bool {
+    if body.contains("\\(") || body.contains("\\[") {
+        return true;
+    }
+    // `$` が 2 個以上＝対になる数式区切りの可能性（単独「$100」では発火しない）。
+    body.matches('$').take(2).count() >= 2
 }
 
 /// 使われている機能の同梱ベンダー JS だけを nonce 付きで注入する body 末尾の `<script>` 群を組む。
@@ -338,18 +368,14 @@ fn build_asset_scripts(assets: &AssetNeeds, nonce: &str) -> String {
 ///
 /// **失敗の可視化は in-preview（Stage ③・要件6.2）**: 失敗ブロックには [`markError`] が `pika-block-error` を
 /// 付け、[`build_base_style`] の CSS が縦線＋「描画に失敗（元のコードを表示）」ラベルで視認可能にする。
-/// `window.parent.postMessage` は別WebView では `window.parent === window` の**無害な no-op**で残す
-/// （F-029 でプレビュー別WebView からの IPC/event は境界で全拒否＝メインへ件数を送る経路は持たない・
-/// セキュリティ設計と両立させるため穴を開け直さない）。
+/// 失敗件数をメインへ送る経路は**持たない**（F-029 でプレビュー別WebView からの IPC/event は境界で全拒否）。
+/// 旧実装の `window.parent.postMessage(..., "*")` は別WebView では `window.parent === window` の no-op だったが、
+/// 送信先が存在せず、かつ targetOrigin `"*"` は将来 iframe 化した際に任意オリジンへ送る地雷になるため
+/// **行ごと削除した**（#32・送る相手がいないコードを正本に残さない）。失敗の可視化は in-preview の CSS で完結する。
 const TRUSTED_JS_INIT: &str = r#"(function(){
   "use strict";
   var BLOCK_TIMEOUT_MS = 1000;
   var failures = 0;
-  function reportFailures(){
-    if (failures > 0 && window.parent !== window) {
-      try { window.parent.postMessage({ type: "pika-preview-failures", count: failures }, "*"); } catch(e){}
-    }
-  }
   function runHighlight(){
     if (!window.hljs) return;
     document.querySelectorAll("pre code").forEach(function(el){
@@ -396,7 +422,7 @@ const TRUSTED_JS_INIT: &str = r#"(function(){
     var pre = el.closest("pre") || el;
     if (pre && pre.classList) pre.classList.add("pika-block-error");
   }
-  function init(){ runHighlight(); runKatex(); runMermaid(); setTimeout(reportFailures, BLOCK_TIMEOUT_MS + 50); }
+  function init(){ runHighlight(); runKatex(); runMermaid(); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();
 })();"#;
@@ -670,6 +696,52 @@ mod tests {
     }
 
     #[test]
+    fn wrap_通貨表記単独では_katex_を注入しない_過検出抑制() {
+        // #23: 「$100」のような `$` 単独（対になっていない）では KaTeX を読み込まない（DoS 寄り回避）。
+        let body = "<p>価格は $100 です。</p>";
+        let doc = wrap_preview_document(body, "n", PreviewFlavor::MarkdownTrustedJs, None);
+        assert!(
+            !doc.contains("/assets/katex.min.js"),
+            "通貨表記単独で KaTeX を注入した（過検出）: {doc}"
+        );
+    }
+
+    #[test]
+    fn wrap_対になる数式区切りでは_katex_を注入する() {
+        // `$x$`（`$` が 2 個＝対）では従来どおり KaTeX を注入する。
+        let body = "<p>変数 $x$ について</p>";
+        let doc = wrap_preview_document(body, "n", PreviewFlavor::MarkdownTrustedJs, None);
+        assert!(
+            doc.contains("/assets/katex.min.js"),
+            "対の数式区切りで KaTeX が注入されない: {doc}"
+        );
+    }
+
+    #[test]
+    fn wrap_バックスラッシュ数式区切りでは_katex_を注入する() {
+        // `\(...\)` / `\[...\]` は `$` を使わない数式区切り＝従来どおり検出を維持する（#23）。
+        let body = r"<p>式 \(a+b\) について</p>";
+        let doc = wrap_preview_document(body, "n", PreviewFlavor::MarkdownTrustedJs, None);
+        assert!(
+            doc.contains("/assets/katex.min.js"),
+            "バックスラッシュ数式区切りで KaTeX が注入されない: {doc}"
+        );
+    }
+
+    #[test]
+    fn 注入jsに_postmessage_の地雷を残さない() {
+        // #32: 送信先の無い postMessage(..., "*") は正本から削除する（将来の iframe 化での任意オリジン送信防止）。
+        assert!(
+            !TRUSTED_JS_INIT.contains("postMessage"),
+            "送信先の無い postMessage が注入 JS に残っている（#32）"
+        );
+        assert!(
+            !TRUSTED_JS_INIT.contains("\"*\""),
+            "targetOrigin \"*\" が注入 JS に残っている（#32）"
+        );
+    }
+
+    #[test]
     fn 正常な外部許可ホストは_img_font_に反映される() {
         let allow = ExternalResourceAllow {
             hosts: vec!["https://cdn.example.com".to_string()],
@@ -842,8 +914,22 @@ mod tests {
         ] {
             assert!(!PreviewTheme::is_safe_color(bad), "危険色 `{bad}` を通した");
         }
-        // 注記: `url(...)`/`expression(...)` は英数+`()`のみで構成され色値検証は通過するが、
-        // CSS 変数値として `color:var(--pk-accent)` に展開されるだけで `<style>` 構造は崩せない
-        // （`;`/`{`/`<` が無いため宣言/タグを脱出できない＝注入不能）。
+        // #45: `()` を含む関数記法は色関数（rgb/rgba/hsl/hsla）に限る。
+        // url()/image-set()/expression()/var() は色文字以外を含まなくても明示拒否する（過剰許容を断つ）。
+        for bad_func in [
+            "url(x)",
+            "image-set(a)",
+            "expression(alert(1))",
+            "var(--x)",
+            "attr(data-x)",
+        ] {
+            assert!(
+                !PreviewTheme::is_safe_color(bad_func),
+                "色関数でない `()` を通した: {bad_func}"
+            );
+        }
+        // 色関数（rgb/rgba/hsl/hsla）は引き続き許可する。
+        assert!(PreviewTheme::is_safe_color("hsl(210, 50%, 40%)"));
+        assert!(PreviewTheme::is_safe_color("hsla(210,50%,40%,.5)"));
     }
 }

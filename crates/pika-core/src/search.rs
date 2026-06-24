@@ -59,6 +59,10 @@ pub struct SearchOptions {
     /// 大文字小文字を区別するか（false でケースインセンシティブ）。
     pub case_sensitive: bool,
     /// 単語単位か（`\b` で囲んで部分一致を防ぐ）。
+    ///
+    /// 注記（#42）: `\b` は Unicode の「単語境界」で、英単語向け。日本語など空白で区切らない言語では
+    /// 単語境界が言語的に未定義（文字種の切れ目で `\b` が立つ）なため、whole_word の挙動は英単語を
+    /// 想定したものとする（日本語での「単語単位」は意味を定義しない＝過大対応しない）。
     pub whole_word: bool,
     /// 正規表現として解釈するか（false ならリテラル＝メタ文字をエスケープ）。
     pub regex: bool,
@@ -123,7 +127,7 @@ impl std::error::Error for SearchError {}
 /// 検索オプションからパターン文字列を組み立てる（リテラル/単語単位/大小無視を反映）。
 ///
 /// - `regex=false`: メタ文字をエスケープしてリテラル化（同一経路で扱う）。
-/// - `whole_word=true`: `\b...\b` で囲む。
+/// - `whole_word=true`: `\b...\b` で囲む（英単語向け。日本語の単語境界は未定義＝#42）。
 /// - `case_sensitive=false`: 先頭に `(?i)` フラグを付ける（fancy-regex のインラインフラグ）。
 fn build_pattern(query: &str, opts: SearchOptions) -> String {
     let core = if opts.regex {
