@@ -65,7 +65,18 @@
            ツールバー(#toolbar)は完全廃止し、フォルダを開く/保存/確認済み/巻き戻し等は
            ここの各メニューへ移した。各 .mi クリックで直下に .menu-pop（ドロップダウン）を開く。
            DOM 骨格のみここに置き、ドロップダウンの中身・開閉・キーボード操作は main.ts(ui/menu) が司る。 -->
-      <header id="menubar" class="menubar" role="menubar" aria-label="メインメニュー">
+      <!-- フレームレス化（tauri.conf decorations:false・ui-design §7）でメニュー帯がタイトルバーを兼ねる。
+           帯全体を data-tauri-drag-region にしてウィンドウ移動の当たり判定を最大化する。Tauri v2 の
+           drag region は mousedown の e.target が data-tauri-drag-region 属性を持つ要素のときだけドラッグを
+           開始するため、ボタン（.mi/.wc-btn/tab-tools 内の各 button）には属性を付けず通常クリックを優先する。
+           tab-tools/seg など「クリックを受けないラッパ div」には属性を付け、ボタン間の隙間でも移動できるようにする。 -->
+      <header
+        id="menubar"
+        class="menubar"
+        role="menubar"
+        aria-label="メインメニュー"
+        data-tauri-drag-region
+      >
         <button
           type="button"
           class="mi"
@@ -121,14 +132,74 @@
         >
           ヘルプ
         </button>
-        <!-- メニュー群を左に詰め、右端のウィンドウタイトルを押し出す伸縮スペーサ（ui-mock .menubar .grow）。
-             フレームレス化（tauri.conf decorations:false・ui-design §7）で OS タイトルバーを廃したため、
-             この空き帯をドラッグ領域にしてウィンドウ移動を担う（data-tauri-drag-region）。 -->
+        <!-- メニュー群を左に詰め、右側の tab-tools/window-controls を押し出す伸縮ドラッグ空白。
+             #menubar 自体が data-tauri-drag-region のためこの空白もドラッグでウィンドウ移動できる
+             （属性は冗長だが当たり判定を明示するため残す）。 -->
         <span class="grow" data-tauri-drag-region></span>
-        <!-- 右端のウィンドウタイトル「<フォルダ名> — pika」（ui-mock .menubar .title）。
-             フォルダ名は main.ts(updateWindowTitle) が state.folder のベース名で更新する。
-             タイトル帯もドラッグ可能にする（移動の当たり判定を広げる）。 -->
-        <span class="title" id="window-title" data-tauri-drag-region>pika</span>
+        <!-- 隠れた差分あり（未読）タブ数のバッジ（UIブラッシュアップ T10・差分 C5・要件5.3・
+             ui-mock .hidden-unread）。タブが画面幅を超え横スクロールで見えなくなった未読タブが
+             あるとき「▸ 未読N」を出す。タブ行（#tabbar）から本メニュー帯へ移設したが id/class は維持し、
+             main.ts(updateHiddenUnread) が id 参照で表示/非表示・件数 N・クリックスクロールを司る。
+             既定は非表示（hidden）で、N>0 のときだけ出す。 -->
+        <button
+          id="hidden-unread"
+          type="button"
+          class="hidden-unread"
+          hidden
+          title="画面外の差分ありタブへスクロール"
+        ></button>
+        <!-- タブバー右端から移設したツール群（ui-mock .tab-tools・ui-design 8章）。
+             [ソース|分割|プレビュー] のモード切替セグメント（排他）＋ 差分トグル（独立）＋
+             ✓確認済みにする＋ブラウザで開く。id/class は維持（main.ts が id 参照で配線）。
+             クリックを受けないラッパ（#tab-tools・.seg）には data-tauri-drag-region を付け、ボタン間の
+             隙間でもウィンドウ移動できるようにする。各 button 本体には付けない（クリック優先）。 -->
+        <div id="tab-tools" data-tauri-drag-region>
+          <!-- モード切替セグメント（排他・ui-mock .seg）。現在モードに .on が付く。 -->
+          <div class="seg" role="group" aria-label="表示モード" data-tauri-drag-region>
+            <button id="mode-source" type="button" data-mode="source" aria-pressed="false">
+              ソース
+            </button>
+            <button id="mode-split" type="button" data-mode="split" aria-pressed="false">
+              分割
+            </button>
+            <button id="mode-preview" type="button" data-mode="preview" aria-pressed="false">
+              プレビュー
+            </button>
+          </div>
+          <!-- 差分トグル（独立・ui-mock .diff-toggle）。ON は accent-strong 塗り（.on）。 -->
+          <button
+            id="toggle-diff"
+            type="button"
+            class="diff-toggle"
+            disabled
+            aria-pressed="false"
+            title="差分 Ctrl+Shift+D"
+          >
+            差分
+          </button>
+          <!-- 確認済みにする（ui-mock .iconbtn・要件8.3）。 -->
+          <button
+            id="confirm-file"
+            type="button"
+            class="iconbtn"
+            disabled
+            title="確認済みにする Ctrl+Enter"
+          >
+            ✓ 確認済みにする
+          </button>
+          <!-- ブラウザで開く（ui-mock .iconbtn・要件6.2/design G「UIブラッシュアップ T9」）。
+               クリックで**アクティブタブのファイル**を OS 既定アプリ（HTML なら既定ブラウザ等）で開く。
+               アクティブタブが無い間は無効（refreshViewTools が活性を同期する）。任意 URL は開かない。 -->
+          <button
+            id="open-external"
+            type="button"
+            class="iconbtn"
+            disabled
+            title="既定のブラウザで開く"
+          >
+            ブラウザで開く
+          </button>
+        </div>
         <!-- ウィンドウ操作ボタン群（フレームレス化の自前タイトルバー導線・ui-design §7）。
              OS 標準の最小化/最大化/閉じるを自前実装する。各ボタンの活性/最大化トグルは
              main.ts(initWindowControls) が @tauri-apps/api/window 経由で配線する。
@@ -205,80 +276,11 @@
           </div>
         </nav>
         <main id="editor-pane">
-          <!-- タブバー（ui-mock .tabbar・UIブラッシュアップ T6 差分 C4）。grid-row:1 を担うコンテナで、
-               タブ列（#tabs・renderTabs が replaceChildren する）＋ spring ＋ tab-tools（静的UI）を
-               flex で横並びにする。renderTabs は #tabs しか触らないので tab-tools は破壊されない。 -->
+          <!-- タブバー（ui-mock .tabbar・UIブラッシュアップ T6 差分 C4）。grid-row:1 を担うコンテナ。
+               tab-tools/hidden-unread はメニュー帯（#menubar）へ移設したため、ここはタブ列（#tabs）のみ。
+               #tabs が横幅いっぱいに伸びてタブを並べ、溢れたらホイール上下で横スクロールする（main.ts）。 -->
           <div id="tabbar">
             <div id="tabs" role="tablist" aria-label="開いているタブ"></div>
-            <!-- タブ列を左に詰め tab-tools を右端へ押す伸縮スペーサ（ui-mock .spring）。 -->
-            <span class="spring"></span>
-            <!-- 隠れた差分あり（未読）タブ数のバッジ（UIブラッシュアップ T10・差分 C5・要件5.3・
-                 ui-mock .hidden-unread）。タブが画面幅を超え横スクロールで見えなくなった未読タブが
-                 あるとき「▸ 未読N」を出す。spring と tab-tools の間（ui-mock 行 410 と同位置）。
-                 表示/非表示・件数 N・クリックスクロールは main.ts(updateHiddenUnread) が司る。
-                 既定は非表示（hidden）で、N>0 のときだけ出す。
-                 ※要件5.3 の「全タブ一覧ドロップダウン」は今回は省略する（優先度低・no silent cap で明記）。
-                   理由: 横スクロール＋本バッジ＋バッジクリックでの導線で「隠れた差分ありタブへ気づき・
-                   到達する」中心目的は満たせる一方、全タブ一覧ドロップダウンは menu.ts 相当の開閉/
-                   キーボード操作/フォーカストラップを別実装する重い追加で、優先度低の本タスクには釣り
-                   合わない。必要になれば別タスクで追加する（要件改訂は不要＝5.3 既載）。 -->
-            <button
-              id="hidden-unread"
-              type="button"
-              class="hidden-unread"
-              hidden
-              title="画面外の差分ありタブへスクロール"
-            ></button>
-            <!-- タブバー右端のツール群（ui-mock .tab-tools・ui-design 8章）。
-                 [ソース|分割|プレビュー] のモード切替セグメント（排他）＋ 差分トグル（独立）＋
-                 ✓確認済みにする。「ブラウザで開く」「▸未読N」は別タスク（T9/T10）のため今回は置かない。 -->
-            <div id="tab-tools">
-              <!-- モード切替セグメント（排他・ui-mock .seg）。現在モードに .on が付く。 -->
-              <div class="seg" role="group" aria-label="表示モード">
-                <button id="mode-source" type="button" data-mode="source" aria-pressed="false">
-                  ソース
-                </button>
-                <button id="mode-split" type="button" data-mode="split" aria-pressed="false">
-                  分割
-                </button>
-                <button id="mode-preview" type="button" data-mode="preview" aria-pressed="false">
-                  プレビュー
-                </button>
-              </div>
-              <!-- 差分トグル（独立・ui-mock .diff-toggle）。ON は accent-strong 塗り（.on）。 -->
-              <button
-                id="toggle-diff"
-                type="button"
-                class="diff-toggle"
-                disabled
-                aria-pressed="false"
-                title="差分 Ctrl+Shift+D"
-              >
-                差分
-              </button>
-              <!-- 確認済みにする（ui-mock .iconbtn・要件8.3）。 -->
-              <button
-                id="confirm-file"
-                type="button"
-                class="iconbtn"
-                disabled
-                title="確認済みにする Ctrl+Enter"
-              >
-                ✓ 確認済みにする
-              </button>
-              <!-- ブラウザで開く（ui-mock .iconbtn・要件6.2/design G「UIブラッシュアップ T9」）。
-                   クリックで**アクティブタブのファイル**を OS 既定アプリ（HTML なら既定ブラウザ等）で開く。
-                   アクティブタブが無い間は無効（refreshViewTools が活性を同期する）。任意 URL は開かない。 -->
-              <button
-                id="open-external"
-                type="button"
-                class="iconbtn"
-                disabled
-                title="既定のブラウザで開く"
-              >
-                ブラウザで開く
-              </button>
-            </div>
           </div>
           <!-- 差分トグル ON 時に表示する read-only unified 差分面（要件8.2）。既定は非表示。 -->
           <div id="editor-host" aria-label="エディタ"></div>
