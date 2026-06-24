@@ -18,7 +18,7 @@ use pika_core::snapshot::{
 };
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -67,11 +67,16 @@ struct SnapshotInner {
     /// 索引（ベースライン/退避/参照計数・pika-core の決定論モデル）。
     store: SnapshotStore,
     /// content-addressed object（ハッシュ → LF 正規化済み内容）。
-    /// design doc 11章では zstd 圧縮してデータルートへ永続化するが、本スプリントはメモリ保持で結線する。
+    /// `snap_dir` が `Some` のとき、ここはデータルート配下 `objects/<hash>.zst` の **インメモリキャッシュ**
+    /// （遅延ロードで満たす）。`None` のときは従来どおりメモリ保持のみ（後方互換）。
     objects: HashMap<String, String>,
     /// 差分提示時点のディスクスナップショット（確認済み確定直前の再照合に使う＝要件8.3）。
     /// path → (mtime, hash, 提示した内容)。
     diff_snapshots: HashMap<String, DiffSnapshot>,
+    /// 永続スナップショット領域（`<data_root>/snapshots/<wsハッシュ>`）。
+    /// `None` の間は永続化しない（ワークスペース未設定／data_root 解決失敗時の後方互換＝#3）。
+    /// `Some` のとき各 mutation で object/メタ/index.json を書き、起動時にロードする（再起動で揮発しない）。
+    snap_dir: Option<PathBuf>,
 }
 
 impl Default for SnapshotService {
@@ -87,24 +92,93 @@ impl SnapshotService {
         Self::default()
     }
 
+    /// ワークスペースの永続スナップショット領域を確定し、既存の索引/退避をロードする（#3）。
+    ///
+    /// 起動（フォルダオープン）時に1回呼ぶ。これにより「再起動で退避が揮発する」欠陥を解消する
+    /// （最上位原則「データを失わない／退避が最後の砦」を再起動を跨いで成立させる）。
+    ///
+    /// 処理:
+    /// 1. データルート最上位に DACL を張る（所有者＋SYSTEM 限定・失敗は警告ログのみで致命にしない）。
+    /// 2. `<data_root>/snapshots/<wsハッシュ>/objects` を作る。
+    /// 3. index.json をロード（正常／破損復元／初回空の3分岐）。破損時は object の自己記述メタから
+    ///    退避一覧を再生成する（recover_stashes_from_meta＝最後の砦に到達）。
+    /// 4. `snap_dir` を保持し、以後の各 mutation が object/メタ/index を永続化する。
+    ///
+    /// **objects は遅延ロード**（全件は読まない＝起動を重くしない）。内容を引く箇所
+    /// （compute_file_diff/rollback_file の baseline 取得）で map ミス時に snap_dir から読む。
+    pub fn set_workspace(&self, ws_root: &str, data_root: &Path) -> Result<(), String> {
+        // 1. データルート最上位の DACL（失敗は致命にせず警告ログ・起動継続）。
+        if let Err(e) = crate::snapshot_persist::harden_data_root_dacl(data_root) {
+            crate::diagnostic::record(
+                pika_core::diagnostic::LogLevel::Warn,
+                "snapshot",
+                "dacl",
+                None,
+                &e,
+            );
+        }
+
+        // 2. 永続領域を確定（objects まで作る）。
+        let snap_dir = crate::snapshot_persist::snapshot_dir_for(data_root, ws_root)?;
+
+        // 3. index.json をロード（正常/破損復元/初回空）。
+        let outcome = crate::snapshot_persist::load_store(&snap_dir);
+        if matches!(
+            outcome,
+            crate::snapshot_persist::LoadOutcome::RecoveredFromMeta(_)
+        ) {
+            // index 破損→object の自己記述メタから退避を再生成した（最後の砦・要件9.1）。
+            crate::diagnostic::record(
+                pika_core::diagnostic::LogLevel::Warn,
+                "snapshot",
+                "recover",
+                None,
+                "index.json が読めず退避メタから退避一覧を復元しました",
+            );
+        }
+        let store = outcome.into_store();
+
+        // 4. inner を差し替える（store をロード結果へ・snap_dir を保持）。
+        let mut inner = self.inner.lock().map_err(|_| "snapshot ロック失敗")?;
+        inner.store = store;
+        inner.objects.clear();
+        inner.diff_snapshots.clear();
+        inner.snap_dir = Some(snap_dir);
+        Ok(())
+    }
+
     /// フォルダ初回オープン時にベースラインを取得する（全既読スタート＝要件8.1）。
     /// 内容保存方針（機密/10MB以上/画像＝ハッシュのみ）は pika-core::snapshot::policy で判定する。
+    ///
+    /// **非クロバー化（#3）**: 既にベースラインがある path はスキップする。再オープン時に
+    /// 永続済みベースライン（前回確認済み内容）を「全既読」で上書きしてしまうと、閉じている間の
+    /// 外部変更が差分として残らない。要件8.1「全既読スタート」は **初回（ベースライン未保持）の
+    /// ファイルにのみ**適用するのが正しい挙動。
     pub fn capture_baseline(&self, path: &str, content: &str, size: u64) {
         let mut inner = self.inner.lock().expect("snapshot lock");
         let key = normalize_path_key(path);
+        // 既にベースラインがある（前回オープンで永続化された）path は触らない（非クロバー）。
+        if inner.store.baseline(&key).is_some() {
+            return;
+        }
         let hash = hash_normalized(content);
         match baseline_policy(path, size) {
             BaselinePolicy::StoreContent => {
                 let normalized = pika_core::diff::normalize_lf(content);
-                inner.objects.insert(hash.clone(), normalized);
+                inner.objects.insert(hash.clone(), normalized.clone());
                 inner
                     .store
-                    .set_baseline_with_content(key, hash.clone(), hash);
+                    .set_baseline_with_content(&key, hash.clone(), hash.clone());
+                // 内容 object を永続化（再起動でベースライン内容＝差分の素を失わない）。
+                if let Some(dir) = inner.snap_dir.clone() {
+                    crate::snapshot_persist::persist_object(&dir, &hash, &normalized);
+                }
             }
             BaselinePolicy::HashOnly => {
-                inner.store.set_baseline_hash_only(key, hash);
+                inner.store.set_baseline_hash_only(&key, hash);
             }
         }
+        persist_index_locked(&mut inner);
     }
 
     /// 破壊的上書き保存の**前に**、ディスク上の現内容を incoming 退避する（要件7.3・最上位原則）。
@@ -149,7 +223,7 @@ impl SnapshotService {
 
         // 未確認の外部変更がディスクにある。incoming として退避してから上書きを許す。
         let normalized = pika_core::diff::normalize_lf(disk_content);
-        inner.objects.insert(disk_hash.clone(), normalized);
+        inner.objects.insert(disk_hash.clone(), normalized.clone());
         let stashed =
             inner
                 .store
@@ -158,6 +232,14 @@ impl SnapshotService {
         if stashed.stashed_object != disk_hash {
             return Err("incoming 退避を索引へ登録できませんでした（保存を中断）".into());
         }
+        // 退避 object とその自己記述メタを永続化してから index を書く（最後の砦を再起動を跨いで残す・#3）。
+        if let Some(dir) = inner.snap_dir.clone() {
+            crate::snapshot_persist::persist_object(&dir, &disk_hash, &normalized);
+            if let Some(meta) = inner.store.object_meta(&disk_hash) {
+                crate::snapshot_persist::persist_meta(&dir, &disk_hash, &meta.clone());
+            }
+        }
+        persist_index_locked(&mut inner);
         Ok(true)
     }
 }
@@ -169,6 +251,40 @@ impl SnapshotService {
 /// 索引アクセスは常に本関数でキーを揃える（FS 読取は元パスをそのまま使う＝区切り混在に強い）。
 fn normalize_path_key(path: &str) -> String {
     path.replace('\\', "/")
+}
+
+/// 現在の索引を index.json へ永続化する（snap_dir が None ならスキップ＝後方互換・#3）。
+///
+/// 各 mutation の完了直前に1回呼ぶ。失敗（FS 権限等）は致命にせず警告ログのみ
+/// （退避自体は索引に入っており、object/メタは別途書かれている＝最後の砦は残る）。
+fn persist_index_locked(inner: &mut SnapshotInner) {
+    let Some(dir) = inner.snap_dir.clone() else {
+        return; // 永続化先未設定＝従来どおりメモリ保持のみ。
+    };
+    if let Err(e) = crate::snapshot_persist::persist_index(&dir, &inner.store) {
+        crate::diagnostic::record(
+            pika_core::diagnostic::LogLevel::Warn,
+            "snapshot",
+            "persist_index",
+            None,
+            &e,
+        );
+    }
+}
+
+/// content object を引く（遅延ロード対応＝#3）。
+///
+/// インメモリキャッシュ（`objects`）にあればそれを返す。ミスしたとき `snap_dir` が `Some` なら
+/// `objects/<hash>.zst` から遅延ロードしてキャッシュへ挿入する（起動時に全件読まない＝固まらない）。
+/// `snap_dir` が `None`（永続化なし）なら従来どおりキャッシュのみ参照する。
+fn get_object(inner: &mut SnapshotInner, hash: &str) -> Option<String> {
+    if let Some(content) = inner.objects.get(hash) {
+        return Some(content.clone());
+    }
+    let dir = inner.snap_dir.clone()?;
+    let loaded = crate::snapshot_persist::load_object(&dir, hash)?;
+    inner.objects.insert(hash.to_string(), loaded.clone());
+    Some(loaded)
 }
 
 /// ベースライン vs 現在内容の差分を計算する（要件8.2）。
@@ -204,7 +320,8 @@ pub fn compute_file_diff(
         });
     };
 
-    let baseline_content = inner.objects.get(&object_hash).cloned().unwrap_or_default();
+    // ベースライン内容は遅延ロード対応で引く（再起動後はキャッシュが空なので snap_dir から読む・#3）。
+    let baseline_content = get_object(&mut inner, &object_hash).unwrap_or_default();
     let diff = compute_diff(&baseline_content, &current);
 
     // 差分提示時点のディスク状態を記録（確認済み確定直前の再照合に使う＝要件8.3）。
@@ -259,14 +376,19 @@ pub fn confirm_file(
         } => {
             if store_content {
                 let normalized = pika_core::diff::normalize_lf(&disk_content);
-                inner.objects.insert(content_hash.clone(), normalized);
+                inner.objects.insert(content_hash.clone(), normalized.clone());
                 inner
                     .store
-                    .set_baseline_with_content(&key, content_hash.clone(), content_hash);
+                    .set_baseline_with_content(&key, content_hash.clone(), content_hash.clone());
+                // 新ベースライン内容 object を永続化（次回起動で差分の素を失わない・#3）。
+                if let Some(dir) = inner.snap_dir.clone() {
+                    crate::snapshot_persist::persist_object(&dir, &content_hash, &normalized);
+                }
             } else {
                 inner.store.set_baseline_hash_only(&key, content_hash);
             }
             inner.diff_snapshots.remove(&key);
+            persist_index_locked(&mut inner);
             Ok(true)
         }
     }
@@ -304,7 +426,7 @@ pub fn rollback_file(
     // 現在内容を rollback 退避（退避が最後の砦＝確認ダイアログより退避が先）。
     let cur_hash = hash_normalized(&disk_content);
     let normalized = pika_core::diff::normalize_lf(&disk_content);
-    inner.objects.insert(cur_hash.clone(), normalized);
+    inner.objects.insert(cur_hash.clone(), normalized.clone());
     let stash = inner
         .store
         .add_stash(&key, StashKind::Rollback, cur_hash.clone(), now_ms(), true);
@@ -313,12 +435,21 @@ pub fn rollback_file(
     if stash.stashed_object != cur_hash {
         return Err("巻き戻し退避を索引へ登録できませんでした（巻き戻し中断）".into());
     }
+    // 退避 object とメタを永続化（再起動を跨いで巻き戻し退避を残す・#3）。
+    if let Some(dir) = inner.snap_dir.clone() {
+        crate::snapshot_persist::persist_object(&dir, &cur_hash, &normalized);
+        if let Some(meta) = inner.store.object_meta(&cur_hash) {
+            crate::snapshot_persist::persist_meta(&dir, &cur_hash, &meta.clone());
+        }
+    }
 
     // ベースライン内容を返す（呼び出し側がディスク/バッファへ上書きする）。
     // ベースライン object が欠損していたら空内容で上書きさせない＝中断する（#1・最上位原則1）。
-    let Some(baseline_content) = inner.objects.get(&object_hash).cloned() else {
+    // 遅延ロード対応で引く（再起動後はキャッシュが空なので snap_dir から読む・#3）。
+    let Some(baseline_content) = get_object(&mut inner, &object_hash) else {
         return Err("ベースライン内容が見つかりません（巻き戻し中断）".into());
     };
+    persist_index_locked(&mut inner);
     Ok(baseline_content)
 }
 
@@ -405,17 +536,32 @@ pub fn confirm_all(
                     inner.store.add_stash(
                         &rel_path,
                         StashKind::BaselineReplace,
-                        obj,
+                        obj.clone(),
                         now,
                         false, // baseline-replace は LRU 枠を消費しない。
                     );
+                    // 退避 object（=従来ベースライン内容）の自己記述メタを永続化（一括取り消しの素・#3）。
+                    // object 実体はベースライン化時（capture/confirm）に既に永続化済み。
+                    if let Some(dir) = inner.snap_dir.clone() {
+                        if let Some(meta) = inner.store.object_meta(&obj) {
+                            crate::snapshot_persist::persist_meta(&dir, &obj, &meta.clone());
+                        }
+                    }
                     result.stashed += 1;
                 }
                 // ベースラインを差分時点（フリーズ内容＝現ディスク）へ更新。
                 if store_content {
                     if let Some(disk) = disk_map.get(&rel_path) {
                         let normalized = pika_core::diff::normalize_lf(disk);
-                        inner.objects.insert(content_hash.clone(), normalized);
+                        inner.objects.insert(content_hash.clone(), normalized.clone());
+                        // 新ベースライン内容 object を永続化（次回起動で差分の素を失わない・#3）。
+                        if let Some(dir) = inner.snap_dir.clone() {
+                            crate::snapshot_persist::persist_object(
+                                &dir,
+                                &content_hash,
+                                &normalized,
+                            );
+                        }
                     }
                     inner.store.set_baseline_with_content(
                         &rel_path,
@@ -431,6 +577,8 @@ pub fn confirm_all(
         }
     }
 
+    // バッチ全体の更新を1回でまとめて永続化（mutation 完了直前に index を1回・#3）。
+    persist_index_locked(&mut inner);
     Ok(result)
 }
 
@@ -497,4 +645,198 @@ fn now_ms() -> u64 {
     // フロアを前進させる（並行更新でも最大値へ収束させる）。
     NOW_MS_FLOOR.fetch_max(value, Ordering::Relaxed);
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    /// テスト用 data_root（衝突回避に nanos＋連番）。
+    fn temp_data_root(tag: &str) -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seq = SEQ.fetch_add(1, AtomicOrdering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("pika-snap-{tag}-{nanos}-{seq}"));
+        std::fs::create_dir_all(&dir).expect("data_root 作成");
+        dir
+    }
+
+    /// service 内の索引（store）へテスト専用にアクセスして検証する補助。
+    impl SnapshotService {
+        fn with_inner<R>(&self, f: impl FnOnce(&SnapshotInner) -> R) -> R {
+            let inner = self.inner.lock().expect("lock");
+            f(&inner)
+        }
+        /// インメモリキャッシュをクリアして「遅延ロードでしか取れない」状況を作る。
+        fn clear_object_cache(&self) {
+            self.inner.lock().expect("lock").objects.clear();
+        }
+        /// 遅延ロード経路で object を取得する（テスト検証用）。
+        fn fetch_object(&self, hash: &str) -> Option<String> {
+            let mut inner = self.inner.lock().expect("lock");
+            get_object(&mut inner, hash)
+        }
+        fn snap_dir(&self) -> Option<PathBuf> {
+            self.inner.lock().expect("lock").snap_dir.clone()
+        }
+    }
+
+    #[test]
+    fn 永続化往復_再起動でベースラインと退避が揮発しない() {
+        let data_root = temp_data_root("roundtrip");
+        let ws = data_root.join("ws").to_string_lossy().to_string();
+
+        // --- セッション1: ベースライン取得＋incoming 退避を行い、永続化する。 ---
+        let s1 = SnapshotService::new();
+        s1.set_workspace(&ws, &data_root).expect("set_workspace");
+        let file = format!("{ws}/a.md");
+        // 初回ベースライン（全既読スタート）。
+        s1.capture_baseline(&file, "ベースライン本文\n", 30);
+        let base_hash = hash_normalized("ベースライン本文\n");
+        // ディスクに未確認の外部変更がある状況で上書き保存直前の incoming 退避。
+        let stashed = s1
+            .stash_incoming_before_overwrite(&file, "外部が書いた本文\n", "自分の保存本文\n")
+            .expect("stash");
+        assert!(stashed, "未確認の外部変更は incoming 退避される");
+        let incoming_hash = hash_normalized("外部が書いた本文\n");
+
+        // index.json と object .zst が実ファイルとして書かれている。
+        let snap_dir = s1.snap_dir().expect("snap_dir");
+        assert!(
+            snap_dir.join(crate::snapshot_persist::INDEX_FILE).exists(),
+            "index.json が永続化される"
+        );
+        let objects = snap_dir.join(crate::snapshot_persist::OBJECTS_DIR);
+        assert!(
+            objects.join(format!("{base_hash}.zst")).exists(),
+            "ベースライン object が永続化される"
+        );
+        assert!(
+            objects.join(format!("{incoming_hash}.zst")).exists(),
+            "incoming 退避 object が永続化される"
+        );
+        drop(s1); // セッション1 終了（プロセス終了相当・インメモリは破棄）。
+
+        // --- セッション2: 新しい service で同じ snap_dir をロードする。 ---
+        let s2 = SnapshotService::new();
+        s2.set_workspace(&ws, &data_root).expect("再オープン");
+        let key = normalize_path_key(&file);
+        // ベースラインがロードされている（再起動で揮発しない）。
+        s2.with_inner(|inner| {
+            let b = inner.store.baseline(&key).expect("ベースラインがロードされる");
+            assert_eq!(b.content_hash, base_hash);
+            assert_eq!(b.object_hash.as_deref(), Some(base_hash.as_str()));
+            // incoming 退避もロードされている。
+            assert!(
+                inner
+                    .store
+                    .stashes(&key)
+                    .iter()
+                    .any(|e| e.object_hash == incoming_hash),
+                "incoming 退避がロードされる"
+            );
+        });
+        // object 内容は遅延ロードで取れる（キャッシュ空でも snap_dir から読む）。
+        s2.clear_object_cache();
+        assert_eq!(
+            s2.fetch_object(&base_hash).as_deref(),
+            Some("ベースライン本文\n"),
+            "ベースライン object を遅延ロードで取得できる"
+        );
+        assert_eq!(
+            s2.fetch_object(&incoming_hash).as_deref(),
+            Some("外部が書いた本文\n"),
+            "退避 object を遅延ロードで取得できる"
+        );
+
+        // --- 非クロバー: 再オープンで capture_baseline しても永続ベースラインを上書きしない。 ---
+        s2.capture_baseline(&file, "全く別の内容\n", 18);
+        s2.with_inner(|inner| {
+            let b = inner.store.baseline(&key).expect("ベースライン");
+            assert_eq!(
+                b.content_hash, base_hash,
+                "既存ベースラインは再オープンの capture で上書きされない（非クロバー）"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&data_root);
+    }
+
+    #[test]
+    fn 破損復元_index_が壊れても退避メタから最後の砦へ到達する() {
+        let data_root = temp_data_root("recover");
+        let ws = data_root.join("ws").to_string_lossy().to_string();
+
+        // セッション1: 退避を積んで永続化する。
+        let s1 = SnapshotService::new();
+        s1.set_workspace(&ws, &data_root).expect("set_workspace");
+        let file = format!("{ws}/b.md");
+        s1.capture_baseline(&file, "原本\n", 10);
+        s1.stash_incoming_before_overwrite(&file, "外部変更\n", "保存内容\n")
+            .expect("stash");
+        let incoming_hash = hash_normalized("外部変更\n");
+        let snap_dir = s1.snap_dir().expect("snap_dir");
+        // 退避 object の自己記述メタが書かれている（破損復元の素）。
+        let meta_path = snap_dir
+            .join(crate::snapshot_persist::OBJECTS_DIR)
+            .join(format!("{incoming_hash}.meta.json"));
+        assert!(meta_path.exists(), "退避 object の自己記述メタが永続化される");
+        drop(s1);
+
+        // index.json を壊す（不正 JSON で上書き）。
+        let index_path = snap_dir.join(crate::snapshot_persist::INDEX_FILE);
+        std::fs::write(&index_path, b"{ this is not valid json ").expect("index 破壊");
+
+        // セッション2: 破損 index でも object メタから退避が復元される（最後の砦）。
+        let s2 = SnapshotService::new();
+        s2.set_workspace(&ws, &data_root)
+            .expect("破損 index でも set_workspace は致命にならない");
+        let key = normalize_path_key(&file);
+        s2.with_inner(|inner| {
+            let stashes = inner.store.stashes(&key);
+            assert!(
+                stashes.iter().any(|e| e.object_hash == incoming_hash),
+                "破損 index でも退避メタから退避が再生成される（最後の砦・要件9.1）"
+            );
+            assert!(
+                stashes.iter().all(|e| e.unrestored),
+                "復元された退避は復元待ち（unrestored=true）として提示される"
+            );
+            // ベースラインは復元しない（内容照合で別途取り直す前提＝design doc 11章）。
+            assert!(
+                inner.store.baseline(&key).is_none(),
+                "破損復元ではベースラインは復元しない"
+            );
+        });
+        // 退避 object 実体は遅延ロードで取得できる（最後の砦の内容に到達）。
+        s2.clear_object_cache();
+        assert_eq!(
+            s2.fetch_object(&incoming_hash).as_deref(),
+            Some("外部変更\n"),
+            "復元された退避 object の内容に到達できる"
+        );
+
+        let _ = std::fs::remove_dir_all(&data_root);
+    }
+
+    #[test]
+    fn snap_dir_未設定なら従来どおりメモリ保持で動く_後方互換() {
+        // set_workspace を呼ばない＝snap_dir=None。永続化はスキップされるが API は従来どおり動く。
+        let s = SnapshotService::new();
+        assert!(s.snap_dir().is_none());
+        s.capture_baseline("/tmp/c.md", "本文\n", 8);
+        let key = normalize_path_key("/tmp/c.md");
+        s.with_inner(|inner| {
+            assert!(
+                inner.store.baseline(&key).is_some(),
+                "snap_dir 未設定でもベースラインはメモリ保持される"
+            );
+        });
+        // 永続化されていない（snap_dir が None なので index 書込もない）。
+        assert!(s.snap_dir().is_none());
+    }
 }

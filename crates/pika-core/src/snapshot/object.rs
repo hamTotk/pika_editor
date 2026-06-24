@@ -5,8 +5,10 @@
 //! 退避 object には自己記述メタ（元 relPath・kind・時刻・元 index 世代）を併記し、
 //! 索引（index.json）が破損しても object 群の走査から退避一覧を再生成できる（最上位原則1）。
 
+use serde::{Deserialize, Serialize};
+
 /// 退避の種別（要件9.2・7章/8章で定義した退避の発生源）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StashKind {
     /// 衝突: 未保存編集 vs 外部変更で［取り込む］時に自分の編集を退避（要件7.3）。
     Conflict,
@@ -33,7 +35,7 @@ impl StashKind {
 /// 退避 object に併記する自己記述メタ（要件9.1）。
 ///
 /// index 破損時はこのメタだけから「復元待ちの退避一覧」を提示できる（最後の砦に到達可能）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectMeta {
     /// 元の相対パス（ワークスペース基準。単体ファイルはファイルキー）。
     pub rel_path: String,

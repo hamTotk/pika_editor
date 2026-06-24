@@ -21,6 +21,7 @@ mod preview;
 mod settings_service;
 mod single_instance;
 mod snapshot;
+mod snapshot_persist;
 mod state_store;
 mod watcher;
 mod webview2;
