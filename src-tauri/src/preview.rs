@@ -509,10 +509,28 @@ fn local_resource_response(doc: &PreparedDoc, reference: &str) -> Response<Vec<u
         );
     }
 
-    Response::builder()
+    // 同一 WebView セッション内で繰り返し読まれるプレビュー素材へ控えめなキャッシュを効かせる（#53）。
+    // Range 非対応（プレビュー画像/CSS にシークは不要＝scope 外。実機での挙動確認は系統C）。
+    // 条件付き応答（304・If-None-Match 突合）は実装しない（シグネチャ非変更・max-age で十分）。
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header("X-Content-Type-Options", "nosniff")
+        // 5 分（控えめ）。素材は同一セッション内で繰り返し読まれる。
+        .header(header::CACHE_CONTROL, "max-age=300");
+    // mtime+サイズから弱い実体タグを付ける。取得失敗時は ETag を省略する（Cache-Control だけ付く）。
+    if let Ok(meta) = std::fs::metadata(&resolved) {
+        let size = meta.len();
+        if let Some(mtime_ms) = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis())
+        {
+            builder = builder.header(header::ETAG, format!("\"{mtime_ms:x}-{size:x}\""));
+        }
+    }
+    builder
         .body(bytes)
         .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "応答組立失敗"))
 }
