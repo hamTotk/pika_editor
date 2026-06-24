@@ -58,3 +58,6 @@ docs/perf-raw/
 .claude/scheduled_tasks.lock
 # 診断・レビューツールの生成物（review-harness 等）
 output/
+
+# eval-loop 作業ディレクトリ（品質ループの状態・ターンログ）
+.mso/
