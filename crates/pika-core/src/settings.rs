@@ -159,7 +159,12 @@ pub fn load_settings(toml_text: &str) -> SettingsLoad {
         &mut s.full_hash_on_startup,
         &mut warnings,
     );
-    extract_bool(&table, "feature_mermaid", &mut s.feature_mermaid, &mut warnings);
+    extract_bool(
+        &table,
+        "feature_mermaid",
+        &mut s.feature_mermaid,
+        &mut warnings,
+    );
     extract_bool(&table, "feature_math", &mut s.feature_math, &mut warnings);
     extract_bool(
         &table,
@@ -175,7 +180,12 @@ pub fn load_settings(toml_text: &str) -> SettingsLoad {
         &mut s.huge_file_threshold_bytes,
         &mut warnings,
     );
-    extract_usize(&table, "long_line_chars", &mut s.long_line_chars, &mut warnings);
+    extract_usize(
+        &table,
+        "long_line_chars",
+        &mut s.long_line_chars,
+        &mut warnings,
+    );
     extract_u8(&table, "tab_width", &mut s.tab_width, &mut warnings);
 
     // 文字列配列の per-field 抽出（配列でない/要素が文字列でないなら既定維持＋警告）。
@@ -281,7 +291,9 @@ fn extract_theme(table: &toml::Table, slot: &mut ThemeSetting, warnings: &mut Ve
 
 /// default_mode を抽出する（"source"/"preview"）。未知文字列/型不正は既定維持＋警告。
 fn extract_default_mode(table: &toml::Table, slot: &mut DefaultMode, warnings: &mut Vec<String>) {
-    let Some(v) = table.get("default_mode") else { return };
+    let Some(v) = table.get("default_mode") else {
+        return;
+    };
     match v.as_str() {
         Some("source") => *slot = DefaultMode::Source,
         Some("preview") => *slot = DefaultMode::Preview,
