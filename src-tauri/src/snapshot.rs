@@ -19,6 +19,7 @@ use pika_core::snapshot::{
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
@@ -288,12 +289,18 @@ pub fn rollback_file(path: String, snapshot: State<'_, SnapshotService>) -> Resu
     inner.objects.insert(cur_hash.clone(), normalized);
     let stash = inner
         .store
-        .add_stash(&key, StashKind::Rollback, cur_hash, now_ms(), true);
-    // 退避が索引へ入ったことを確認（失敗時は add_stash が evict を返すのみで本体は入る）。
-    debug_assert_eq!(stash.stashed_object, hash_normalized(&disk_content));
+        .add_stash(&key, StashKind::Rollback, cur_hash.clone(), now_ms(), true);
+    // 退避が索引へ入ったことを確認（incoming 同様 release でも実検証＝データを失わない・#1）。
+    // 入らなければ退避を握り潰さず中断する（無退避のまま破壊的上書きをしない）。
+    if stash.stashed_object != cur_hash {
+        return Err("巻き戻し退避を索引へ登録できませんでした（巻き戻し中断）".into());
+    }
 
     // ベースライン内容を返す（呼び出し側がディスク/バッファへ上書きする）。
-    let baseline_content = inner.objects.get(&object_hash).cloned().unwrap_or_default();
+    // ベースライン object が欠損していたら空内容で上書きさせない＝中断する（#1・最上位原則1）。
+    let Some(baseline_content) = inner.objects.get(&object_hash).cloned() else {
+        return Err("ベースライン内容が見つかりません（巻き戻し中断）".into());
+    };
     Ok(baseline_content)
 }
 
@@ -333,7 +340,12 @@ pub fn confirm_all(
             Some(f) => f,
             None => continue, // 差分未提示のものは対象外（見ていない内容を確定しない）。
         };
-        let disk_content = std::fs::read_to_string(path).unwrap_or_default();
+        // ディスク再読みに失敗したファイルは **このバッチで確定しない**＝未読維持で対象外にする（#2）。
+        // 読み取り失敗を空文字扱いするとベースラインが空内容へ確定しうる（confirm_file は ? で中断する）。
+        let disk_content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
         let disk = DiskState {
             mtime_ms: file_mtime_ms(path),
             content_hash: hash_normalized(&disk_content),
@@ -445,10 +457,26 @@ fn file_mtime_ms(path: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// 現在時刻（ミリ秒）。退避の created_at に使う。
+/// これまでに `now_ms()` が返した最大値（単調性のフロア）。
+///
+/// 退避の created_at_ms は 14日保護（容量GC）の窓判定に使う。クロックが UNIX_EPOCH 前へ
+/// 後退すると `duration_since` が Err → 従来は 0 を返し、created_at_ms=0 の退避が量産されて
+/// GC の14日保護が外れていた（#16）。LRU/押し出し順は pika-core 側の単調増加 seq が主キーなので
+/// 順序は壊れないが、保護窓の壁時計値が後退しないよう本フロアで単調化する。
+static NOW_MS_FLOOR: AtomicU64 = AtomicU64::new(0);
+
+/// 現在時刻（ミリ秒・単調化）。退避の created_at に使う。
+///
+/// 取得失敗（クロック後退）時も 0 へ落とさず、直近に返した値を再利用して単調性を壊さない（#16）。
 fn now_ms() -> u64 {
-    SystemTime::now()
+    let wall = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .ok();
+    let prev = NOW_MS_FLOOR.load(Ordering::Relaxed);
+    // 壁時計が取れたら prev とのより大きい方、取れなければ prev を採用（後退・0 化を防ぐ）。
+    let value = wall.map(|w| w.max(prev)).unwrap_or(prev);
+    // フロアを前進させる（並行更新でも最大値へ収束させる）。
+    NOW_MS_FLOOR.fetch_max(value, Ordering::Relaxed);
+    value
 }
