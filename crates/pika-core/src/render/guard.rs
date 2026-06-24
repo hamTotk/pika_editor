@@ -101,7 +101,7 @@ pub fn has_long_line(text: &str, limit_chars: usize) -> bool {
 /// デコードでメモリ/CPU が爆発し UI が固まる（設計原則「固まらない」違反）ため、**配信前に**
 /// ヘッダの width/height だけ読んで [`check_image_pixels`] で弾く（フルデコードしない）。
 ///
-/// 対応フォーマット（ヘッダ寸法を取れるもの）: PNG / GIF / JPEG / BMP / WebP(VP8/VP8L/VP8X)。
+/// 対応フォーマット（ヘッダ寸法を取れるもの）: PNG / GIF / JPEG / BMP / WebP(VP8/VP8L/VP8X) / ICO。
 ///
 /// **寸法不明時の既定（#24・fail-closed）**: ヘッダから width/height を判定できない（壊れ/細工/未知形式）
 /// 場合は [`GuardDecision::Block`]（[`BlockReason::ImageDimensionsUnknown`]）でブロックし「既定アプリで開く」へ
@@ -154,6 +154,20 @@ fn image_dimensions(b: &[u8]) -> Option<(u64, u64)> {
     // JPEG: SOF マーカ(SOF0..SOF15、ただし DHT/DAC/RST 等を除く)を走査して height/width を読む。
     if b.len() >= 4 && b[0] == 0xff && b[1] == 0xd8 {
         return jpeg_dimensions(b);
+    }
+    // ICO/CUR: reserved(2)=0 + type(2,LE)=1(ICO)/2(CUR) + count(2)。最初の ICONDIRENTRY 先頭の
+    // width(1)/height(1)（0 は 256 を意味する）を読む。要件の `.ico`（favicon 等）が `image_dimensions`
+    // で None になり配信前ガードで誤ブロックされる回帰を防ぐ（#24 の None=>Block は維持したまま対応形式を拡充）。
+    if b.len() >= 8
+        && b[0] == 0x00
+        && b[1] == 0x00
+        && (b[2] == 0x01 || b[2] == 0x02)
+        && b[3] == 0x00
+    {
+        // ICONDIRENTRY 先頭（オフセット6=width, 7=height）。0 は 256 を意味する（ICO 仕様）。
+        let w = if b[6] == 0 { 256u64 } else { b[6] as u64 };
+        let h = if b[7] == 0 { 256u64 } else { b[7] as u64 };
+        return Some((w, h));
     }
     None
 }
@@ -455,6 +469,35 @@ mod tests {
         b.extend_from_slice(&[0u8; 8]);
         let d = check_image_bytes(&b, DEFAULT_IMAGE_MAX_PIXELS);
         assert!(!d.is_allowed(), "JPEG 7000万px がブロックされない: {d:?}");
+    }
+
+    /// ICO ヘッダ（ICONDIR + 先頭 ICONDIRENTRY の width/height）を組み立てる。
+    /// `w8`/`h8` は 8bit フィールド値（0 は 256 を意味する ICO 仕様）。
+    fn ico_header(w8: u8, h8: u8) -> Vec<u8> {
+        let mut b = vec![0x00, 0x00, 0x01, 0x00]; // reserved=0, type=1(ICO)
+        b.extend_from_slice(&1u16.to_le_bytes()); // count=1
+        b.push(w8); // ICONDIRENTRY.width（オフセット6）
+        b.push(h8); // ICONDIRENTRY.height（オフセット7）
+        b.extend_from_slice(&[0u8; 8]); // 残りの ICONDIRENTRY フィールド
+        b
+    }
+
+    #[test]
+    fn ico_ヘッダから寸法を読み小寸法は許可する() {
+        // #24 の回帰修正: ICO（favicon 等）が image_dimensions で None になり配信前ガードで
+        // 誤ブロックされていた。16x16 の ICO は寸法を読めて Allow になること。
+        let b = ico_header(16, 16);
+        assert_eq!(image_dimensions(&b), Some((16, 16)));
+        let d = check_image_bytes(&b, DEFAULT_IMAGE_MAX_PIXELS);
+        assert!(d.is_allowed(), "小寸法 ICO がブロックされた: {d:?}");
+    }
+
+    #[test]
+    fn ico_の0サイズフィールドは256として扱う() {
+        // ICO 仕様: width/height の 8bit フィールドが 0 のときは 256。
+        let b = ico_header(0, 0);
+        assert_eq!(image_dimensions(&b), Some((256, 256)));
+        assert!(check_image_bytes(&b, DEFAULT_IMAGE_MAX_PIXELS).is_allowed());
     }
 
     #[test]

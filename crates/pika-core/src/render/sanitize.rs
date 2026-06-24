@@ -205,6 +205,12 @@ fn sanitize_style_element_bodies(html: &str) -> String {
 /// `@import url(...)` のような**ルール全体**が危険な場合と、`a{background:url(...)}` のように
 /// ブロック内の一部宣言だけが危険な場合の両方を、`{`/`}`/`;` の素朴な区切りで保守的に処理する。
 /// 取りこぼしより誤除去側に倒す（多層防御＝CSP に単層依存しないための念のための層）。
+///
+/// **ネストブロック（@media 等）の扱い**: `@media screen{.a{color:red}.b{background:url(x)}}` のような
+/// ネスト本体は宣言列（`;` 区切り）ではなく内部の各ルールの集合なので、本体に `{` を含む（＝ネストルールを
+/// 抱える）場合は [`sanitize_css_value`]（`;` 分割の宣言サニタイズ）ではなく本関数を**再帰適用**して
+/// 内部ルールを個別にサニタイズする。これにより危険な `.b{background:url(x)}` だけを落とし、安全な
+/// `.a{color:red}` を温存できる（従来は本体全体が 1 宣言扱いになり安全ルールごと黙って失われていた）。
 fn sanitize_css_block(css: &str) -> String {
     let mut out = String::with_capacity(css.len());
     let mut buf = String::new(); // セレクタ/at-rule のプレリュード蓄積。
@@ -217,11 +223,13 @@ fn sanitize_css_block(css: &str) -> String {
                 let prelude_dangerous = css_has_dangerous_token(&buf);
                 // ブロック本体を収集する（ネストは @media 等。素朴に深さで対応）。
                 let mut block = String::new();
+                let mut block_has_nested = false; // 本体に `{` を含む＝@media 等のネストブロック。
                 depth = 1;
                 for inner in chars.by_ref() {
                     match inner {
                         '{' => {
                             depth += 1;
+                            block_has_nested = true;
                             block.push(inner);
                         }
                         '}' => {
@@ -235,8 +243,13 @@ fn sanitize_css_block(css: &str) -> String {
                     }
                 }
                 if !prelude_dangerous {
-                    // ブロック内は宣言単位で危険なものだけ落とす（ネストルールも保守的にトークン検査）。
-                    let sanitized_block = sanitize_css_value(&block);
+                    // ネストブロック（@media 等）は内部の各ルールを再帰サニタイズし、危険ルールだけ落として
+                    // 安全ルールを温存する。平坦ブロック（セレクタ{宣言;宣言}）は従来通り宣言単位で落とす。
+                    let sanitized_block = if block_has_nested {
+                        sanitize_css_block(&block)
+                    } else {
+                        sanitize_css_value(&block)
+                    };
                     out.push_str(buf.trim());
                     out.push('{');
                     out.push_str(&sanitized_block);
@@ -737,6 +750,43 @@ mod tests {
         assert!(!out.contains("url("), "宣言内 url() が残った: {out}");
         assert!(!out.contains("evil"), "外部参照が残った: {out}");
         assert!(out.contains("color:green"), "安全な宣言まで落ちた: {out}");
+    }
+
+    #[test]
+    fn 系統b_media内の安全なルールは温存し危険なルールだけ除去する() {
+        // 回帰修正: @media 等のネスト本体を `sanitize_css_value`（`;` 分割）に丸ごと渡すと、本体は `;` を
+        // 含まないため 1 宣言扱いになり、url( を検出して安全な .a{color:red} ごと黙って失われていた。
+        // ネスト本体は再帰サニタイズして危険な .b{background:url(x)} だけ落とし .a{color:red} を温存する。
+        let out = sanitize_html(
+            r#"<style>@media screen{.a{color:red}.b{background:url(x)}}</style>"#,
+            PreviewFlavor::HtmlNoJs,
+        );
+        assert!(out.contains("<style"), "<style> 要素自体は残る: {out}");
+        assert!(out.contains("@media"), "@media ルール自体は残る: {out}");
+        // 安全なルールは温存される。
+        assert!(
+            out.contains("color:red"),
+            "安全な .a{{color:red}} まで落ちた: {out}"
+        );
+        // 危険トークン（url(）は除去される（セキュリティ後退厳禁）。
+        assert!(!out.contains("url("), "@media 内の url( が残った: {out}");
+        assert!(
+            !out.contains("url(x)"),
+            "@media 内の url(x) が残った: {out}"
+        );
+    }
+
+    #[test]
+    fn 系統b_media内の宣言一部だけ危険なら宣言だけ落としルールは残す() {
+        // ネストルール内で一部宣言だけ危険な場合、そのルールは残し危険宣言のみ捨てる。
+        let out = sanitize_html(
+            r#"<style>@media print{.c{color:green;background:url(http://evil/x.png)}}</style>"#,
+            PreviewFlavor::HtmlNoJs,
+        );
+        assert!(out.contains("@media"), "@media が残る: {out}");
+        assert!(out.contains("color:green"), "安全な宣言まで落ちた: {out}");
+        assert!(!out.contains("url("), "ネスト宣言内 url( が残った: {out}");
+        assert!(!out.contains("evil"), "外部参照が残った: {out}");
     }
 
     #[test]

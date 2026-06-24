@@ -252,8 +252,15 @@ impl SnapshotStore {
         // 復元済みの押し出しだけメタを物理的に落とす（再生成は残存 object のメタからのみ行う）。
         // 未復元（保護中）の押し出しは **メタを残す**＝実体 object が残る限り
         // recover_stashes_from_meta（index 破損時の最後の砦）から復元できる（#4・最上位原則1）。
+        //
+        // content-addressed のため同一内容の複数退避は同じ object_hash を共有する。evict_lru は既に
+        // 押し出し分を stashes から除去済みなので、ここで `is_object_referenced` を見れば「残りの生存
+        // entry がまだ同じ object を参照しているか」を正しく判定できる。生存 entry が参照中なら
+        // メタを消してはならない（消すと将来の index 破損時に生存 object をメタから再生成できなくなる）。
         for ev in &evicted.restored_objects {
-            self.object_meta.remove(ev);
+            if !self.is_object_referenced(ev) {
+                self.object_meta.remove(ev);
+            }
         }
 
         // 索引（stashes リスト）からの除外対象は復元済み・未復元の両方を返す（呼び出し側 GC の入力）。
@@ -556,6 +563,65 @@ mod tests {
         assert!(
             s.object_meta("r-0").is_none(),
             "復元済みの押し出しはメタも落とす（保護不要）"
+        );
+    }
+
+    #[test]
+    fn 同一内容を共有する復元済み退避はevictしても生存参照があればメタを残す() {
+        // content-addressed のため同一内容の複数退避は同じ object_hash を共有する。片方が LRU で
+        // 押し出されても、もう片方がまだ同じ object を参照しているならメタを消してはならない
+        // （消すと将来の index 破損時に生存 object をメタから再生成できなくなる＝最後の砦の喪失）。
+        let mut s = SnapshotStore::new();
+        // a.md と b.md に同一内容（同じ object_hash "dup"）の退避を 1 件ずつ。両方とも復元済みにする。
+        s.add_stash("a.md", StashKind::Conflict, "dup", 1, true);
+        s.mark_restored("a.md", "dup");
+        s.add_stash("b.md", StashKind::Conflict, "dup", 2, true);
+        s.mark_restored("b.md", "dup");
+
+        // a.md を退避で 11 件まで埋めて、最古の "dup"（復元済み）を LRU で押し出す。
+        for i in 0..10u64 {
+            s.add_stash("a.md", StashKind::Conflict, format!("a-{i}"), 100 + i, true);
+            s.mark_restored("a.md", &format!("a-{i}"));
+        }
+        // a.md から "dup" は押し出されている。
+        assert!(s.stashes("a.md").iter().all(|e| e.object_hash != "dup"));
+        // しかし b.md がまだ "dup" を参照しているのでメタは残る。
+        assert!(
+            s.object_meta("dup").is_some(),
+            "生存 entry（b.md）が参照中なのにメタが消された＝最後の砦の喪失"
+        );
+        assert!(s.is_object_referenced("dup"), "b.md がまだ dup を参照");
+
+        // 実体が残っていれば、生存中の dup はメタから退避一覧として再生成できる（最後の砦）。
+        let present: BTreeSet<String> = std::iter::once("dup".to_string())
+            .chain((0..10u64).map(|i| format!("a-{i}")))
+            .collect();
+        let recovered = s.recover_stashes_from_meta(&present);
+        assert!(
+            recovered
+                .get("b.md")
+                .map(|l| l.iter().any(|e| e.object_hash == "dup"))
+                .unwrap_or(false),
+            "生存中の dup がメタから再生成できない（最後の砦が機能していない）"
+        );
+    }
+
+    #[test]
+    fn 同一内容共有でも最後の参照がevictされたらメタを落とす() {
+        // 逆向きの確認: 共有 object を参照する entry が全て押し出されたらメタは落としてよい
+        // （生存参照が無いため最後の砦として温存する必要が無い＝従来挙動を維持）。
+        let mut s = SnapshotStore::new();
+        // a.md にのみ "solo" を 1 件。復元済みにして LRU で押し出せるようにする。
+        s.add_stash("a.md", StashKind::Conflict, "solo", 1, true);
+        s.mark_restored("a.md", "solo");
+        for i in 0..10u64 {
+            s.add_stash("a.md", StashKind::Conflict, format!("a-{i}"), 100 + i, true);
+            s.mark_restored("a.md", &format!("a-{i}"));
+        }
+        assert!(s.stashes("a.md").iter().all(|e| e.object_hash != "solo"));
+        assert!(
+            s.object_meta("solo").is_none(),
+            "生存参照が無い復元済み押し出しのメタは落とす（従来挙動）"
         );
     }
 
