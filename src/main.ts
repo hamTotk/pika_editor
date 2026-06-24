@@ -26,7 +26,11 @@ import {
   logFolderPath,
   openInDefaultApp,
   openLogFolder,
+  getSettings,
+  onSettingsWarning,
+  onSettingsChanged,
   type TreeEntry,
+  type Settings,
   type OpenRequestPayload,
   type AppState,
   type DocEncoding,
@@ -137,6 +141,10 @@ const state = {
   // 既定 ON（ui-design §120 の折り返しトグル準拠）。短い行でも横スクロールバーが常時出る問題を
   // 防ぐため折り返しを既定にし、長い行を見たいときだけ表示メニューで OFF にする運用へ倒す。
   lineWrapping: true,
+  // settings.toml の有効設定（要件10.3/10.4）。起動時に getSettings で取得し、settings-changed で更新する。
+  // 個別設定の UI 適用（テーマ・折返し既定・タブ幅 等）は**段階的**（本バッチは保持と機構の貫通まで）。
+  // null の間は未取得（取得失敗時も含む）。値の適用は後続バッチで onSettingsChanged から行う（TODO: 段階的反映）。
+  settings: null as Settings | null,
 };
 
 const workbench = () => document.getElementById("workbench") as HTMLElement;
@@ -1940,6 +1948,23 @@ async function main(): Promise<void> {
   // 外部変更/監視モードの購読（backend の emit を受ける）。
   await onFsChanged((payload) => onExternalChange(payload.changes));
   await onWatchMode((message) => notify(message, "info"));
+  // 設定（settings.toml）の警告/再読み込みの購読（要件10.3/10.4）。
+  // 起動時破損・実行中の不完全保存・無効値の警告はすべて settings-warning で届く（backend が文言生成）。
+  await onSettingsWarning((message) => notify(message, "warn"));
+  // settings.toml の有効な編集保存を検知したら再読み込み（要件10.3 再起動なし反映）。
+  // 個別設定の即時適用（テーマ・折返し既定・タブ幅 等）は**段階的**（TODO: 段階的反映）。
+  // 本バッチは反映の貫通＝最新設定を state に保持し、反映された旨を通知するところまで。
+  await onSettingsChanged((next) => {
+    state.settings = next;
+    notify("設定を再読み込みしました", "info");
+  });
+  // 起動直後に現在の有効設定を取得して保持する（取得失敗は握りつぶす＝設定が無くても起動を妨げない）。
+  // 取得値の即適用は段階的（TODO: 段階的反映）。最低限、機構が通っていることを担保する。
+  try {
+    state.settings = await getSettings();
+  } catch {
+    // 設定取得に失敗しても編集体験は継続（既定相当で動く）。
+  }
   // 単一インスタンス転送（要件3.4）: 既存インスタンスへ後続プロセスが投げたパスを開く。
   await onOpenRequest((payload) => void onOpenRequestEvent(payload));
   // 終了直前にアプリ状態を保存（要件10.1。アトミック書込は backend）。デバウンス待ちでなく即時 flush。

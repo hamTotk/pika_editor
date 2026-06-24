@@ -23,6 +23,7 @@ pub mod recent;
 pub mod render;
 pub mod review;
 pub mod search;
+pub mod settings;
 pub mod shortcuts;
 pub mod snapshot;
 pub mod state;

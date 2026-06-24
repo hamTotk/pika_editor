@@ -35,3 +35,6 @@ serde_json = { workspace = true }
 encoding_rs = { workspace = true }
 # search: fancy-regex 検索/置換（後方参照・キャプチャ参照・Unicode文字クラス・ReDoS バックトラック上限）。
 fancy-regex = { workspace = true }
+# settings: settings.toml の解析（要件10.3/10.4）。parse のみ（serde derive 不使用＝per-field フォールバックを
+# 自前実装するため）。serde は 1 フィールド不正で全体失敗し「壊れた1キー以外は既定で起動」を実現できない。
+toml = { workspace = true }
