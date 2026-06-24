@@ -5,8 +5,6 @@
 //! 退避 object には自己記述メタ（元 relPath・kind・時刻・元 index 世代）を併記し、
 //! 索引（index.json）が破損しても object 群の走査から退避一覧を再生成できる（最上位原則1）。
 
-use std::hash::Hasher;
-
 /// 退避の種別（要件9.2・7章/8章で定義した退避の発生源）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StashKind {
@@ -54,23 +52,9 @@ pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
 ///
 /// 未読判定・差分照合・object アドレッシングを同一のハッシュ規則で揃える
 /// （改行のみの差を別 object にしない＝重複排除と整合）。16 桁 16 進文字列。
+/// LF 正規化＋XxHash64 の本体は [`crate::hashing::hash_normalized_lf_str`] に集約済み（#40・出力不変）。
 pub fn hash_normalized(content: &str) -> String {
-    let mut h = twox_hash::XxHash64::with_seed(0);
-    let bytes = content.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\r' => {
-                h.write_u8(b'\n');
-                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                    i += 1;
-                }
-            }
-            b => h.write_u8(b),
-        }
-        i += 1;
-    }
-    format!("{:016x}", h.finish())
+    crate::hashing::hash_normalized_lf_str(content)
 }
 
 /// 内容を zstd 圧縮する（永続化前の object 圧縮＝要件9.1「圧縮して保存」）。

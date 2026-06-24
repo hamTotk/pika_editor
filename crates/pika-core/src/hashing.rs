@@ -15,11 +15,13 @@ use std::hash::Hasher;
 /// [`crate::huge::STAGE1_THRESHOLD_BYTES`]・[`crate::snapshot::policy::DEFAULT_CONTENT_LIMIT_BYTES`] と同値。
 pub const HUGE_FILE_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024;
 
-/// バイト列を LF 正規化してハッシュ化する（`CRLF`/`CR` → `LF`）。
+/// バイト列を LF 正規化して返す（`CRLF`/`CR` → `LF`）。本クレートの LF 正規化の単一実装。
 ///
-/// 戻りは 16 桁の小文字 16 進文字列（XxHash64・seed=0）。
-/// 自己保存抑制トークン・復元時の別物判定・タブ content_hash で**必ず本関数を使う**こと。
-pub fn hash_normalized_lf(bytes: &[u8]) -> String {
+/// 改行のみの差を未読/差分に出さない方針（要件8.1）を、ハッシュ・差分照合・退避 object の
+/// アドレッシングで**同一ルーチン**に集約する（#40・以前は 3 箇所で別実装＝ドリフト源だった）。
+/// CR/LF は ASCII で UTF-8 継続バイト（0x80-0xBF）と衝突しないため、バイト単位の正規化でも
+/// 入力が妥当な UTF-8 なら出力の UTF-8 妥当性は保たれる（`diff::line` の `&str` 委譲が成立する根拠）。
+pub fn normalize_lf_bytes(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
@@ -35,6 +37,15 @@ pub fn hash_normalized_lf(bytes: &[u8]) -> String {
         }
         i += 1;
     }
+    out
+}
+
+/// バイト列を LF 正規化してハッシュ化する（`CRLF`/`CR` → `LF`）。
+///
+/// 戻りは 16 桁の小文字 16 進文字列（XxHash64・seed=0）。
+/// 自己保存抑制トークン・復元時の別物判定・タブ content_hash で**必ず本関数を使う**こと。
+pub fn hash_normalized_lf(bytes: &[u8]) -> String {
+    let out = normalize_lf_bytes(bytes);
     let mut h = twox_hash::XxHash64::with_seed(0);
     h.write(&out);
     format!("{:016x}", h.finish())
