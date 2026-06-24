@@ -307,8 +307,12 @@
            表示専用ゆえ aria-live=off。読み上げが要る差分あり件数は下の sr-live 領域へ announce する。 -->
       <div id="status" aria-live="off"></div>
       <!-- スクリーンリーダー専用のライブ領域（視覚的に隠す）。差分あり件数など、表示専用ステータスでは
-           読み上げ到達が弱い情報を polite で announce する（要件11.5・eval medium: aria-label 依存の補強）。 -->
-      <div id="sr-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+           読み上げ到達が弱い情報を polite で announce する（要件11.5・eval medium: aria-label 依存の補強）。
+           用途を **ステータス読み上げ専用** に固定し、トースト/通知（#notifications）とは別文言を流す
+           （同一文言を両方へ流さない）。role="status" は暗黙に aria-live=polite を付け #notifications の
+           role=status と二重ライブリージョンになるため、ここは role を外し aria-live="polite" のみで宣言する
+           （二重読み上げ回避・eval #47）。 -->
+      <div id="sr-live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
     </div>
     <script type="module" src="./main.ts"></script>
   </body>

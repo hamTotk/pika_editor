@@ -143,9 +143,9 @@ export async function buildPreview(
  *
  * **【Stage ③・失敗の可視化】** 描画失敗は **in-preview で可視化する**（失敗ブロックへ `pika-block-error` を
  * 付け、別WebView 文書の BASE_CSS が縦線＋「描画に失敗」ラベルで視認可能にする＝要件6.2）。
- * F-029 でプレビュー別WebView からの IPC/event は境界で全拒否されるため、`postMessage` での失敗件数
- * 通知は別WebView では `window.parent===window` の no-op のまま残す（メインへ送る経路は持たない＝
- * プレビューに IPC 穴を開け直さない）。旧 `parsePreviewFailureMessage`・main.ts の message リスナは廃止した。
+ * F-029 でプレビュー別WebView からの IPC/event は境界で全拒否されるため、失敗件数をメインへ送る
+ * 経路は持たない（プレビューに IPC 穴を開け直さない）。旧 `postMessage` 経由の失敗件数通知・
+ * `parsePreviewFailureMessage`・main.ts の message リスナは廃止した（送信先が無いため送らない）。
  *
  * 危険オプション封じ（design doc 6章「信頼済み JS の危険オプション封じ」）:
  * - **Mermaid**: `securityLevel:'strict'`（click/任意 HTML 生成禁止）・`startOnLoad:false`（手動 per-block 描画）。
@@ -165,12 +165,9 @@ export function buildTrustedJsInit(nonce: string): string {
     `  "use strict";`,
     `  var BLOCK_TIMEOUT_MS = 1000;`,
     `  var failures = 0;`,
-    `  function reportFailures(){`,
-    `    if (failures > 0 && window.parent !== window) {`,
-    // 失敗件数のみ通知（内容は送らない＝オリジン分離・通知バー集計）。
-    `      try { window.parent.postMessage({ type: "pika-preview-failures", count: failures }, "*"); } catch(e){}`,
-    `    }`,
-    `  }`,
+    // 失敗件数の集計は per-block 描画の制御に使う（in-preview で可視化）。メインへ送る経路は
+    // 持たない（F-029 で別WebView の IPC/event は全拒否。targetOrigin "*" の postMessage は廃止）。
+    `  function reportFailures(){ /* in-preview 可視化のみ。外部送信なし。 */ }`,
     // --- highlight.js（コードブロック） ---
     `  function runHighlight(){`,
     `    if (!window.hljs) return;`,

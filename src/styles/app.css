@@ -129,7 +129,7 @@ body {
 /* 閉じるは hover で警告色塗り（OS 標準の慣習・色＋位置＋ラベルで弁別）。 */
 .window-controls .wc-close:hover {
   background: var(--alert);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .window-controls .wc-btn:focus-visible {
@@ -140,13 +140,14 @@ body {
 /* フレームレス上端のリサイズハンドル（OS リサイズボーダー補強・ui-design §7）。
    decorations:false で OS の上辺リサイズ縁が細いため、薄いストリップを最前面に重ねて
    ns-resize カーソルを出し、main.ts が上辺リサイズ（startResizeDragging('North')）を呼ぶ。
-   メニュー帯ボタンの最上端をわずかに覆うが、ボタン本体は下にありクリックは保てる。 */
+   高さは 3px に抑え、メニュー帯ボタン最上端のクリックがリサイズ開始に取られるのを防ぐ
+   （6px だとボタン最上端を覆い当たり判定が競合した・eval #49）。 */
 #resize-top {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
-  height: 6px;
+  height: 3px;
   cursor: ns-resize;
   z-index: 1000;
 }
@@ -606,7 +607,7 @@ body {
 
 #tab-tools .diff-toggle.on {
   background: var(--accent-strong);
-  color: #fff;
+  color: var(--on-accent);
   border-color: var(--accent-strong);
 }
 
@@ -812,8 +813,8 @@ body {
    CM6 の HighlightStyle が割り当てた class に、トークン変数で色を当てる（src/editor/index.ts の
    pikaHighlightStyle が class 指定。色は CM 側で直書きせずここで当てるため html[data-theme] の
    ライト/ダーク切替へ自動追従する）。構文色は彩度を落として主張させすぎない（差分/強調の色と競合させない）。
-   string だけは tokens.css に該当変数が無いため、tokens.css を改変せず light/dark を個別指定する
-   （色値は ui-mock の .tok-s から：light #8a6a3a / dark #c0a070）。 */
+   string は tokens.css の --syntax-string（light/dark/system 各値）に委譲する（生16進を app.css に
+   直書きせず単一源へ集約・eval #34。値の出典は ui-mock の .tok-s）。 */
 .cm-tok-heading {
   color: var(--text-1);
   font-weight: 700;
@@ -838,17 +839,9 @@ body {
 .cm-tok-monospace {
   color: var(--text-2);
 }
-/* string（ui-mock .tok-s）。tokens.css 不改変で light/dark を個別指定する。 */
+/* string（ui-mock .tok-s）。配色は tokens.css の --syntax-string（light/dark/system 各値）に委譲する。 */
 .cm-tok-string {
-  color: #8a6a3a;
-}
-html[data-theme="dark"] .cm-tok-string {
-  color: #c0a070;
-}
-@media (prefers-color-scheme: dark) {
-  html[data-theme="system"] .cm-tok-string {
-    color: #c0a070;
-  }
+  color: var(--syntax-string);
 }
 
 #editor-host textarea {
@@ -865,6 +858,13 @@ html[data-theme="dark"] .cm-tok-string {
   background: var(--bg-raised);
 }
 
+/* キーボードフォーカス時は視覚リングを出す（outline:none で消えるのを補う・要件11.5）。
+   CM6 は独自カーソルを出すが、素 textarea 経路（CM6 未起動/フォールバック）でも見失わないよう付ける。 */
+#editor-host textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 /* read-only unified 差分（要件8.2・ui-design 11章）。
    行頭 +/- 記号・変更語の下線/太字・色非依存（forced-colors でも記号で弁別）。 */
 .diff-view {
@@ -874,6 +874,12 @@ html[data-theme="dark"] .cm-tok-string {
   font-size: 13px;
   line-height: 1.5;
   outline: none;
+}
+
+/* F6 で diff-host へ移ったとき視覚フォーカスを見失わないようリングを出す（要件11.5）。 */
+.diff-view:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .diff-lines {
@@ -1103,6 +1109,21 @@ html[data-theme="dark"] .cm-tok-string {
   #notifications .notice[data-kind="conflict"],
   #notifications .notice[data-kind="error"] {
     border-color: Highlight;
+  }
+  /* ステータス帯も独自トークン（bg-sunken/text-2/border-1・seg/cursor の accent）を
+     system-color へ降格する（ハイコントラストでコントラスト保証・eval #35）。 */
+  #status {
+    background: Canvas;
+    color: CanvasText;
+    border-color: CanvasText;
+  }
+  #status .cursor,
+  #status .seg-s {
+    color: CanvasText;
+  }
+  /* プレビュー 5状態のプレースホルダ文言（text-3/alert を直書きする ::before）も降格する。 */
+  #preview-host[data-state]::before {
+    color: CanvasText;
   }
   /* 差分の追加/削除は記号(+/-)＋下線で弁別（色に依存しない＝要件11.5）。 */
   .diff-seg-changed {
