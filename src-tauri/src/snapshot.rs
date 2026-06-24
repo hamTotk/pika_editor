@@ -181,6 +181,26 @@ impl SnapshotService {
         persist_index_locked(&mut inner);
     }
 
+    /// フォルダ初回オープン時にハッシュのみベースラインを取得する（バイナリ等・#54）。
+    ///
+    /// バイナリ（非UTF-8）は内容 object を持てない（差分/巻き戻し非対象）が、外部変更検知のため
+    /// バイト由来ハッシュをベースラインに据える（空文字ベースライン化＝全ファイル空ハッシュ衝突を避ける）。
+    /// [`capture_baseline`] と同じく **非クロバー**（既存ベースラインがあれば触らない）で、
+    /// mutation 完了直前に index を永続化する（バッチ8 の永続化機構を壊さない）。
+    pub fn capture_baseline_hash_only(&self, path: &str, content_hash: &str) {
+        let mut inner = self.inner.lock().expect("snapshot lock");
+        let key = normalize_path_key(path);
+        // 既にベースラインがある（前回オープンで永続化された）path は触らない（非クロバー）。
+        if inner.store.baseline(&key).is_some() {
+            return;
+        }
+        // 内容 object は持たない（HashOnly）。ハッシュのみを索引へ据える。
+        inner
+            .store
+            .set_baseline_hash_only(&key, content_hash.to_string());
+        persist_index_locked(&mut inner);
+    }
+
     /// 破壊的上書き保存の**前に**、ディスク上の現内容を incoming 退避する（要件7.3・最上位原則）。
     ///
     /// CLAUDE.md 判断ガイド「上書きする→退避が先（確認ダイアログより退避が先）」を保存経路でも守る。

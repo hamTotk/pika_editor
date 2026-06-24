@@ -121,21 +121,32 @@ fn enumerate_dir(dir: &Path) -> Result<Vec<TreeEntry>, String> {
 /// 差分のベースライン内容を取得する（要件8.1・#20/#54）。
 ///
 /// 機密/画像/10MB以上（policy=HashOnly）は **内容を read せず**ハッシュのみ経路へ倒す
-/// （機密ファイルの平文を read_to_string で展開しない＝#20）。StoreContent のときだけ全文を読み、
-/// バイナリ等で読めなければ内容保存に適さないため空内容のまま渡す（#54・データ最小化）。
+/// （機密ファイルの平文を read_to_string で展開しない＝#20）。StoreContent のときだけバイト読み→
+/// UTF-8 検査し、テキストのみ内容を保存する。バイナリ（非UTF-8）はバイト由来ハッシュのみ、
+/// 読取失敗はベースラインを張らない（空文字を内容ベースライン化しない＝差分誤り/空ハッシュ衝突を防ぐ・#54）。
 fn capture_baseline_for(path: &Path, snapshot: &SnapshotService) {
     use pika_core::snapshot::baseline_policy;
     let path_str = path.to_string_lossy().to_string();
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     // policy 判定を read より先に行う（HashOnly なら平文を一切読まない）。
-    let content = if baseline_policy(&path_str, size).stores_content() {
-        // StoreContent でも読めない（バイナリ等）なら空内容で渡す（#54）。
-        std::fs::read_to_string(path).unwrap_or_default()
-    } else {
-        // HashOnly 方針（機密/画像/10MB以上）: 内容を読まない（#20 機密平文の展開回避）。
-        String::new()
-    };
-    snapshot.capture_baseline(&path_str, &content, size);
+    if !baseline_policy(&path_str, size).stores_content() {
+        // 機密/画像/10MB以上: 内容を読まない（#20）。ハッシュのみ（content 空＝未読検知は watcher が担う）。
+        snapshot.capture_baseline(&path_str, "", size);
+        return;
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            // テキスト: 内容を保存（差分・巻き戻し可能）。
+            Ok(text) => snapshot.capture_baseline(&path_str, &text, size),
+            // バイナリ（非UTF-8）: 内容保存に適さない。バイト由来ハッシュのみ（空文字ベースライン化しない・#54）。
+            Err(e) => {
+                let hash = hash_normalized_lf(e.as_bytes());
+                snapshot.capture_baseline_hash_only(&path_str, &hash);
+            }
+        },
+        // 読めない（権限/一時ロック等）: ベースラインを張らない（次回 open で再試行。空文字で確定しない・#54）。
+        Err(_) => {}
+    }
 }
 
 /// ファイル内容を読む（エンコーディング自動判定・封じ込め・巨大ファイルガード）。
@@ -248,6 +259,19 @@ pub fn save_app_state(mut state: AppState) -> Result<(), String> {
     let root = state_store::resolve()?;
     if let state_store::LoadForUpdate::Editable(existing) = state_store::load_for_update(&root) {
         state.recent = existing.recent;
+        // #52: ワークスペースが一時不在（ドライブ未接続等）のとき、incoming が workspace=None でも
+        // disk の参照を保全する（上書きで参照を失わない）。frontend が別フォルダを開けば
+        // workspace=Some(新) で来るのでそれは尊重する＝トラップにならない。safe_empty で全保存を
+        // 止める方式は採らない（永続的トラップ化を避ける・backend-only の保全に留める）。
+        if state.workspace.is_none() {
+            if let Some(ws) = existing.workspace.clone() {
+                // disk のワークスペースが「設定済みだが現在ディレクトリとして存在しない」＝一時不在の
+                // ときだけ保全する（現存するなら incoming が None になる正常フローは無い）。
+                if !std::path::Path::new(&ws).is_dir() {
+                    state.workspace = Some(ws);
+                }
+            }
+        }
     }
     state_store::save(&root, &state)
 }
