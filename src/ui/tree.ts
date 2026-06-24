@@ -148,12 +148,25 @@ function makeItem(entry: TreeEntry, depth: number): HTMLLIElement {
   iconSpan.appendChild(makeIconSvg(iconIdFor(entry)));
   const nameSpan = document.createElement("span");
   nameSpan.className = "tree-name";
-  // 状態マークは色だけに依存しない記号（要件11.5）。読み上げ用に aria-label へも集約する。
-  nameSpan.textContent = `${entry.name}${mark.suffix}`;
+  // ファイル名のみ（状態記号は別 span に分離して色を当てる＝ui-design 5章。タブの .tab-lead と同方針）。
+  nameSpan.textContent = entry.name;
   if (mark.removed) {
     nameSpan.classList.add("removed"); // 削除済みは取り消し線（ui-design 5章）。span のみに限定。
   }
   li.append(twist, iconSpan, nameSpan);
+  // 状態マーク（名前の右・ui-design 5/6章「左=種別アイコン、右=状態マーク」）。
+  // 色は記号種別ごとにクラスで当てる: 差分あり ±=accent（青）／新規 ◆=diff-add（緑）。
+  // 削除済みは取り消し線（記号なし）なので mark.suffix は空＝この span は出ない。
+  // 色だけに依存しない（記号自体は残す・aria-label へも集約＝要件11.5）。
+  if (mark.suffix && !mark.removed) {
+    const markSpan = document.createElement("span");
+    const isCreated = mark.suffix.includes(UNREAD_MARK.created);
+    // 自身の新規 ◆=緑、自身/伝播の差分あり ±=青（伝播は CSS の data-unread=propagated で淡色化）。
+    markSpan.className = isCreated ? "tree-mark new" : "tree-mark";
+    markSpan.setAttribute("aria-hidden", "true"); // 状態は li の aria-label に集約する。
+    markSpan.textContent = mark.suffix.trim();
+    li.appendChild(markSpan);
+  }
   applyAriaLabel(li, entry, mark);
   if (mark.propagated) {
     li.dataset.unread = "propagated"; // 伝播マーク（淡 ±）。視覚は CSS で淡色化。

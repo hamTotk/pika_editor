@@ -33,6 +33,7 @@ import {
   type LineEnding,
   type PreviewRect,
 } from "./ipc";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { initTheme, applyTheme, currentTheme, type ThemeMode } from "./theme";
 import { initMenuBar, type MenuItemSpec, type MenuSpec } from "./ui/menu";
 import { initA11y, announce } from "./a11y";
@@ -122,7 +123,9 @@ const state = {
   safeEmpty: false,
   // 行の折り返し（表示メニューのトグル・UIブラッシュアップ T8）。アプリ全体で 1 つ。
   // タブ切替でエディタを作り直しても createEditor の初期値で引き継ぐ。
-  lineWrapping: false,
+  // 既定 ON（ui-design §120 の折り返しトグル準拠）。短い行でも横スクロールバーが常時出る問題を
+  // 防ぐため折り返しを既定にし、長い行を見たいときだけ表示メニューで OFF にする運用へ倒す。
+  lineWrapping: true,
 };
 
 const workbench = () => document.getElementById("workbench") as HTMLElement;
@@ -294,6 +297,40 @@ function updateTreeHeader(): void {
 
 /** メニューバー右端 #window-title。 */
 const windowTitleEl = () => document.getElementById("window-title") as HTMLElement;
+
+/**
+ * フレームレス化（tauri.conf decorations:false・ui-design §7）に伴う自前ウィンドウ操作ボタンを配線する。
+ * OS タイトルバーを廃した分、最小化/最大化(復元)/閉じるを @tauri-apps/api/window 経由で実装する。
+ * ドラッグ移動はメニュー帯の data-tauri-drag-region（index.html）が担う。リサイズはフレームレスでも
+ * Tauri/WebView2 がウィンドウ枠のヒットテストを保持する（decorations:false でも resizable:true は有効）。
+ * 最大化トグルは現在状態を反映してアイコン/ラベルを「最大化⇔元のサイズに戻す」へ切替える。
+ */
+function initWindowControls(): void {
+  const minBtn = document.getElementById("win-minimize") as HTMLButtonElement | null;
+  const maxBtn = document.getElementById("win-maximize") as HTMLButtonElement | null;
+  const closeBtn = document.getElementById("win-close") as HTMLButtonElement | null;
+  // ブラウザ単体（vite preview 等・Tauri 非依存）でも型/起動が壊れないよう存在チェックして握る。
+  if (!minBtn || !maxBtn || !closeBtn) return;
+  const win = getCurrentWindow();
+  minBtn.addEventListener("click", () => void win.minimize());
+  closeBtn.addEventListener("click", () => void win.close());
+  // 最大化トグル（最大化⇔復元）。押下後に現在状態をアイコン/ラベルへ反映する。
+  const syncMaxLabel = async (): Promise<void> => {
+    const maximized = await win.isMaximized();
+    maxBtn.setAttribute("aria-label", maximized ? "元のサイズに戻す" : "最大化");
+    maxBtn.setAttribute("title", maximized ? "元のサイズに戻す" : "最大化");
+    maxBtn.classList.toggle("is-maximized", maximized);
+  };
+  maxBtn.addEventListener("click", () => {
+    void (async () => {
+      await win.toggleMaximize();
+      await syncMaxLabel();
+    })();
+  });
+  // 起動時・OS 側操作（ダブルクリック/スナップ）での最大化変化にも追従させる。
+  void syncMaxLabel();
+  void win.onResized(() => void syncMaxLabel());
+}
 
 /**
  * メニューバー右端のウィンドウタイトル（ui-mock .menubar .title・UIブラッシュアップ T8）を更新する。
@@ -1757,6 +1794,9 @@ async function main(): Promise<void> {
   const menubarEl = document.getElementById("menubar") as HTMLElement;
   const menuLayerEl = document.getElementById("menu-layer") as HTMLElement;
   initMenuBar(menubarEl, menuLayerEl, buildMenuSpecs());
+  // フレームレス化の自前ウィンドウ操作（最小化/最大化/閉じる・ui-design §7）。ドラッグ移動は
+  // メニュー帯の data-tauri-drag-region（index.html）が担う。
+  initWindowControls();
   // tab-tools: モード切替セグメント（ソース/分割/プレビュー）。data-mode を読んで setViewMode へ流す。
   for (const btn of modeButtons()) {
     btn.addEventListener("click", () => {

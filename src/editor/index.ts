@@ -107,7 +107,8 @@ const baseExtensions: Extension[] = [
  * @param onChange 編集（dirty 化）通知。保存ボタンの活性に使う
  * @param onCursorChange カーソル/選択/内容の変化通知。右下ステータスの追従更新に使う（要件11.1）。
  *   selectionSet（カーソル移動・選択）または docChanged（編集）のたびに発火する。
- * @param lineWrapping 初期の折り返し ON/OFF（表示メニューのトグルが保持する現在値・既定 false）。
+ * @param lineWrapping 初期の折り返し ON/OFF（表示メニューのトグルが保持する現在値・既定 ON）。
+ *   既定 ON で短文ファイルの不要な横スクロールバーを避ける（ui-design §120）。
  *   タブ切替でエディタを作り直しても現在の折り返し設定を引き継ぐために初期値で渡す。
  */
 export function createEditor(
@@ -115,7 +116,7 @@ export function createEditor(
   initialDoc: string,
   onChange: () => void,
   onCursorChange?: () => void,
-  lineWrapping = false,
+  lineWrapping = true,
 ): EditorHandle {
   parent.replaceChildren();
 
@@ -139,8 +140,47 @@ export function createEditor(
           if (!isExternal) onChange();
         }),
         EditorView.theme({
-          "&": { height: "100%", fontSize: "13px" },
-          ".cm-scroller": { fontFamily: "var(--font-mono)" },
+          "&": {
+            height: "100%",
+            fontSize: "13px",
+            // エディタ全体の地色・文字色をトークンへ追従させる（ダーク時に CM6 既定 light が残らない）。
+            backgroundColor: "var(--bg-raised)",
+            color: "var(--text-1)",
+          },
+          ".cm-scroller": {
+            fontFamily: "var(--font-mono)",
+            // 折り返し既定 ON では横スクロールバーは不要。折り返し OFF（表示メニュー）に切替えた
+            // ときだけ CM6 が自前で横スクロールを出す（lineWrapping 拡張が overflow を制御する）。
+            // 短文ファイルで常時出ていた横スクロールバーをここで明示的に抑止する（item1）。
+            overflowX: "auto",
+          },
+          // 行番号ガター（item4・ui-design §2）。ダークで白く残るのは CM6 既定 light テーマ由来。
+          // 背景は sunken（脇役を沈める）・文字は text-3（淡色・常設だが numbers は弁別用途）へ揃え、
+          // html[data-theme] のライト/ダーク切替へ CSS 変数で自動追従させる。
+          ".cm-gutters": {
+            backgroundColor: "var(--bg-sunken)",
+            color: "var(--text-3)",
+            border: "none",
+            borderRight: "1px solid var(--border-1)",
+          },
+          ".cm-lineNumbers .cm-gutterElement": {
+            color: "var(--text-3)",
+          },
+          // アクティブ行のガター/本体は薄掛け（bg-active）でモノトーン基調を保つ。
+          ".cm-activeLineGutter": {
+            backgroundColor: "var(--bg-active)",
+            color: "var(--text-2)",
+          },
+          ".cm-activeLine": {
+            backgroundColor: "var(--bg-hover)",
+          },
+          // カーソル/選択もトークンへ追従（ダークで視認できるよう accent/bg-active を当てる）。
+          ".cm-cursor, .cm-dropCursor": {
+            borderLeftColor: "var(--accent)",
+          },
+          "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": {
+            backgroundColor: "var(--bg-active)",
+          },
         }),
       ],
     }),

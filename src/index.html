@@ -121,11 +121,49 @@
         >
           ヘルプ
         </button>
-        <!-- メニュー群を左に詰め、右端のウィンドウタイトルを押し出す伸縮スペーサ（ui-mock .menubar .grow）。 -->
-        <span class="grow"></span>
+        <!-- メニュー群を左に詰め、右端のウィンドウタイトルを押し出す伸縮スペーサ（ui-mock .menubar .grow）。
+             フレームレス化（tauri.conf decorations:false・ui-design §7）で OS タイトルバーを廃したため、
+             この空き帯をドラッグ領域にしてウィンドウ移動を担う（data-tauri-drag-region）。 -->
+        <span class="grow" data-tauri-drag-region></span>
         <!-- 右端のウィンドウタイトル「<フォルダ名> — pika」（ui-mock .menubar .title）。
-             フォルダ名は main.ts(updateWindowTitle) が state.folder のベース名で更新する。 -->
-        <span class="title" id="window-title">pika</span>
+             フォルダ名は main.ts(updateWindowTitle) が state.folder のベース名で更新する。
+             タイトル帯もドラッグ可能にする（移動の当たり判定を広げる）。 -->
+        <span class="title" id="window-title" data-tauri-drag-region>pika</span>
+        <!-- ウィンドウ操作ボタン群（フレームレス化の自前タイトルバー導線・ui-design §7）。
+             OS 標準の最小化/最大化/閉じるを自前実装する。各ボタンの活性/最大化トグルは
+             main.ts(initWindowControls) が @tauri-apps/api/window 経由で配線する。
+             ボタン自身はドラッグ領域にしない（クリックを受けるため data-tauri-drag-region は付けない）。 -->
+        <div id="window-controls" class="window-controls" role="group" aria-label="ウィンドウ操作">
+          <button
+            type="button"
+            id="win-minimize"
+            class="wc-btn"
+            aria-label="最小化"
+            title="最小化"
+          >
+            <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" /></svg>
+          </button>
+          <button
+            type="button"
+            id="win-maximize"
+            class="wc-btn"
+            aria-label="最大化"
+            title="最大化"
+          >
+            <svg viewBox="0 0 10 10" aria-hidden="true">
+              <rect x="0.5" y="0.5" width="9" height="9" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            id="win-close"
+            class="wc-btn wc-close"
+            aria-label="閉じる"
+            title="閉じる"
+          >
+            <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10" /></svg>
+          </button>
+        </div>
       </header>
       <!-- 開いているドロップダウンの実体を載せるレイヤ（メニュー直下に絶対配置する）。
            外側クリック/Esc を拾えるよう #app 直下に置き、ui/menu.ts が menu-pop を出し入れする。 -->
