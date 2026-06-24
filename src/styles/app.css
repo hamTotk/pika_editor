@@ -94,6 +94,54 @@ body {
   padding-left: 8px;
 }
 
+/* ウィンドウ操作ボタン群（フレームレス化の自前タイトルバー・ui-design §7）。
+   メニュー帯の右端に最小化/最大化/閉じるを並べる。OS タイトルバーを廃した分、
+   ここで移動以外のウィンドウ操作導線を担保する。モノトーン基調（原則1）で閉じるのみ hover で警告色。
+   メニュー帯の上下 padding を相殺して帯いっぱいの高さに広げ、当たり判定を確保する。 */
+.window-controls {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  margin: -4px -8px -4px 4px;
+  flex: none;
+}
+
+.window-controls .wc-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  padding: 0;
+}
+
+.window-controls .wc-btn svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+}
+
+.window-controls .wc-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-1);
+}
+
+/* 閉じるは hover で警告色塗り（OS 標準の慣習・色＋位置＋ラベルで弁別）。 */
+.window-controls .wc-close:hover {
+  background: var(--alert);
+  color: #fff;
+}
+
+.window-controls .wc-btn:focus-visible {
+  outline: 2px solid var(--accent, Highlight);
+  outline-offset: -2px;
+}
+
 /* ドロップダウンを載せる絶対配置レイヤ。#app（position:relative）の左上基準で .menu-pop を配置する。
    レイヤ自体はクリックを透過させ、中身（.menu-pop）だけがイベントを受ける。 */
 #menu-layer {
@@ -324,6 +372,31 @@ body {
 /* 削除済みの取り消し線はファイル名（とその状態記号サフィックス）だけに掛ける（ui-design 5章）。 */
 #tree [role="treeitem"] .tree-name.removed {
   text-decoration: line-through;
+}
+
+/* 状態マーク（名前の右・ui-design 5章）。型アイコンはモノトーン（上の .tree-icon）に対し、
+   状態マークはカラーで弁別する（色だけに依存せず記号も残す＝要件11.5）:
+   - 差分あり ±＝accent（青）・太字（tab-lead と同じ配色方針）。
+   - 新規 ◆＝diff-add（緑）。
+   フォルダ伝播（淡 ±）は data-unread="propagated" のとき text-3 へ降格する（§5「配下に差分あり=淡色」）。 */
+#tree [role="treeitem"] .tree-mark {
+  flex: none;
+  margin-left: 4px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  user-select: none;
+}
+
+#tree [role="treeitem"] .tree-mark.new {
+  color: var(--diff-add-tx);
+  font-weight: 700;
+}
+
+/* フォルダの伝播マーク（淡 ±）は子孫の差分を弱く伝える＝text-3（§5）。色は accent でなく淡色に倒す。 */
+#tree [role="treeitem"][data-unread="propagated"] .tree-mark {
+  color: var(--text-3);
+  font-weight: 400;
 }
 
 #tree [role="treeitem"]:hover {
