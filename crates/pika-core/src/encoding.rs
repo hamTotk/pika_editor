@@ -8,8 +8,12 @@
 //!
 //! 判定順（要件5.2）:
 //! 1. **BOM 最優先**: UTF-8 BOM / UTF-16 LE/BE BOM。
-//! 2. **BOM なし**: 候補（UTF-8 / Shift_JIS）を順にデコードして妥当性を検査。
-//! 3. いずれも妥当でなければ **UTF-8 として開き警告**を立てる（誤判定対策の Reopen は表示メニュー）。
+//! 2. **BOM なし UTF-16**: 偶数長＋ヌルバイト分布の偏りで UTF-16 LE/BE を**ヒューリスティック**判定する
+//!    （BOM なし UTF-16 の ASCII テキストはヌルバイトを含み UTF-8 strict も「妥当」に見えてしまうため、
+//!    UTF-8 候補より先に弾く＝要件5.2 の往復喪失防止）。
+//! 3. **BOM なし**: 候補（UTF-8 / Shift_JIS）を順にデコードして妥当性を検査。
+//! 4. いずれも妥当でなければ **UTF-8 として開き警告**を立てる（誤判定対策の Reopen は表示メニュー）。
+//!    UTF-8 で開けてもヌルバイトを多く含むなら（UTF-16 取りこぼしの疑い）警告を立てて Reopen を促す。
 //!
 //! 改行（要件5.2/5.6）: 読込時は元の改行をそのまま保持し（混在改行も統一しない）、保存時も
 //! バイト列として維持する。本モジュールは**文字エンコード変換のみ**を担い、改行の書き換えはしない。
@@ -88,8 +92,9 @@ pub const DEFAULT_NEW_ENCODING: TextEncoding = TextEncoding::Utf8;
 /// バイト列を要件5.2 の判定順でデコードする。
 ///
 /// 1. BOM（UTF-8/UTF-16 LE/BE）を最優先。BOM はテキストから除去し `has_bom=true`。
-/// 2. BOM なしは UTF-8 → Shift_JIS の順に**妥当性**を検査（不正バイトが無いものを採用）。
-/// 3. いずれも妥当でなければ UTF-8 lossy で開き `had_decode_warning=true`。
+/// 2. BOM なし UTF-16 LE/BE をヌルバイト分布ヒューリスティックで判定（UTF-8 候補より先に弾く）。
+/// 3. BOM なしは UTF-8 → Shift_JIS の順に**妥当性**を検査（不正バイトが無いものを採用）。
+/// 4. いずれも妥当でなければ UTF-8 lossy で開き `had_decode_warning=true`。
 pub fn decode(bytes: &[u8]) -> DecodedFile {
     // 1. BOM 最優先。
     if let Some((enc, body)) = strip_bom(bytes) {
@@ -100,13 +105,15 @@ pub fn decode(bytes: &[u8]) -> DecodedFile {
             line_ending,
             text,
             encoding: enc,
-            has_bom: true,
+            has_bom: false,
             had_decode_warning: false,
-        };
+        }
+        .with_bom(true);
     }
 
-    // 2. BOM なし: UTF-8 → Shift_JIS の順に妥当性検査（不正シーケンスが無いものを採用）。
-    for enc in [TextEncoding::Utf8, TextEncoding::ShiftJis] {
+    // 2. BOM なし UTF-16: ASCII 主体の UTF-16 はヌルバイトを含むため UTF-8 strict も「妥当」に見える。
+    //    UTF-8 候補より**先に**ヌルバイト分布で UTF-16 LE/BE を弾かないと往復で UTF-16 が失われる（要件5.2）。
+    if let Some(enc) = detect_bomless_utf16(bytes) {
         if let Some(text) = decode_strict(enc, bytes) {
             let line_ending = classify_line_ending(&text);
             return DecodedFile {
@@ -119,7 +126,25 @@ pub fn decode(bytes: &[u8]) -> DecodedFile {
         }
     }
 
-    // 3. いずれも妥当でない → UTF-8 lossy で開き警告（誤判定対策の Reopen は表示メニュー）。
+    // 3. BOM なし: UTF-8 → Shift_JIS の順に妥当性検査（不正シーケンスが無いものを採用）。
+    for enc in [TextEncoding::Utf8, TextEncoding::ShiftJis] {
+        if let Some(text) = decode_strict(enc, bytes) {
+            let line_ending = classify_line_ending(&text);
+            // UTF-8 として妥当でもヌルバイトを多く含むなら UTF-16 取りこぼしの疑い＝警告して Reopen を促す
+            //（ヒューリスティックを通り抜けた縁ケースの保険・要件5.2）。
+            let had_decode_warning =
+                enc == TextEncoding::Utf8 && null_byte_ratio(bytes) >= UTF16_NULL_RATIO;
+            return DecodedFile {
+                line_ending,
+                text,
+                encoding: enc,
+                has_bom: false,
+                had_decode_warning,
+            };
+        }
+    }
+
+    // 4. いずれも妥当でない → UTF-8 lossy で開き警告（誤判定対策の Reopen は表示メニュー）。
     let (text, _, _) = UTF_8.decode(bytes);
     let text = text.into_owned();
     let line_ending = classify_line_ending(&text);
@@ -130,6 +155,69 @@ pub fn decode(bytes: &[u8]) -> DecodedFile {
         has_bom: false,
         had_decode_warning: true,
     }
+}
+
+impl DecodedFile {
+    /// `has_bom` を差し替えて返す（BOM 経路の組み立てを簡潔にするヘルパ）。
+    fn with_bom(mut self, has_bom: bool) -> Self {
+        self.has_bom = has_bom;
+        self
+    }
+}
+
+/// BOM なし UTF-16 と判定するヌルバイト比率の閾値（ASCII 主体の UTF-16 は約半分がヌル）。
+///
+/// ASCII 文字 1 つが UTF-16 では 2 バイト（うち 1 バイトがヌル）になるため、英数主体テキストでは
+/// ヌルバイトがおよそ 50% を占める。日本語主体（U+3000 以上）はヌルが減るが、それでも UTF-8/Shift_JIS
+/// の通常テキスト（ヌルをほぼ含まない）とは明確に分離できる。誤判定（通常テキストを UTF-16 扱い）を
+/// 避けるため保守的に 0.25 を採る（通常テキストはヌルバイトを基本含まない＝0 付近）。
+const UTF16_NULL_RATIO: f64 = 0.25;
+
+/// BOM なし UTF-16 LE/BE をヌルバイト分布で**ヒューリスティック**判定する（要件5.2 往復喪失防止）。
+///
+/// 判定（保守的・誤判定を避ける）:
+/// - 長さが偶数かつ 2 バイト以上（UTF-16 は 1 コードユニット 2 バイト）。
+/// - ヌルバイト比率が [`UTF16_NULL_RATIO`] 以上（ASCII 主体の UTF-16 は約半分がヌル）。
+/// - 偶数位置/奇数位置のヌル偏りで LE/BE を見分ける（ASCII の上位バイトはヌル）:
+///   - LE: 上位バイト＝奇数オフセットがヌル（`A 00 B 00 ...`）。
+///   - BE: 上位バイト＝偶数オフセットがヌル（`00 A 00 B ...`）。
+///
+/// 偏りが拮抗（どちらとも言えない）なら `None` を返し、後段の UTF-8/Shift_JIS 判定へ委ねる。
+fn detect_bomless_utf16(bytes: &[u8]) -> Option<TextEncoding> {
+    if bytes.len() < 2 || bytes.len() % 2 != 0 {
+        return None;
+    }
+    if null_byte_ratio(bytes) < UTF16_NULL_RATIO {
+        return None;
+    }
+    let mut null_at_even = 0usize; // BE では上位バイト＝偶数オフセット。
+    let mut null_at_odd = 0usize; // LE では上位バイト＝奇数オフセット。
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == 0 {
+            if i % 2 == 0 {
+                null_at_even += 1;
+            } else {
+                null_at_odd += 1;
+            }
+        }
+    }
+    // 明確な偏りがある側を採る。拮抗（差が小さい）なら判定を保留して後段へ委ねる。
+    if null_at_odd > null_at_even.saturating_mul(2) {
+        Some(TextEncoding::Utf16Le)
+    } else if null_at_even > null_at_odd.saturating_mul(2) {
+        Some(TextEncoding::Utf16Be)
+    } else {
+        None
+    }
+}
+
+/// バイト列に占めるヌルバイト（0x00）の比率（0.0〜1.0）。空なら 0.0。
+fn null_byte_ratio(bytes: &[u8]) -> f64 {
+    if bytes.is_empty() {
+        return 0.0;
+    }
+    let nulls = bytes.iter().filter(|&&b| b == 0).count();
+    nulls as f64 / bytes.len() as f64
 }
 
 /// 指定エンコーディングで**不正バイトが無いか**を検査しつつデコードする（妥当なら `Some`）。
@@ -230,17 +318,44 @@ pub fn encode_for_save(text: &str, encoding: TextEncoding, has_bom: bool) -> Sav
             return SaveOutcome::Unmappable(unmappable);
         }
     }
-    let (encoded, _, had_errors) = encoding.encoding_rs().encode(text);
-    // encode は表現不能を「?」等へ置換しうる。had_errors なら念のため中断（無確認置換を防ぐ）。
-    if had_errors {
-        return SaveOutcome::Unmappable(find_unmappable(text, encoding));
-    }
+
+    // UTF-16 LE/BE は encoding_rs の `encode` が UTF-8 へ転送する（`output_encoding()==UTF_8`＝UTF-16
+    // 用エンコーダを持たない）ため、ここで**手動で UTF-16 へエンコード**する（要件5.2 往復維持・#22）。
+    let encoded: Vec<u8> = match encoding {
+        TextEncoding::Utf16Le => encode_utf16(text, false),
+        TextEncoding::Utf16Be => encode_utf16(text, true),
+        _ => {
+            let (cow, _, had_errors) = encoding.encoding_rs().encode(text);
+            // encode は表現不能を「?」等へ置換しうる。had_errors なら念のため中断（無確認置換を防ぐ）。
+            if had_errors {
+                return SaveOutcome::Unmappable(find_unmappable(text, encoding));
+            }
+            cow.into_owned()
+        }
+    };
+
     let mut out = Vec::with_capacity(encoded.len() + 3);
     if has_bom {
         out.extend_from_slice(bom_bytes(encoding));
     }
     out.extend_from_slice(&encoded);
     SaveOutcome::Encoded(out)
+}
+
+/// テキストを UTF-16（LE/BE）バイト列へエンコードする（BOM は付けない・呼び出し側で付与）。
+///
+/// encoding_rs は UTF-16 用エンコーダを持たない（`encode` は UTF-8 へ転送）ため、Rust 標準の
+/// `char::encode_utf16` でコードユニットを得て指定エンディアンのバイト列にする（要件5.2 往復維持・#22）。
+fn encode_utf16(text: &str, big_endian: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() * 2);
+    for unit in text.encode_utf16() {
+        if big_endian {
+            out.extend_from_slice(&unit.to_be_bytes());
+        } else {
+            out.extend_from_slice(&unit.to_le_bytes());
+        }
+    }
+    out
 }
 
 /// 「UTF-8で保存」を選んだときのバイト列（要件5.6 の選択肢「UTF-8で保存」）。
@@ -344,6 +459,98 @@ mod tests {
     fn 純_asciiはutf8として開く() {
         let d = decode(b"plain ascii text");
         assert_eq!(d.encoding, TextEncoding::Utf8);
+    }
+
+    /// テキストを UTF-16（LE/BE）バイト列へ手動エンコードする（encoding_rs は UTF-16 用エンコーダを
+    /// 持たず `encode` が UTF-8 を返すため、テスト fixture は標準 `encode_utf16` で組む）。
+    fn utf16_bytes(text: &str, big_endian: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        for u in text.encode_utf16() {
+            if big_endian {
+                out.extend_from_slice(&u.to_be_bytes());
+            } else {
+                out.extend_from_slice(&u.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn bomなしutf16le_の_asciiを判定する_往復喪失しない() {
+        // BOM なし UTF-16LE の ASCII（"Hello"）。各 ASCII の上位バイトがヌル＝UTF-8 strict も妥当に見えるが
+        // ヌル分布で UTF-16LE と判定する（要件5.2 往復喪失防止・#22）。
+        let utf16 = utf16_bytes("Hello, world!", false); // BOM なし LE。
+        let d = decode(&utf16);
+        assert_eq!(
+            d.encoding,
+            TextEncoding::Utf16Le,
+            "BOM なし UTF-16LE を誤判定: {:?}",
+            d
+        );
+        assert_eq!(d.text, "Hello, world!");
+        assert!(!d.has_bom);
+        // 読込→保存で UTF-16LE のままバイト一致（往復喪失しない）。
+        match encode_for_save(&d.text, d.encoding, d.has_bom) {
+            SaveOutcome::Encoded(bytes) => assert_eq!(bytes, utf16),
+            other => panic!("UTF-16LE 保存が中断: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bomなしutf16be_の_asciiを判定する() {
+        let utf16 = utf16_bytes("Hello, world!", true); // BOM なし BE。
+        let d = decode(&utf16);
+        assert_eq!(
+            d.encoding,
+            TextEncoding::Utf16Be,
+            "BOM なし UTF-16BE を誤判定: {:?}",
+            d
+        );
+        assert_eq!(d.text, "Hello, world!");
+        assert!(!d.has_bom);
+        // BE も往復一致。
+        match encode_for_save(&d.text, d.encoding, d.has_bom) {
+            SaveOutcome::Encoded(bytes) => assert_eq!(bytes, utf16),
+            other => panic!("UTF-16BE 保存が中断: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn utf16le_bom付きの往復はバイト一致() {
+        // #22 の根は encode 経路でも UTF-16 が UTF-8 化して失われること。BOM 付き UTF-16LE も
+        // 手動エンコードで往復維持されることを担保する（要件5.2）。
+        let mut original = vec![0xFF, 0xFE]; // LE BOM
+        original.extend_from_slice(&utf16_bytes("こんにちはAB", false));
+        let d = decode(&original);
+        assert_eq!(d.encoding, TextEncoding::Utf16Le);
+        assert!(d.has_bom);
+        assert_eq!(d.text, "こんにちはAB");
+        match encode_for_save(&d.text, d.encoding, d.has_bom) {
+            SaveOutcome::Encoded(bytes) => assert_eq!(bytes, original),
+            other => panic!("UTF-16LE BOM 保存が中断: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn 通常のutf8テキストはutf16と誤判定しない() {
+        // ヌルバイトを含まない通常テキストは UTF-16 ヒューリスティックを通さない（誤判定回避）。
+        let d = decode("これは普通の日本語テキストです\nABC123".as_bytes());
+        assert_eq!(d.encoding, TextEncoding::Utf8);
+        assert!(!d.had_decode_warning);
+    }
+
+    #[test]
+    fn ヌルを多く含むutf8は警告を立ててreopenを促す() {
+        // ヌルが多いが偏りが拮抗し UTF-16 と確定できない縁ケース＝UTF-8 で開きつつ警告（保険・#22）。
+        // 偶数/奇数位置にヌルを均等配置して LE/BE 判定を拮抗させる。
+        let bytes = vec![0x00, 0x00, b'a', b'b', 0x00, 0x00, b'c', b'd'];
+        let d = decode(&bytes);
+        assert_eq!(d.encoding, TextEncoding::Utf8);
+        assert!(
+            d.had_decode_warning,
+            "ヌル多含 UTF-8 で警告が立たない（Reopen を促せない）: {:?}",
+            d
+        );
     }
 
     #[test]
