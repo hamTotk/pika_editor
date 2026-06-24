@@ -10,6 +10,7 @@
 //! - object に **自己記述メタ**を併記し、index 破損時は object 走査から退避一覧を再生成（最後の砦に到達可能）。
 
 use crate::snapshot::object::{ObjectMeta, StashKind};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// ファイルごとの退避上限（最新10件 LRU＝要件9.2）。
@@ -36,7 +37,7 @@ impl std::fmt::Display for SnapshotError {
 impl std::error::Error for SnapshotError {}
 
 /// ベースライン参照（ファイルごとに常に1件＝要件9.2）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BaselineRef {
     /// LF 正規化後の内容ハッシュ（未読判定はこれで行う。内容保存有無に関わらず持つ）。
     pub content_hash: String,
@@ -52,7 +53,7 @@ impl BaselineRef {
 }
 
 /// 退避エントリ（conflict/incoming/rollback/baseline-replace の1件）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StashEntry {
     /// 退避種別。
     pub kind: StashKind,
@@ -105,10 +106,48 @@ pub struct SnapshotStore {
     object_meta: BTreeMap<String, ObjectMeta>,
 }
 
+/// 永続化（index.json）用の SnapshotStore スナップショット（#3・design doc 11章）。
+///
+/// `SnapshotStore` の private フィールドを serde で写し取った値。index.json への
+/// アトミック書込（呼び出し側 src-tauri）と起動ロードで用いる。
+/// `object_meta` を必ず含めることで、index.json が壊れても object の自己記述メタから
+/// 退避一覧を再生成できる（最後の砦・最上位原則1）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PersistedStore {
+    /// index 世代（退避メタの整合確認・破損復元に使う）。
+    pub generation: u64,
+    /// relPath → ベースライン参照。
+    pub baselines: BTreeMap<String, BaselineRef>,
+    /// relPath → 退避リスト（登録順）。
+    pub stashes: BTreeMap<String, Vec<StashEntry>>,
+    /// object ハッシュ → 自己記述メタ（index 破損復元の素）。
+    pub object_meta: BTreeMap<String, ObjectMeta>,
+}
+
 impl SnapshotStore {
     /// 空の索引を作る。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 現在の索引を永続化表現へ写す（index.json 書込用＝#3）。
+    pub fn export(&self) -> PersistedStore {
+        PersistedStore {
+            generation: self.generation,
+            baselines: self.baselines.clone(),
+            stashes: self.stashes.clone(),
+            object_meta: self.object_meta.clone(),
+        }
+    }
+
+    /// 永続化表現から索引を復元する（起動ロード用＝#3）。
+    pub fn import(data: PersistedStore) -> Self {
+        Self {
+            generation: data.generation,
+            baselines: data.baselines,
+            stashes: data.stashes,
+            object_meta: data.object_meta,
+        }
     }
 
     /// 現在の index 世代。
@@ -551,5 +590,37 @@ mod tests {
         // 押し出されるのは復元済みの最古 o-5（未復元 o-0..o-4 は保護）。
         assert!(s.stashes("a.md").iter().all(|e| e.object_hash != "o-5"));
         assert!(s.stashes("a.md").iter().any(|e| e.object_hash == "o-0"));
+    }
+
+    #[test]
+    fn persisted_store_は_json_往復で索引が一致する() {
+        // export → serde_json → import で baselines/stashes/object_meta/generation が保たれる（#3）。
+        let mut s = SnapshotStore::new();
+        s.set_baseline_with_content("a.md", "h-a", "obj-a");
+        s.set_baseline_hash_only("secret.env", "h-x");
+        s.add_stash("a.md", StashKind::Conflict, "obj-c1", 100, true);
+        s.add_stash("b.md", StashKind::Rollback, "obj-r1", 200, true);
+        s.mark_restored("a.md", "obj-c1");
+
+        let exported = s.export();
+        let json = serde_json::to_string(&exported).expect("PersistedStore は直列化できる");
+        let parsed: PersistedStore =
+            serde_json::from_str(&json).expect("PersistedStore は復元できる");
+        assert_eq!(parsed, exported, "JSON 往復で永続化表現が一致する");
+
+        let restored = SnapshotStore::import(parsed);
+        // generation・baselines・stashes・object_meta がすべて再現される。
+        assert_eq!(restored.generation(), s.generation());
+        assert_eq!(restored.baseline("a.md"), s.baseline("a.md"));
+        assert_eq!(restored.baseline("secret.env"), s.baseline("secret.env"));
+        assert_eq!(restored.stashes("a.md"), s.stashes("a.md"));
+        assert_eq!(restored.stashes("b.md"), s.stashes("b.md"));
+        assert_eq!(restored.object_meta("obj-c1"), s.object_meta("obj-c1"));
+        assert_eq!(restored.object_meta("obj-r1"), s.object_meta("obj-r1"));
+        // 復元済みフラグも保たれる（14日保護の判定に影響）。
+        assert!(restored
+            .stashes("a.md")
+            .iter()
+            .any(|e| e.object_hash == "obj-c1" && !e.unrestored));
     }
 }

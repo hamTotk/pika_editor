@@ -40,10 +40,36 @@ pub fn open_workspace(
     }
     // アクセス制御のルートを張る（#5）。以後この配下の read_file/open_document/save_document が通る。
     access.set_root(&path);
+    // 永続スナップショット領域を確定し、前回までの索引/退避をロードする（#3・再起動で揮発しない）。
+    // capture_baseline の非クロバーが効くよう、ベースライン取得**より前**に呼ぶ。
+    // data_root 解決/ロード失敗は致命にせず警告ログのみで継続する（永続化なしで従来どおり動く）。
+    match state_store::resolve() {
+        Ok(data_root) => {
+            if let Err(e) = snapshot.set_workspace(&path, &data_root.path) {
+                crate::diagnostic::record(
+                    pika_core::diagnostic::LogLevel::Warn,
+                    "snapshot",
+                    "set_workspace",
+                    Some(&path),
+                    &e,
+                );
+            }
+        }
+        Err(e) => {
+            crate::diagnostic::record(
+                pika_core::diagnostic::LogLevel::Warn,
+                "snapshot",
+                "data_root",
+                Some(&path),
+                &e,
+            );
+        }
+    }
     // 列挙・並び順は list_dir と同一規則を共有する（enumerate_dir）。
     let entries = enumerate_dir(dir)?;
     // 直下ファイルの差分ベースライン内容を取得する（全既読スタート＝要件8.1）。
     // 機密/10MB以上/画像はハッシュのみ（pika-core::snapshot::policy が判定）。
+    // ロード済みベースラインがある path は capture_baseline がスキップする（非クロバー・#3）。
     for entry in &entries {
         if !entry.is_dir {
             capture_baseline_for(Path::new(&entry.path), &snapshot);

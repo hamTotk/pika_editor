@@ -22,5 +22,6 @@ pub use object::{
 };
 pub use policy::{baseline_policy, BaselinePolicy, DEFAULT_CONTENT_LIMIT_BYTES};
 pub use store::{
-    BaselineRef, SnapshotError, SnapshotStore, StashEntry, StashResult, MAX_STASH_PER_FILE,
+    BaselineRef, PersistedStore, SnapshotError, SnapshotStore, StashEntry, StashResult,
+    MAX_STASH_PER_FILE,
 };
