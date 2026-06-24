@@ -70,6 +70,12 @@ pika/
   - 監査（系統A監査）：`cargo audit`（CVE 追跡。CI ゲート）
 - **完了の検証**：完了を主張する前に `cargo test` ＋ `cargo build` ＋ `npm run typecheck` を通す。GUI 実機・実測（IPC コスト・別WebView 権限ゼロ隔離・性能・a11y・WebView2 不在時）は系統C（`docs/acceptance.md`/`docs/acceptance-findings.md`）で確認する。編集直後の hook はファイル単位の即時検査（JSON 構文・C++ clang-format）、上記コマンドが全体整合の最終検査
 
+### GUI 起動（実機確認）
+
+1. **Vite を先に起動**：`npm run dev`（debug ビルドは devUrl `http://localhost:5173` を見る。未起動だと真っ白。release は埋め込み dist で不要）
+2. **GUI ビルド**：`cargo build -p pika-app --bin pika`（exe＝`target/debug/pika.exe`）。bash では先に `export PATH="$USERPROFILE/.cargo/bin:$PATH"`。ビルド前に `taskkill //F //IM pika.exe`（実行中だと exe ロックでリンク失敗）
+3. **起動（デタッチ）**：`cmd //c start "" target\debug\pika.exe <開くフォルダ>`
+
 **テスト方針（design doc 12章）**：自動単体テストの対象は `crates/pika-core`。重点は diff（日本語の文字単位フォールバック・改行混在・空ファイル）・watcher のイベント合成/自己保存抑制/オーバーフロー再同期/rename正規化・snapshot の退避と容量管理・エンコーディング往復・render のサニタイズ。command 層/frontend TS は `cargo build`＋`npm run typecheck` のコンパイル/型成立を最低保証にする。UIの自動テストは初期版では持たない（`docs/acceptance.md` の手動チェックリストで代替）。性能は基準機・Release ビルドで Rust 側自己計測（QPC+psapi）しリリース前ゲートにする。
 
 ## 自動検査と規約（ハーネス）
