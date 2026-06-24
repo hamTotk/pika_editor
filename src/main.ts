@@ -327,6 +327,18 @@ function initWindowControls(): void {
   // 起動時・OS 側操作（ダブルクリック/スナップ）での最大化変化にも追従させる。
   void syncMaxLabel();
   void win.onResized(() => void syncMaxLabel());
+  // フレームレス上端のリサイズハンドル（decorations:false で OS の上辺リサイズ縁が細いのを補強・
+  // ui-design §7）。上端の薄いストリップ上で mousedown したら上辺リサイズを Tauri へ依頼する
+  // （capabilities: core:window:allow-start-resize-dragging）。最大化中は何もしない。
+  const resizeTop = document.getElementById("resize-top");
+  resizeTop?.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    void (async () => {
+      if (await win.isMaximized()) return;
+      // ResizeDirection は @tauri-apps/api/window 内の文字列ユニオン型（未 export）。文字列リテラルで渡す。
+      await win.startResizeDragging("North");
+    })();
+  });
 }
 
 /**

@@ -137,6 +137,20 @@ body {
   outline-offset: -2px;
 }
 
+/* フレームレス上端のリサイズハンドル（OS リサイズボーダー補強・ui-design §7）。
+   decorations:false で OS の上辺リサイズ縁が細いため、薄いストリップを最前面に重ねて
+   ns-resize カーソルを出し、main.ts が上辺リサイズ（startResizeDragging('North')）を呼ぶ。
+   メニュー帯ボタンの最上端をわずかに覆うが、ボタン本体は下にありクリックは保てる。 */
+#resize-top {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 6px;
+  cursor: ns-resize;
+  z-index: 1000;
+}
+
 /* ドロップダウンを載せる絶対配置レイヤ。#app（position:relative）の左上基準で .menu-pop を配置する。
    レイヤ自体はクリックを透過させ、中身（.menu-pop）だけがイベントを受ける。 */
 #menu-layer {

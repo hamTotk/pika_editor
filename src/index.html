@@ -60,6 +60,10 @@
     <!-- アプリシェル。中心体験① の最薄ループ（フォルダを開く→ツリー→タブ→編集→保存）を貫通させる骨格。
          ARIA は design doc 17章で全Web再構築する（本スプリントは role の土台のみ）。 -->
     <div id="app">
+      <!-- フレームレス上端のリサイズハンドル（decorations:false で OS の上辺リサイズ縁が細いため、
+           薄いストリップを重ねて ns-resize＋startResizeDragging('North') でリサイズ領域を広げる）。
+           視覚も読み上げも持たない当たり判定専用要素（ui-design §7）。 -->
+      <div id="resize-top" aria-hidden="true"></div>
       <!-- カスタムメニューバー（UIブラッシュアップ T8・差分 A1/A2/A3・ui-mock .menubar）。
            pika は「全Web描画」原則のため OS ネイティブメニューではなく HTML/CSS/TS で実装する。
            ツールバー(#toolbar)は完全廃止し、フォルダを開く/保存/確認済み/巻き戻し等は
