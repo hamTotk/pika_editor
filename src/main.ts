@@ -295,9 +295,6 @@ function updateTreeHeader(): void {
   label.setAttribute("title", folder);
 }
 
-/** メニューバー右端 #window-title。 */
-const windowTitleEl = () => document.getElementById("window-title") as HTMLElement;
-
 /**
  * フレームレス化（tauri.conf decorations:false・ui-design §7）に伴う自前ウィンドウ操作ボタンを配線する。
  * OS タイトルバーを廃した分、最小化/最大化(復元)/閉じるを @tauri-apps/api/window 経由で実装する。
@@ -330,25 +327,6 @@ function initWindowControls(): void {
   // 起動時・OS 側操作（ダブルクリック/スナップ）での最大化変化にも追従させる。
   void syncMaxLabel();
   void win.onResized(() => void syncMaxLabel());
-}
-
-/**
- * メニューバー右端のウィンドウタイトル（ui-mock .menubar .title・UIブラッシュアップ T8）を更新する。
- * 「<フォルダ名> — pika」を出す（未オープン時は「pika」のみ）。フォルダ名は state.folder のベース名
- *（ツリーヘッダと同じ規則）。省略表示でも分かるよう title（ツールチップ）に絶対パスを残す。
- */
-function updateWindowTitle(): void {
-  const el = windowTitleEl();
-  const folder = state.folder;
-  if (!folder) {
-    el.textContent = "pika";
-    el.removeAttribute("title");
-    return;
-  }
-  const trimmed = folder.replace(/[\\/]+$/, "");
-  const base = trimmed.split(/[\\/]/).pop() || trimmed;
-  el.textContent = `${base} — pika`;
-  el.setAttribute("title", folder);
 }
 
 /**
@@ -681,7 +659,6 @@ async function switchFolder(dir: string): Promise<void> {
     state.unread = new UnreadStore();
     refreshTree();
     updateTreeHeader();
-    updateWindowTitle();
     refreshTabs();
     // フォルダ名＋件数はツリーヘッダ（T3）へ移したのでステータスからは外す。ファイルを開くまでは
     // 表示するファイル計測値が無いのでステータスは空にする（開くと refreshStatus が構造化表示する）。
@@ -1587,7 +1564,6 @@ async function restoreOnStartup(): Promise<void> {
       state.unread = new UnreadStore();
       refreshTree();
       updateTreeHeader();
-      updateWindowTitle();
       // フォルダ名＋件数はツリーヘッダ（T3）へ移したのでステータスからは外す。タブ復元・活性化後に
       // refreshStatus（activateTab 経由）が構造化ステータスを描画する。
       setStatus("");
@@ -1812,14 +1788,27 @@ async function main(): Promise<void> {
   // 隠れ未読バッジ（T10・差分 C5）。タブ列の横スクロールで可視範囲が変わるたびに再計算する
   // （更新タイミング(a)）。scroll は高頻度なので rAF デバウンスへ流す。passive で滑らかに。
   tabsEl().addEventListener("scroll", () => scheduleHiddenUnread(), { passive: true });
+  // タブのオーバーフローは横スクロールバーを消し（CSS）、縦ホイール（deltaY）を横スクロールへ変換する。
+  // タッチパッドの横スワイプ（deltaX）は既定の横スクロールへ委ねるため deltaY のみ拾う。
+  // 変換時のみ既定の縦スクロールを抑止する（passive:false）。scrollLeft 変化で scroll イベント→
+  // scheduleHiddenUnread が走り、隠れ未読バッジは自然に再計算される。
+  tabsEl().addEventListener(
+    "wheel",
+    (e) => {
+      if (e.deltaY !== 0) {
+        tabsEl().scrollLeft += e.deltaY;
+        e.preventDefault();
+      }
+    },
+    { passive: false },
+  );
   // バッジクリック（親切機能）: 最初の隠れ未読タブが見える位置へ #tabs をスクロールする。
   hiddenUnreadBadge().addEventListener("click", () => scrollToHiddenUnread());
   // ツリー収納/引き出しトグル（B5・ui-design 7章）。ヘッダ右端「‹」で収納、レール「›」で引き出す。
   treeCollapseBtn().addEventListener("click", () => setTreeCollapsed(true));
   treeExpandBtn().addEventListener("click", () => setTreeCollapsed(false));
-  // ツリーヘッダ（B4）・ウィンドウタイトル（T8）の初期表示（未オープン時は素の文言）。復元後に更新される。
+  // ツリーヘッダ（B4）の初期表示（未オープン時は素の文言）。復元後に更新される。
   updateTreeHeader();
-  updateWindowTitle();
   // tab-tools セグメントの初期表示（既定モード=ソースに .on を付け、タブ未オープン時は無効化する）。
   // 以後はタブ操作/モード切替/差分トグルのたびに refreshViewTools が同期する。
   refreshViewTools();
