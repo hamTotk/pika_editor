@@ -545,8 +545,11 @@ export type DefaultModeSetting = "source" | "preview";
 /**
  * settings.toml の有効設定（src-tauri settings_service::SettingsDto と対応・要件10.3/10.4）。
  *
- * 無効値は backend（pika-core::settings）が既定へフォールバック済み。個別設定値の UI 適用は**段階的**
- * （本バッチは機構の貫通＝取得・再読込通知・破損/不完全保存の警告まで。適用は後続バッチ）。
+ * 無効値は backend（pika-core::settings）が既定へフォールバック済み。個別設定値の UI 適用状況:
+ * - **U2a で適用済み（frontend 可視分）**: theme / wrap_default / tab_width / default_mode。
+ *   起動時＋ライブ（settings-changed）で即反映する（default_mode のみ起動時の初回既定として適用）。
+ * - **U2b で適用予定（backend 消費分）**: excluded_dirs / huge_file_threshold_bytes /
+ *   sensitive_patterns / allow_remote_resources / feature_* / full_hash_on_startup。
  */
 export interface Settings {
   excluded_dirs: string[];
@@ -586,7 +589,8 @@ export function onSettingsWarning(
 
 /**
  * 設定の再読み込み（settings.toml の有効な編集保存を検知）の購読（要件10.3 再起動なし反映）。
- * ペイロードは更新後の有効設定。個別設定の即時適用は**段階的**（本バッチは反映の貫通＝通知まで）。
+ * ペイロードは更新後の有効設定。frontend 可視分（theme/wrap_default/tab_width）は U2a で即時適用する
+ * （default_mode は初回既定の意味なのでライブでは適用しない）。backend 消費分の適用は U2b。
  */
 export function onSettingsChanged(
   handler: (settings: Settings) => void,

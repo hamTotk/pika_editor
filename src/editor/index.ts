@@ -2,9 +2,9 @@
 // 外部リロード=単一トランザクション=1Undo境界・非dirty・スクロール/カーソル維持を結線する。
 import { EditorState, type Extension, Annotation, Compartment } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
-import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { HighlightStyle, syntaxHighlighting, indentUnit } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 
 /** 外部リロードのトランザクションに付ける注釈。これが付いた変更は dirty 化しない（要件7.2/5.1）。 */
@@ -62,6 +62,12 @@ export interface EditorHandle {
    *（外部リロード非dirty・カーソル維持の既存挙動を壊さない）。
    */
   setLineWrapping(on: boolean): void;
+  /**
+   * タブの**表示幅**（EditorState.tabSize）を動的に切替える（settings.toml の tab_width 反映・要件10.3/5.2）。
+   * これは Tab 文字を画面上で何桁ぶん詰めて見せるかの設定であり、挿入文字（タブ文字）は変えない。
+   * setLineWrapping と全く同じく Compartment で差し替えるだけなので、内容/カーソル/スクロール/履歴は維持される。
+   */
+  setTabWidth(n: number): void;
   /** 破棄する。 */
   destroy(): void;
 }
@@ -97,7 +103,12 @@ const baseExtensions: Extension[] = [
   markdown(),
   // 控えめな構文ハイライトを有効化（class 指定＝テーマ追従・色は app.css）。
   syntaxHighlighting(pikaHighlightStyle),
-  keymap.of([...defaultKeymap, ...historyKeymap]),
+  // Tab はタブ文字を挿入する（スペース展開しない・保守的既定＝要件5.2）。indentUnit を "\t" に固定し、
+  // indentWithTab で Tab/Shift+Tab をインデント操作へ割り当てる。tab_width は**表示幅にのみ**効く値で、
+  // ここで入るのは常にタブ文字 1 個（挿入スペース数ではない）。indentWithTab は defaultKeymap より
+  // 先に置き、フォーカスがエディタにある間 Tab がインデントへ向かうようにする。
+  indentUnit.of("\t"),
+  keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap]),
 ];
 
 /**
@@ -110,6 +121,9 @@ const baseExtensions: Extension[] = [
  * @param lineWrapping 初期の折り返し ON/OFF（表示メニューのトグルが保持する現在値・既定 ON）。
  *   既定 ON で短文ファイルの不要な横スクロールバーを避ける（ui-design §120）。
  *   タブ切替でエディタを作り直しても現在の折り返し設定を引き継ぐために初期値で渡す。
+ * @param tabWidth タブの**表示幅**（EditorState.tabSize・settings.toml の tab_width・既定 4）。
+ *   挿入文字（タブ文字）には影響せず、Tab 文字を画面上で何桁ぶんに見せるかだけを決める（要件5.2）。
+ *   lineWrapping と同じく、タブ切替でエディタを作り直しても現在値を初期値で引き継ぐ。
  */
 export function createEditor(
   parent: HTMLElement,
@@ -117,11 +131,15 @@ export function createEditor(
   onChange: () => void,
   onCursorChange?: () => void,
   lineWrapping = true,
+  tabWidth = 4,
 ): EditorHandle {
   parent.replaceChildren();
 
   // 折り返しを動的に差し替えるための Compartment（setLineWrapping で reconfigure する）。
   const wrapCompartment = new Compartment();
+  // タブ表示幅を動的に差し替えるための Compartment（setTabWidth で reconfigure する）。
+  // wrapCompartment と同じ作法で、内容/カーソル/履歴を壊さず tab_width 変更を反映する。
+  const tabSizeCompartment = new Compartment();
 
   const view = new EditorView({
     parent,
@@ -130,6 +148,8 @@ export function createEditor(
       extensions: [
         ...baseExtensions,
         wrapCompartment.of(lineWrapping ? EditorView.lineWrapping : []),
+        // タブ表示幅（EditorState.tabSize の Facet）を Compartment 経由で初期化する（setTabWidth で差替）。
+        tabSizeCompartment.of(EditorState.tabSize.of(tabWidth)),
         EditorView.updateListener.of((update) => {
           // カーソル移動（selectionSet）または編集（docChanged）でステータスを追従させる（要件11.1）。
           // 外部リロードも選択/内容が変わるので拾い、新しい行数・文字数・位置を反映させる。
@@ -254,6 +274,13 @@ export function createEditor(
       // Compartment を reconfigure するだけ＝内容/カーソル/スクロール/履歴は保持される。
       view.dispatch({
         effects: wrapCompartment.reconfigure(on ? EditorView.lineWrapping : []),
+      });
+    },
+    setTabWidth: (n: number) => {
+      // tabSize Facet を Compartment 経由で差し替える＝内容/カーソル/スクロール/履歴は保持される
+      //（setLineWrapping と同じ作法）。表示幅のみ変わり挿入文字（タブ文字）は変わらない。
+      view.dispatch({
+        effects: tabSizeCompartment.reconfigure(EditorState.tabSize.of(n)),
       });
     },
     destroy: () => view.destroy(),

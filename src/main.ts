@@ -145,9 +145,14 @@ const state = {
   // 既定 ON（ui-design §120 の折り返しトグル準拠）。短い行でも横スクロールバーが常時出る問題を
   // 防ぐため折り返しを既定にし、長い行を見たいときだけ表示メニューで OFF にする運用へ倒す。
   lineWrapping: true,
+  // タブの表示幅（settings.toml の tab_width・EditorState.tabSize へ流す）。アプリ全体で 1 つ。
+  // lineWrapping と同じく、タブ切替でエディタを作り直しても createEditor の初期値で引き継ぐ。
+  // 既定 4（settings 取得前/取得失敗時の素の値）。applySettings が getSettings/settings-changed で更新する。
+  tabWidth: 4,
   // settings.toml の有効設定（要件10.3/10.4）。起動時に getSettings で取得し、settings-changed で更新する。
-  // 個別設定の UI 適用（テーマ・折返し既定・タブ幅 等）は**段階的**（本バッチは保持と機構の貫通まで）。
-  // null の間は未取得（取得失敗時も含む）。値の適用は後続バッチで onSettingsChanged から行う（TODO: 段階的反映）。
+  // 可視4項目（theme/wrap_default/tab_width/default_mode）は applySettings が即適用する（U2a）。
+  // 残りの backend 消費分（excluded_dirs/huge_file_threshold/sensitive_patterns/allow_remote_resources/
+  // feature_*/full_hash_on_startup）の適用は U2b で別途。null の間は未取得（取得失敗時も含む）。
   settings: null as Settings | null,
 };
 
@@ -439,6 +444,7 @@ async function activateTab(path: string): Promise<void> {
       () => markDirty(path),
       () => refreshStatus(),
       state.lineWrapping,
+      state.tabWidth,
     );
     refreshTabs();
     setStatus(`削除済み: ${path}（［確認済み時点に戻す］で退避から復元できます）`);
@@ -473,6 +479,7 @@ async function activateTab(path: string): Promise<void> {
       () => markDirty(path),
       () => refreshStatus(),
       state.lineWrapping,
+      state.tabWidth,
     );
     // 段階制で機能が縮退するとき（preview/diff/highlight 等の自動オフ）は理由を通知バー提示する（要件2.2）。
     notifyDegrade(path, doc.degrade);
@@ -879,6 +886,7 @@ async function reopenActiveWithEncoding(enc: DocEncoding): Promise<void> {
       () => markDirty(path),
       () => refreshStatus(),
       state.lineWrapping,
+      state.tabWidth,
     );
     // 開いた内容のハッシュを基準に取り直し未読をクリアする（復元の別物判定の素・eval high）。
     void captureTabHash(path, doc.text);
@@ -1319,6 +1327,38 @@ async function onF5(): Promise<void> {
 // ── 表示メニューの追加操作（折り返し/テーマ/ログフォルダ・UIブラッシュアップ T8）─────────────
 
 /**
+ * settings.toml の有効設定のうち**ユーザーが見て効く4項目**を即適用する（要件10.3/10.4 再起動なし反映・U2a）。
+ *
+ * 適用タイミングの違い（取り違え厳禁）:
+ * - 共通（起動時＋ライブ両方）: theme / wrap_default / tab_width。settings-changed のたびに反映する。
+ * - 起動時のみ（opts.initial===true）: default_mode。「初回既定」の意味であり、ライブで適用すると
+ *   現在開いているビューを強制切替してしまうため、settings-changed では viewMode を触らない。
+ *
+ * wrap_default/tab_width はアプリ全体の state（lineWrapping/tabWidth）へ代入し、既存エディタがあれば
+ * Compartment 差し替えで即反映する（内容/カーソル/スクロール/履歴は壊さない）。エディタを作り直しても
+ * createEditor の初期値で引き継ぐ。ユーザーが表示メニューで手動トグルした後に settings を編集した場合は
+ * settings 値で上書きされるが、設定編集はユーザーの明示的な意思表示なので許容する。
+ *
+ * 残りの backend 消費分（excluded_dirs/huge_file_threshold/sensitive_patterns/allow_remote_resources/
+ * feature_mermaid 等の feature_ 群/full_hash_on_startup）は本タスク（U2a）のスコープ外で、U2b で別途適用する。
+ */
+function applySettings(s: Settings, opts: { initial: boolean }): void {
+  // theme: ThemeSetting と ThemeMode は同型（"light"|"dark"|"system"）なので変換不要でそのまま渡せる。
+  applyTheme(s.theme);
+  // wrap_default: アプリ全体の折り返し設定へ反映し、開いているエディタがあれば即時切替する。
+  state.lineWrapping = s.wrap_default;
+  state.editor?.setLineWrapping(s.wrap_default);
+  // tab_width: タブの**表示幅**（EditorState.tabSize）にのみ使う。挿入文字はタブ文字のまま（要件5.2）。
+  state.tabWidth = s.tab_width;
+  state.editor?.setTabWidth(s.tab_width);
+  // default_mode: 起動時のみ初回既定として viewMode を確定する（既定 source を維持・要件6.1）。
+  // restoreOnStartup がタブを開く前に viewMode が確定している必要があるため、初期化時に適用する。
+  if (opts.initial) {
+    state.viewMode = s.default_mode === "preview" ? "preview" : "source";
+  }
+}
+
+/**
  * 行の折り返しトグル（表示メニュー・UIブラッシュアップ T8）。アプリ全体で 1 つの設定を反転し、
  * 現在エディタへ即時反映する（Compartment 差し替え＝内容/カーソル/スクロール/履歴を壊さない）。
  * タブ切替でエディタを作り直しても createEditor の初期値で引き継ぐ。
@@ -1674,6 +1714,7 @@ function openNewFileTab(path: string, name: string): void {
     () => markDirty(path),
     () => refreshStatus(),
     state.lineWrapping,
+    state.tabWidth,
   );
   void captureTabHash(path, "");
   refreshTabs();
@@ -1973,7 +2014,14 @@ function closeTab(path: string): void {
     state.active = null;
     state.editor?.destroy();
     // 空のエディタを残す（タブが無くてもキーボード操作の到達先を保つ）。
-    state.editor = createEditor(editorHost(), "", () => undefined, undefined, state.lineWrapping);
+    state.editor = createEditor(
+      editorHost(),
+      "",
+      () => undefined,
+      undefined,
+      state.lineWrapping,
+      state.tabWidth,
+    );
     refreshTabs();
     setStatus(emptyMessage("no-folder"));
   }
@@ -2064,17 +2112,21 @@ async function main(): Promise<void> {
   // 設定（settings.toml）の警告/再読み込みの購読（要件10.3/10.4）。
   // 起動時破損・実行中の不完全保存・無効値の警告はすべて settings-warning で届く（backend が文言生成）。
   await onSettingsWarning((message) => notify(message, "warn"));
-  // settings.toml の有効な編集保存を検知したら再読み込み（要件10.3 再起動なし反映）。
-  // 個別設定の即時適用（テーマ・折返し既定・タブ幅 等）は**段階的**（TODO: 段階的反映）。
-  // 本バッチは反映の貫通＝最新設定を state に保持し、反映された旨を通知するところまで。
+  // settings.toml の有効な編集保存を検知したら再読み込みし、可視4項目を即適用する（要件10.3 再起動なし反映）。
+  // theme/wrap_default/tab_width はライブで反映する。default_mode は「初回既定」の意味なのでライブでは
+  // 適用しない（initial:false で applySettings へ伝える＝現在開いているビューを強制切替しない）。
   await onSettingsChanged((next) => {
     state.settings = next;
+    applySettings(next, { initial: false });
     notify("設定を再読み込みしました", "info");
   });
-  // 起動直後に現在の有効設定を取得して保持する（取得失敗は握りつぶす＝設定が無くても起動を妨げない）。
-  // 取得値の即適用は段階的（TODO: 段階的反映）。最低限、機構が通っていることを担保する。
+  // 起動直後に現在の有効設定を取得して保持し、可視4項目を初期適用する（取得失敗は握りつぶす＝設定が無くても起動を妨げない）。
+  // applySettings(initial:true) は theme/wrap_default/tab_width に加え default_mode で viewMode の初期値を確定する。
+  // restoreOnStartup（タブを開く）より前に走るので、復元前に viewMode が確定する。theme の確定もここで行い、
+  // initTheme の暫定 system からの切替を最初の重い描画より前に済ませて FOUC（ちらつき）を避ける。
   try {
     state.settings = await getSettings();
+    applySettings(state.settings, { initial: true });
   } catch {
     // 設定取得に失敗しても編集体験は継続（既定相当で動く）。
   }
