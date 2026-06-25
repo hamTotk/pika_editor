@@ -1433,6 +1433,10 @@ async function autoReloadCleanTabs(changes: import("./ipc").FsChange[]): Promise
   try {
     const content = await readFile(state.active);
     state.editor.reloadExternal(content);
+    // 検索バーを開いたまま外部リロードされた場合、件数/ハイライトを新内容へ追従させる
+    // （reloadExternal は decoration を map するだけで再検索しないため stale 化する）。
+    // 閉じている/空クエリなら refresh は no-op。
+    searchController?.refresh();
     // 反映後の内容を復元基準ハッシュとして更新（次回起動の別物判定の素・eval high）。
     void captureTabHash(state.active, content);
     // 自動リロードで現在タブを見たので未読は解除（外部変更を反映済み）。

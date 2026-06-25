@@ -217,8 +217,10 @@ pika-core のハードコード既定で動いている。設定値を各 comman
   打鍵ごとに全文を invoke 転送する**ため、debounce 延長 or 抑制を検討（IPC 予算・原則②）。全文転送コストを後回しリスクとして可視化。
 - **CM6 全ヒットハイライト**：`StateField`＋`Decoration.mark`（クラス `cm-search-hit`／現在ヒット `cm-search-hit-current`）。
   色は app.css トークンでテーマ追従。現在ヒットへ `view.dispatch({ selection, effects: scrollIntoView })`。
-- **モード連動（要件5.4）**：ソース/分割/差分ON は本エディタ検索。プレビューのみ（差分OFF）では検索バーを出さず
-  Ctrl+F は no-op（プレビュー内検索＝WebView2 find は系統C 繰り越し）。
+- **モード連動（要件5.4）**：**実装は `canSearch()`＝`showEditor`（ソース/分割でエディタ可視）に限定**。
+  差分ON/プレビューのみ/画像/第2段階は Ctrl+F を案内付き no-op にする。**【2026-06-25 改訂】差分ON時のエディタ
+  検索は当初 MVP 想定だったが、差分ビューが CM6 でない独自 DOM のため別ハイライト機構が要る＝系統C 繰り越し**
+  （プレビュー内検索＝WebView2 find も系統C 繰り越し）。要件5.4・上記「## 後回しの明示」に明記済み。
 - **段階制**：**第2段階（読み取り専用・`editingOff`）は検索バー無効化**（要件改訂提案。下記参照）。通常/第1段階に限定。
 
 **検証**：`cargo test`（UTF-16 単一パス変換・サロゲート混在）／`npm run typecheck`／実機で日本語・正規表現・件数・
@@ -303,6 +305,9 @@ acceptance.md TF6・acceptance-findings.md L6 を整合修正）。
 
 **後回しの明示（silent cap 回避）**
 - プレビュー内検索（要件5.4 WebView2 find）＝系統C 繰り越し。
+- **差分ON時のエディタ検索（要件5.4）＝系統C 繰り越し（2026-06-25 改訂）**。MVP の検索は CM6 上の自前
+  StateField ハイライトで、差分ビューは CM6 でない独自 DOM のため別ハイライト機構が要る。`canSearch()` は
+  `showEditor`（ソース/分割）に限定し、差分ON/プレビューのみ/画像/第2段階は Ctrl+F を案内付き no-op にする。
 - 第2段階（読み取り専用・巨大）の検索＝MVP 除外（要件改訂提案。通常/第1段階に限定）。
 - 表示モードのファイル種別別記憶（要件6.1）＝state.json 拡張要・MVP は `default_mode` 初期値まで。
 - **U2b の `huge_file_threshold_bytes`/`long_line_chars`・`allow_remote_resources`・`full_hash_on_startup`
