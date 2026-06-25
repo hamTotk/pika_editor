@@ -33,6 +33,7 @@ pub fn open_workspace(
     watcher: State<'_, WatcherService>,
     snapshot: State<'_, SnapshotService>,
     access: State<'_, crate::access::AccessControl>,
+    settings: State<'_, std::sync::Arc<crate::settings_service::SettingsService>>,
 ) -> Result<Vec<TreeEntry>, String> {
     let dir = Path::new(&path);
     if !dir.is_dir() {
@@ -65,8 +66,11 @@ pub fn open_workspace(
             );
         }
     }
-    // 列挙・並び順は list_dir と同一規則を共有する（enumerate_dir）。
-    let entries = enumerate_dir(dir)?;
+    // 列挙・並び順は list_dir と同一規則を共有する（enumerate_dir）。除外ディレクトリ（settings.toml
+    // excluded_dirs・既定 .git/node_modules）はここで弾く。除外されたディレクトリ配下は列挙されないため
+    // 下の baseline ループ（除外後の entries に対して回る）にも lazy 展開にも自然に乗らない。
+    let excluded = settings.snapshot().excluded_dirs;
+    let entries = enumerate_dir(dir, &excluded)?;
     // 直下ファイルの差分ベースライン内容を取得する（全既読スタート＝要件8.1）。
     // 機密/10MB以上/画像はハッシュのみ（pika-core::snapshot::policy が判定）。
     // ロード済みベースラインがある path は capture_baseline がスキップする（非クロバー・#3）。
@@ -98,24 +102,43 @@ pub fn open_workspace(
 /// 監視/スナップショットには一切触れない（design doc 3章: command 層は薄い境界）。
 /// 列挙・並び順は `open_workspace` と同一規則（`enumerate_dir`）を共有する。
 #[tauri::command]
-pub fn list_dir(path: String) -> Result<Vec<TreeEntry>, String> {
+pub fn list_dir(
+    path: String,
+    settings: State<'_, std::sync::Arc<crate::settings_service::SettingsService>>,
+) -> Result<Vec<TreeEntry>, String> {
     let dir = Path::new(&path);
     if !dir.is_dir() {
         return Err(format!("フォルダではありません: {path}"));
     }
-    enumerate_dir(dir)
+    // サブフォルダ展開でも open_workspace と同じ除外（excluded_dirs）を効かせる。
+    enumerate_dir(dir, &settings.snapshot().excluded_dirs)
+}
+
+/// 除外ディレクトリ判定（settings.toml `excluded_dirs` をツリー列挙へ配線）。
+///
+/// `excluded_dirs`（既定 `[".git","node_modules"]`）は**ディレクトリ名**を意味するので、
+/// `is_dir == true` のときだけ判定する（同名のファイルは除外しない）。一致は Windows のパス大小無視に
+/// 合わせて**大文字小文字を無視**する（`.git` も `.GIT` も同一視）。
+/// MVP のため判定は直下名の完全一致のみ（glob・パス全体マッチは対象外＝design doc 15章「足さない」）。
+fn is_excluded_dir(name: &str, is_dir: bool, excluded: &[String]) -> bool {
+    is_dir && excluded.iter().any(|e| e.eq_ignore_ascii_case(name))
 }
 
 /// フォルダ直下のエントリを列挙し、安定順（フォルダ先・名前昇順）で返す。
 /// `open_workspace`（監視開始＋ベースライン取得つき）と `list_dir`（副作用なし展開）で共有する。
-/// 除外リスト/自然順/シンボリックリンク循環検出は後続スプリントで workspace モジュールへ移す。
-fn enumerate_dir(dir: &Path) -> Result<Vec<TreeEntry>, String> {
+/// `excluded`（settings.toml の `excluded_dirs`）に名前が一致するディレクトリは列挙から除外する。
+/// 自然順/シンボリックリンク循環検出は後続スプリントで workspace モジュールへ移す。
+fn enumerate_dir(dir: &Path, excluded: &[String]) -> Result<Vec<TreeEntry>, String> {
     let mut entries = Vec::new();
     let read = std::fs::read_dir(dir).map_err(|e| format!("読み取りに失敗: {e}"))?;
     for ent in read.flatten() {
         let p = ent.path();
         let name = ent.file_name().to_string_lossy().to_string();
         let is_dir = p.is_dir();
+        // 除外ディレクトリ（.git/node_modules 等）は列挙しない＝lazy 展開も監視もベースラインも対象外になる。
+        if is_excluded_dir(&name, is_dir, excluded) {
+            continue;
+        }
         entries.push(TreeEntry {
             name,
             path: p.to_string_lossy().to_string(),
@@ -420,4 +443,47 @@ pub fn open_log_folder() -> Result<(), String> {
     let dir = crate::diagnostic::log_folder_path()?;
     let p = validate_openable(&dir)?;
     tauri_plugin_opener::open_path(p, None::<&str>).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_excluded_dir;
+
+    /// settings.toml の既定除外リスト（`.git` / `node_modules`）。
+    fn excluded() -> Vec<String> {
+        vec![".git".to_string(), "node_modules".to_string()]
+    }
+
+    #[test]
+    fn 既定の_git_ディレクトリは除外される() {
+        assert!(is_excluded_dir(".git", true, &excluded()));
+        assert!(is_excluded_dir("node_modules", true, &excluded()));
+    }
+
+    #[test]
+    fn 大文字小文字を無視して一致する() {
+        // Windows のパス大小無視に合わせ、.GIT も除外する。
+        assert!(is_excluded_dir(".GIT", true, &excluded()));
+        assert!(is_excluded_dir("Node_Modules", true, &excluded()));
+    }
+
+    #[test]
+    fn 同名のファイルは除外しない() {
+        // excluded_dirs はディレクトリ名の意味なので、同名ファイル（is_dir=false）は弾かない。
+        assert!(!is_excluded_dir("node_modules", false, &excluded()));
+        assert!(!is_excluded_dir(".git", false, &excluded()));
+    }
+
+    #[test]
+    fn 除外リストに無いディレクトリは残る() {
+        assert!(!is_excluded_dir("src", true, &excluded()));
+        assert!(!is_excluded_dir("docs", true, &excluded()));
+    }
+
+    #[test]
+    fn 空の除外リストでは何も除外しない() {
+        let empty: Vec<String> = Vec::new();
+        assert!(!is_excluded_dir(".git", true, &empty));
+        assert!(!is_excluded_dir("node_modules", true, &empty));
+    }
 }
