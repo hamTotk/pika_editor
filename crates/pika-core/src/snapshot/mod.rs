@@ -20,7 +20,10 @@ pub use gc::{plan_gc, GcConfig, GcPlan};
 pub use object::{
     hash_normalized, zstd_compress, zstd_decompress, ObjectMeta, StashKind, DEFAULT_ZSTD_LEVEL,
 };
-pub use policy::{baseline_policy, BaselinePolicy, DEFAULT_CONTENT_LIMIT_BYTES};
+pub use policy::{
+    baseline_policy, baseline_policy_with, is_sensitive, is_sensitive_with, BaselinePolicy,
+    DEFAULT_CONTENT_LIMIT_BYTES,
+};
 pub use store::{
     BaselineRef, PersistedStore, SnapshotError, SnapshotStore, StashEntry, StashResult,
     MAX_STASH_PER_FILE,

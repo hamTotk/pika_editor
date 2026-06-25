@@ -14,7 +14,7 @@ use pika_core::review::{
     decide_confirm, decide_rollback, ConfirmDecision, DiffSnapshot, DiskState,
 };
 use pika_core::snapshot::{
-    baseline_policy, hash_normalized, BaselinePolicy, SnapshotStore, StashKind,
+    baseline_policy_with, hash_normalized, BaselinePolicy, SnapshotStore, StashKind,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -77,6 +77,13 @@ struct SnapshotInner {
     /// `None` の間は永続化しない（ワークスペース未設定／data_root 解決失敗時の後方互換＝#3）。
     /// `Some` のとき各 mutation で object/メタ/index.json を書き、起動時にロードする（再起動で揮発しない）。
     snap_dir: Option<PathBuf>,
+    /// 設定 `sensitive_patterns`（既定パターンに**足す**glob・和集合＝U2b-2）。
+    /// 既定（空＝`Vec::new()`）は既定パターンのみ。`open_workspace` が [`SnapshotService::set_sensitive_patterns`]
+    /// で settings から流し込む。ベースライン判定（baseline_policy_with）の機密和集合に使い、機密該当を
+    /// HashOnly（平文を残さない＝要件9.1）へ倒す。**既定機密は外せない**（is_sensitive_with が常に内包）。
+    /// 取得不能時は空のまま＝既定のみで安全側（機密判定を弱めない不変条件）。
+    /// mid-session のパターン変更による既存 baseline 貼り直しは MVP 外（open 時反映で可）。
+    sensitive_patterns: Vec<String>,
 }
 
 impl Default for SnapshotService {
@@ -145,6 +152,18 @@ impl SnapshotService {
         inner.diff_snapshots.clear();
         inner.snap_dir = Some(snap_dir);
         Ok(())
+    }
+
+    /// 設定 `sensitive_patterns`（機密判定の和集合＝U2b-2）をベースライン判定へ流し込む。
+    ///
+    /// `open_workspace` が baseline ループ**前**に呼ぶ。以後 baseline_policy_with の機密判定が
+    /// 「既定 ∪ ここで渡した patterns」になり、設定該当ファイルも HashOnly（平文を残さない＝要件9.1）。
+    /// **既定機密は外せない**（is_sensitive_with が常に既定を内包）＝設定は足すだけ（減らせない不変条件）。
+    /// 毒化（ロック失敗）時は握り潰す（設定反映に失敗しても既定のみで安全側に倒れる＝弱めない）。
+    pub fn set_sensitive_patterns(&self, patterns: Vec<String>) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.sensitive_patterns = patterns;
+        }
     }
 
     /// フォルダ初回オープン時にベースラインを取得する（全既読スタート＝要件8.1・index 永続化は遅延）。
@@ -223,7 +242,10 @@ impl SnapshotService {
             }
         }
         // 内容を保存できない方針（機密/10MB以上/画像）は退避対象 object を持てない（要件9.1/9.2）。
-        if !baseline_policy(path, disk_content.len() as u64).stores_content() {
+        // 機密判定は設定 sensitive_patterns 和集合（既定は外せない＝U2b-2）。
+        if !baseline_policy_with(path, disk_content.len() as u64, &inner.sensitive_patterns)
+            .stores_content()
+        {
             return Ok(false);
         }
 
@@ -271,7 +293,8 @@ fn capture_baseline_locked(inner: &mut SnapshotInner, path: &str, content: &str,
         return;
     }
     let hash = hash_normalized(content);
-    match baseline_policy(path, size) {
+    // 機密判定は設定 sensitive_patterns 和集合（既定は外せない＝U2b-2）。
+    match baseline_policy_with(path, size, &inner.sensitive_patterns) {
         BaselinePolicy::StoreContent => {
             let normalized = pika_core::diff::normalize_lf(content);
             inner.objects.insert(hash.clone(), normalized.clone());
@@ -422,7 +445,12 @@ pub fn confirm_file(
         mtime_ms: file_mtime_ms(&canon_str),
         content_hash: hash_normalized(&disk_content),
     };
-    let policy = baseline_policy(&canon_str, disk_content.len() as u64);
+    // 機密判定は設定 sensitive_patterns 和集合（既定は外せない＝U2b-2）。
+    let policy = baseline_policy_with(
+        &canon_str,
+        disk_content.len() as u64,
+        &inner.sensitive_patterns,
+    );
 
     match decide_confirm(&frozen, &disk, policy) {
         ConfirmDecision::AbortReDiff => Ok(false), // 中断＝未読維持・再差分を促す。
@@ -480,8 +508,13 @@ pub fn rollback_file(
     // 維持する（baseline との一致＝不変条件）。rollback は mtime を見ないので policy のみ canon 化。
     let disk_content =
         std::fs::read_to_string(&canon).map_err(|e| format!("ディスク再読みに失敗: {e}"))?;
-    let current_storable =
-        baseline_policy(&canon.to_string_lossy(), disk_content.len() as u64).stores_content();
+    // 機密判定は設定 sensitive_patterns 和集合（既定は外せない＝U2b-2）。
+    let current_storable = baseline_policy_with(
+        &canon.to_string_lossy(),
+        disk_content.len() as u64,
+        &inner.sensitive_patterns,
+    )
+    .stores_content();
 
     // pika-core の退避不能ガードで判定（要件7.3）。
     decide_rollback(baseline.has_content(), current_storable).map_err(|e| e.to_string())?;
@@ -576,7 +609,12 @@ pub fn confirm_all(
             mtime_ms: file_mtime_ms(&canon_str),
             content_hash: hash_normalized(&disk_content),
         };
-        let policy = baseline_policy(&canon_str, disk_content.len() as u64);
+        // 機密判定は設定 sensitive_patterns 和集合（既定は外せない＝U2b-2）。
+        let policy = baseline_policy_with(
+            &canon_str,
+            disk_content.len() as u64,
+            &inner.sensitive_patterns,
+        );
         let prev_baseline_object = inner
             .store
             .baseline(&key)
