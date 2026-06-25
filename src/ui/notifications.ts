@@ -32,8 +32,14 @@ const PRIORITY: Record<NoticeKind, number> = {
   "file-removed": 5,
 };
 
-/** 種別が解消時に自動消滅するか（要件11.1）。衝突だけは閉じるまで残す。 */
-const AUTO_DISMISS: Record<NoticeKind, boolean> = {
+/**
+ * 種別が「解消時に自動消滅する」か（要件11.1・pika-core::notify_queue の写し）。衝突だけは閉じるまで残す。
+ *
+ * 自動消滅する種別は **条件が解消した時点** に呼び出し側が明示 dismiss する（例: 外部許可後の
+ * external-resource）。自動消滅しない種別（conflict）はユーザーが × で閉じるまで残す＝閉じるボタンの
+ * 表示判断に使う。簡易 notify（トースト）は意味付き通知ではないのでこの表に依らず seq 指定で自動消滅する。
+ */
+export const AUTO_DISMISS: Record<NoticeKind, boolean> = {
   conflict: false,
   "settings-error": true,
   "external-resource": true,
@@ -59,6 +65,21 @@ function mergeKey(kind: NoticeKind, path: string | null): string {
   return `${kind}::${path ?? "*global*"}`;
 }
 
+/**
+ * 簡易トーストの重大度（旧 notify(message, level) のレベル）。
+ * 上の NoticeKind（pika-core::notify_queue の写し＝衝突/設定エラー等の**意味のある**通知）とは別物で、
+ * フロント限定の **使い捨て（transient）** 通知。一定時間で自動消滅し、意味付き通知の優先順位/合体/
+ * 解消ロジックに混ぜない（eval medium #25: error→conflict 化け・同種一括 dismiss の取り違えを断つ）。
+ */
+export type ToastLevel = "info" | "warn" | "error";
+
+/** 使い捨てトースト 1 件。seq で「その 1 件だけ」を消すため自動消滅は seq 指定で行う。 */
+interface Toast {
+  level: ToastLevel;
+  message: string;
+  seq: number;
+}
+
 const host = () => document.getElementById("notifications") as HTMLElement;
 
 /** 通知キュー（決定論モデル・pika-core::notify_queue と同規則）。 */
@@ -66,6 +87,12 @@ class NoticeQueue {
   private items: Notice[] = [];
   private nextSeq = 0;
   private activeTab: string | null = null;
+  /** 使い捨てトースト（簡易 notify 用・意味付き通知とは独立。自動消滅は seq 指定で 1 件ずつ）。 */
+  private toasts: Toast[] = [];
+  /** トースト seq の採番（意味付き通知の nextSeq とは分けて衝突させない）。 */
+  private toastSeq = 0;
+  /** 同時表示するトーストの上限（古いものから捨てる。自動消滅もあるので通常は溜まらない）。 */
+  private static readonly MAX_TOASTS = 4;
 
   /** アクティブタブを設定する（タブ切替で表示が切り替わる・要件11.1）。 */
   setActiveTab(path: string | null): void {
@@ -99,6 +126,28 @@ class NoticeQueue {
   dismissTab(path: string): void {
     this.items = this.items.filter((n) => n.path !== path);
     this.render();
+  }
+
+  /**
+   * 使い捨てトーストを積み、その **固有 seq** を返す（簡易 notify 用・eval medium #25）。
+   * 採番した seq だけを dismissToast で消すので、連続する同レベルのトーストが互いを早期消去しない。
+   * 上限超過時は最古を捨てる（自動消滅もあるので通常は溜まらない）。
+   */
+  pushToast(message: string, level: ToastLevel): number {
+    const seq = this.toastSeq++;
+    this.toasts.push({ level, message, seq });
+    if (this.toasts.length > NoticeQueue.MAX_TOASTS) {
+      this.toasts.splice(0, this.toasts.length - NoticeQueue.MAX_TOASTS);
+    }
+    this.render();
+    return seq;
+  }
+
+  /** 指定 seq のトーストだけを消す（自動消滅/手動クローズ共通・eval medium #25）。 */
+  dismissToast(seq: number): void {
+    const before = this.toasts.length;
+    this.toasts = this.toasts.filter((t) => t.seq !== seq);
+    if (this.toasts.length !== before) this.render();
   }
 
   /** いま表示する通知を解決する（優先順位→新しさ・最大3本＋他N件）。 */
@@ -143,6 +192,25 @@ class NoticeQueue {
       more.textContent = `他${overflow}件`;
       el.appendChild(more);
     }
+    // 使い捨てトースト（簡易 notify）は意味付き通知の後ろに、積んだ順（古い→新しい）で出す。
+    // data-kind はレベル（info/warn/error）。error は既存 CSS の error 枠（alert/Highlight）が当たる。
+    for (const t of this.toasts) {
+      const item = document.createElement("div");
+      item.className = "notice";
+      item.dataset.kind = t.level;
+      const text = document.createElement("span");
+      text.textContent = t.message;
+      item.appendChild(text);
+      // 閉じるボタン（自動消滅前でも手動で閉じられる）。その seq だけを消す。
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "notice-close";
+      close.setAttribute("aria-label", "通知を閉じる");
+      close.textContent = "×";
+      close.addEventListener("click", () => this.dismissToast(t.seq));
+      item.appendChild(close);
+      el.appendChild(item);
+    }
   }
 }
 
@@ -150,15 +218,19 @@ class NoticeQueue {
 export const notices = new NoticeQueue();
 
 /**
- * 後方互換の簡易通知（旧 notify(message, kind) 呼び出し）。
- * レベルを種別へ写してグローバル通知として積む（既存呼び出しを壊さない）。
+ * 簡易通知（旧 notify(message, level) 呼び出し・eval medium #25）。
+ *
+ * **使い捨てトースト**として積む。以前はレベルを意味付き種別へ写していた（error→conflict 等）が、
+ * これには 2 つの欠陥があった:
+ *  1. error→conflict 化け: 本来「閉じるまで残す」種別（conflict は自動消滅しない）へ写るため簡易
+ *     error が永続化し、本物の衝突通知と取り違える（5 秒タイマーも発火しなかった）。
+ *  2. dismiss(kind, null) が同一種別+global を **全消し** するため、連続する同種の簡易通知で
+ *     最新のものが古いタイマーに早期消去される。
+ * トースト種別を意味付き通知から独立させ、自動消滅は **採番した seq の 1 件だけ** を消すことで両方を断つ。
  */
-export function notify(message: string, level: NoticeLevel = "info"): void {
-  const kind: NoticeKind =
-    level === "error" ? "conflict" : level === "warn" ? "settings-error" : "file-removed";
-  notices.push(kind, null, message);
-  // 情報通知は一定時間で自動消滅（要件11.1 種類別の自動消滅）。
-  if (AUTO_DISMISS[kind]) {
-    window.setTimeout(() => notices.dismiss(kind, null), 5000);
-  }
+export function notify(message: string, level: ToastLevel = "info"): void {
+  const seq = notices.pushToast(message, level);
+  // 簡易通知はすべて一定時間で自動消滅（要件11.1 種類別の自動消滅・トーストは transient）。
+  // その seq の 1 件だけを消すので、後続の同レベル通知を巻き込まない。
+  window.setTimeout(() => notices.dismissToast(seq), 5000);
 }

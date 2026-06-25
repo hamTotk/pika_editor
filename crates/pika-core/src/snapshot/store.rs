@@ -10,6 +10,7 @@
 //! - object に **自己記述メタ**を併記し、index 破損時は object 走査から退避一覧を再生成（最後の砦に到達可能）。
 
 use crate::snapshot::object::{ObjectMeta, StashKind};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// ファイルごとの退避上限（最新10件 LRU＝要件9.2）。
@@ -36,7 +37,7 @@ impl std::fmt::Display for SnapshotError {
 impl std::error::Error for SnapshotError {}
 
 /// ベースライン参照（ファイルごとに常に1件＝要件9.2）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BaselineRef {
     /// LF 正規化後の内容ハッシュ（未読判定はこれで行う。内容保存有無に関わらず持つ）。
     pub content_hash: String,
@@ -52,14 +53,19 @@ impl BaselineRef {
 }
 
 /// 退避エントリ（conflict/incoming/rollback/baseline-replace の1件）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StashEntry {
     /// 退避種別。
     pub kind: StashKind,
     /// 退避内容 object のハッシュ（自己記述メタ経由で復元できる）。
     pub object_hash: String,
-    /// 退避時刻（ミリ秒・LRU の順序キー）。
+    /// 退避時刻（ミリ秒・14日保護の判定に使う壁時計値）。
     pub created_at_ms: u64,
+    /// 単調増加の登録順序（index 世代＝壁時計に依存しない LRU/押し出しの主キー）。
+    ///
+    /// 壁時計（`created_at_ms`）がクロック後退/取得失敗で 0 や逆転しても、
+    /// 退避の追加順（古い/新しい）はこの値だけで一意に定まる（#16・要件9.2/9.3）。
+    pub seq: u64,
     /// 未復元か（true の間は 14日保護・容量GCの保護対象＝要件9.3）。
     pub unrestored: bool,
 }
@@ -71,6 +77,17 @@ pub struct StashResult {
     pub stashed_object: String,
     /// LRU 超過で索引から外れた退避 object（呼び出し側は GC 候補として扱う）。
     pub evicted_objects: Vec<String>,
+}
+
+/// LRU 押し出しの内訳（索引からの除外と、メタ/実体の物理削除判断を分離する＝#4）。
+///
+/// - `restored_objects`: 復元済みを押し出した分。メタを物理削除してよい。
+/// - `unrestored_objects`: 未復元（保護中）を上限超過で押し出した分。**メタは残す**＝
+///   実体 object が残る限り `recover_stashes_from_meta` で復元できる（最後の砦・最上位原則1）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Eviction {
+    restored_objects: Vec<String>,
+    unrestored_objects: Vec<String>,
 }
 
 /// スナップショット索引の決定論モデル。
@@ -89,10 +106,48 @@ pub struct SnapshotStore {
     object_meta: BTreeMap<String, ObjectMeta>,
 }
 
+/// 永続化（index.json）用の SnapshotStore スナップショット（#3・design doc 11章）。
+///
+/// `SnapshotStore` の private フィールドを serde で写し取った値。index.json への
+/// アトミック書込（呼び出し側 src-tauri）と起動ロードで用いる。
+/// `object_meta` を必ず含めることで、index.json が壊れても object の自己記述メタから
+/// 退避一覧を再生成できる（最後の砦・最上位原則1）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PersistedStore {
+    /// index 世代（退避メタの整合確認・破損復元に使う）。
+    pub generation: u64,
+    /// relPath → ベースライン参照。
+    pub baselines: BTreeMap<String, BaselineRef>,
+    /// relPath → 退避リスト（登録順）。
+    pub stashes: BTreeMap<String, Vec<StashEntry>>,
+    /// object ハッシュ → 自己記述メタ（index 破損復元の素）。
+    pub object_meta: BTreeMap<String, ObjectMeta>,
+}
+
 impl SnapshotStore {
     /// 空の索引を作る。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 現在の索引を永続化表現へ写す（index.json 書込用＝#3）。
+    pub fn export(&self) -> PersistedStore {
+        PersistedStore {
+            generation: self.generation,
+            baselines: self.baselines.clone(),
+            stashes: self.stashes.clone(),
+            object_meta: self.object_meta.clone(),
+        }
+    }
+
+    /// 永続化表現から索引を復元する（起動ロード用＝#3）。
+    pub fn import(data: PersistedStore) -> Self {
+        Self {
+            generation: data.generation,
+            baselines: data.baselines,
+            stashes: data.stashes,
+            object_meta: data.object_meta,
+        }
     }
 
     /// 現在の index 世代。
@@ -183,33 +238,54 @@ impl SnapshotStore {
             kind,
             object_hash: object_hash.clone(),
             created_at_ms,
+            // index 世代を単調増加の順序キーに流用する（壁時計に依存しない＝#16）。
+            seq: self.generation,
             unrestored: true,
         });
 
-        let mut evicted = Vec::new();
-        if count_in_lru {
-            evicted = Self::evict_lru(list);
+        // 押し出し（評価結果）を求める。未復元の押し出しはメタを残し object 実体から復元可能にする（#4）。
+        let evicted = if count_in_lru {
+            Self::evict_lru(list)
+        } else {
+            Eviction::default()
+        };
+        // 復元済みの押し出しだけメタを物理的に落とす（再生成は残存 object のメタからのみ行う）。
+        // 未復元（保護中）の押し出しは **メタを残す**＝実体 object が残る限り
+        // recover_stashes_from_meta（index 破損時の最後の砦）から復元できる（#4・最上位原則1）。
+        //
+        // content-addressed のため同一内容の複数退避は同じ object_hash を共有する。evict_lru は既に
+        // 押し出し分を stashes から除去済みなので、ここで `is_object_referenced` を見れば「残りの生存
+        // entry がまだ同じ object を参照しているか」を正しく判定できる。生存 entry が参照中なら
+        // メタを消してはならない（消すと将来の index 破損時に生存 object をメタから再生成できなくなる）。
+        for ev in &evicted.restored_objects {
+            if !self.is_object_referenced(ev) {
+                self.object_meta.remove(ev);
+            }
         }
-        // 押し出された object は索引から消えるが、物理削除は全参照確認後（呼び出し側が gc で判断）。
-        for ev in &evicted {
-            // 索引から外れた object のメタも落とす（再生成は残存 object のメタからのみ行う）。
-            self.object_meta.remove(ev);
-        }
+
+        // 索引（stashes リスト）からの除外対象は復元済み・未復元の両方を返す（呼び出し側 GC の入力）。
+        // ただしメタ・実体の物理削除可否は呼び出し側が live_objects/object_meta で別途判断する。
+        let mut evicted_objects = evicted.restored_objects;
+        evicted_objects.extend(evicted.unrestored_objects);
 
         StashResult {
             stashed_object: object_hash,
-            evicted_objects: evicted,
+            evicted_objects,
         }
     }
 
-    /// ファイルごと最新10件 LRU を適用し、押し出した object ハッシュを返す。
+    /// ファイルごと最新10件 LRU を適用し、押し出した object を **復元済み/未復元に分けて**返す。
     ///
     /// 保持優先順位: **未復元 ＞ 復元済み**、同条件なら **新しい ＞ 古い**（要件9.2/9.3）。
     /// 未復元の退避は LRU では消さず（14日保護は容量GC側＝要件9.3）、復元済みの最古から押し出す。
     /// それでも上限超過（未復元だけで10件超）なら最古の未復元から押し出す（索引上限は守る）。
-    fn evict_lru(list: &mut Vec<StashEntry>) -> Vec<String> {
+    ///
+    /// 順序キーは壁時計（`created_at_ms`）ではなく単調増加の `seq` を使う（クロック後退に強い＝#16）。
+    /// 押し出した object を「復元済み（メタも落としてよい）」「未復元（メタは残す＝最後の砦）」へ
+    /// 分けて返す。呼び出し側はこの区別で object_meta の物理削除可否を決める（#4）。
+    fn evict_lru(list: &mut Vec<StashEntry>) -> Eviction {
         if list.len() <= MAX_STASH_PER_FILE {
-            return Vec::new();
+            return Eviction::default();
         }
         // 押し出し順（先頭が最初に消える）: 復元済みを古い順、その後に未復元を古い順。
         let mut order: Vec<usize> = (0..list.len()).collect();
@@ -217,17 +293,22 @@ impl SnapshotStore {
             let ea = &list[a];
             let eb = &list[b];
             // 復元済み(false が unrestored)が先に消える → unrestored 昇順（false<true）。
-            ea.unrestored
-                .cmp(&eb.unrestored)
-                .then(ea.created_at_ms.cmp(&eb.created_at_ms))
+            // tie-break は seq（単調増加・壁時計非依存）の昇順＝古い順。
+            ea.unrestored.cmp(&eb.unrestored).then(ea.seq.cmp(&eb.seq))
         });
         let remove_count = list.len() - MAX_STASH_PER_FILE;
         let mut to_remove: Vec<usize> = order.into_iter().take(remove_count).collect();
         to_remove.sort_unstable();
-        let mut evicted = Vec::new();
+        let mut evicted = Eviction::default();
         // 後ろから抜くと添字がずれない。
         for &idx in to_remove.iter().rev() {
-            evicted.push(list.remove(idx).object_hash);
+            let entry = list.remove(idx);
+            if entry.unrestored {
+                // 未復元（保護中）を上限超過で押し出す＝索引からは外すがメタは残す（#4）。
+                evicted.unrestored_objects.push(entry.object_hash);
+            } else {
+                evicted.restored_objects.push(entry.object_hash);
+            }
         }
         evicted
     }
@@ -295,11 +376,14 @@ impl SnapshotStore {
                     kind: meta.kind,
                     object_hash: hash.clone(),
                     created_at_ms: meta.created_at_ms,
+                    // 自己記述メタの index 世代を順序キーへ復元する（壁時計非依存＝#16）。
+                    seq: meta.index_generation,
                     unrestored: true, // 復元待ちとして提示（最後の砦）。
                 });
         }
         for list in out.values_mut() {
-            list.sort_by_key(|e| e.created_at_ms);
+            // 順序は壁時計ではなく seq（単調増加）で安定化する（クロック後退に強い＝#16）。
+            list.sort_by_key(|e| e.seq);
         }
         out
     }
@@ -438,6 +522,128 @@ mod tests {
     }
 
     #[test]
+    fn 未復元の押し出しでも_object_メタは残し最後の砦から復元できる() {
+        // 未復元だけで上限超過 → 最古の未復元が索引から外れるが、メタは残す（#4・最上位原則1）。
+        let mut s = SnapshotStore::new();
+        for i in 0..11u64 {
+            s.add_stash("a.md", StashKind::Conflict, format!("u-{i}"), i, true);
+            // 全て未復元のまま（mark_restored しない）。
+        }
+        // 索引（stashes）からは最古 u-0 が押し出されている。
+        assert_eq!(s.stashes("a.md").len(), MAX_STASH_PER_FILE);
+        assert!(s.stashes("a.md").iter().all(|e| e.object_hash != "u-0"));
+        // しかし u-0 のメタは残っている（未復元の押し出しはメタを物理削除しない）。
+        assert!(
+            s.object_meta("u-0").is_some(),
+            "未復元の押し出しはメタを残す（実体が残る限り復元可能）"
+        );
+        // 実体 object が走査で見つかれば、押し出された u-0 も復元待ちとして再生成できる。
+        let present: BTreeSet<String> = (0..11u64).map(|i| format!("u-{i}")).collect();
+        let recovered = s.recover_stashes_from_meta(&present);
+        assert!(
+            recovered
+                .get("a.md")
+                .unwrap()
+                .iter()
+                .any(|e| e.object_hash == "u-0"),
+            "押し出された未復元 u-0 もメタから復元できる（最後の砦）"
+        );
+    }
+
+    #[test]
+    fn 復元済みの押し出しはメタも落とす() {
+        // 復元済みを押し出した分はメタを物理削除してよい（現状維持＝#4）。
+        let mut s = SnapshotStore::new();
+        for i in 0..11u64 {
+            s.add_stash("a.md", StashKind::Conflict, format!("r-{i}"), i, true);
+            s.mark_restored("a.md", &format!("r-{i}")); // 全て復元済みに。
+        }
+        // 復元済みの最古 r-0 が押し出され、メタも消えている。
+        assert!(s.stashes("a.md").iter().all(|e| e.object_hash != "r-0"));
+        assert!(
+            s.object_meta("r-0").is_none(),
+            "復元済みの押し出しはメタも落とす（保護不要）"
+        );
+    }
+
+    #[test]
+    fn 同一内容を共有する復元済み退避はevictしても生存参照があればメタを残す() {
+        // content-addressed のため同一内容の複数退避は同じ object_hash を共有する。片方が LRU で
+        // 押し出されても、もう片方がまだ同じ object を参照しているならメタを消してはならない
+        // （消すと将来の index 破損時に生存 object をメタから再生成できなくなる＝最後の砦の喪失）。
+        let mut s = SnapshotStore::new();
+        // a.md と b.md に同一内容（同じ object_hash "dup"）の退避を 1 件ずつ。両方とも復元済みにする。
+        s.add_stash("a.md", StashKind::Conflict, "dup", 1, true);
+        s.mark_restored("a.md", "dup");
+        s.add_stash("b.md", StashKind::Conflict, "dup", 2, true);
+        s.mark_restored("b.md", "dup");
+
+        // a.md を退避で 11 件まで埋めて、最古の "dup"（復元済み）を LRU で押し出す。
+        for i in 0..10u64 {
+            s.add_stash("a.md", StashKind::Conflict, format!("a-{i}"), 100 + i, true);
+            s.mark_restored("a.md", &format!("a-{i}"));
+        }
+        // a.md から "dup" は押し出されている。
+        assert!(s.stashes("a.md").iter().all(|e| e.object_hash != "dup"));
+        // しかし b.md がまだ "dup" を参照しているのでメタは残る。
+        assert!(
+            s.object_meta("dup").is_some(),
+            "生存 entry（b.md）が参照中なのにメタが消された＝最後の砦の喪失"
+        );
+        assert!(s.is_object_referenced("dup"), "b.md がまだ dup を参照");
+
+        // 実体が残っていれば、生存中の dup はメタから退避一覧として再生成できる（最後の砦）。
+        let present: BTreeSet<String> = std::iter::once("dup".to_string())
+            .chain((0..10u64).map(|i| format!("a-{i}")))
+            .collect();
+        let recovered = s.recover_stashes_from_meta(&present);
+        assert!(
+            recovered
+                .get("b.md")
+                .map(|l| l.iter().any(|e| e.object_hash == "dup"))
+                .unwrap_or(false),
+            "生存中の dup がメタから再生成できない（最後の砦が機能していない）"
+        );
+    }
+
+    #[test]
+    fn 同一内容共有でも最後の参照がevictされたらメタを落とす() {
+        // 逆向きの確認: 共有 object を参照する entry が全て押し出されたらメタは落としてよい
+        // （生存参照が無いため最後の砦として温存する必要が無い＝従来挙動を維持）。
+        let mut s = SnapshotStore::new();
+        // a.md にのみ "solo" を 1 件。復元済みにして LRU で押し出せるようにする。
+        s.add_stash("a.md", StashKind::Conflict, "solo", 1, true);
+        s.mark_restored("a.md", "solo");
+        for i in 0..10u64 {
+            s.add_stash("a.md", StashKind::Conflict, format!("a-{i}"), 100 + i, true);
+            s.mark_restored("a.md", &format!("a-{i}"));
+        }
+        assert!(s.stashes("a.md").iter().all(|e| e.object_hash != "solo"));
+        assert!(
+            s.object_meta("solo").is_none(),
+            "生存参照が無い復元済み押し出しのメタは落とす（従来挙動）"
+        );
+    }
+
+    #[test]
+    fn 壁時計がゼロや逆転でも_lru_は登録順で安定して押し出す() {
+        // クロック後退/取得失敗で created_at_ms=0 が量産されても、seq（単調増加）で順序が定まる（#16）。
+        let mut s = SnapshotStore::new();
+        // 全件 created_at_ms=0（壁時計が壊れた状況）で 11 件入れる。
+        for i in 0..11u64 {
+            s.add_stash("a.md", StashKind::Conflict, format!("z-{i}"), 0, true);
+            s.mark_restored("a.md", &format!("z-{i}")); // 復元済み＝LRU で押し出し可能に。
+        }
+        // 壁時計が全て 0 でも、最初に入れた z-0（最古）が押し出される（seq 順）。
+        assert_eq!(s.stashes("a.md").len(), MAX_STASH_PER_FILE);
+        assert!(
+            s.stashes("a.md").iter().all(|e| e.object_hash != "z-0"),
+            "壁時計が全て同値でも最古（seq 最小）の z-0 が押し出される"
+        );
+        assert!(s.stashes("a.md").iter().any(|e| e.object_hash == "z-10"));
+    }
+
+    #[test]
     fn 未復元退避は_lru_で復元済みより後に押し出す() {
         let mut s = SnapshotStore::new();
         // 11 件目で 1 件押し出し。未復元 5 件・復元済み 6 件にしておくと復元済みの最古が消える。
@@ -450,5 +656,37 @@ mod tests {
         // 押し出されるのは復元済みの最古 o-5（未復元 o-0..o-4 は保護）。
         assert!(s.stashes("a.md").iter().all(|e| e.object_hash != "o-5"));
         assert!(s.stashes("a.md").iter().any(|e| e.object_hash == "o-0"));
+    }
+
+    #[test]
+    fn persisted_store_は_json_往復で索引が一致する() {
+        // export → serde_json → import で baselines/stashes/object_meta/generation が保たれる（#3）。
+        let mut s = SnapshotStore::new();
+        s.set_baseline_with_content("a.md", "h-a", "obj-a");
+        s.set_baseline_hash_only("secret.env", "h-x");
+        s.add_stash("a.md", StashKind::Conflict, "obj-c1", 100, true);
+        s.add_stash("b.md", StashKind::Rollback, "obj-r1", 200, true);
+        s.mark_restored("a.md", "obj-c1");
+
+        let exported = s.export();
+        let json = serde_json::to_string(&exported).expect("PersistedStore は直列化できる");
+        let parsed: PersistedStore =
+            serde_json::from_str(&json).expect("PersistedStore は復元できる");
+        assert_eq!(parsed, exported, "JSON 往復で永続化表現が一致する");
+
+        let restored = SnapshotStore::import(parsed);
+        // generation・baselines・stashes・object_meta がすべて再現される。
+        assert_eq!(restored.generation(), s.generation());
+        assert_eq!(restored.baseline("a.md"), s.baseline("a.md"));
+        assert_eq!(restored.baseline("secret.env"), s.baseline("secret.env"));
+        assert_eq!(restored.stashes("a.md"), s.stashes("a.md"));
+        assert_eq!(restored.stashes("b.md"), s.stashes("b.md"));
+        assert_eq!(restored.object_meta("obj-c1"), s.object_meta("obj-c1"));
+        assert_eq!(restored.object_meta("obj-r1"), s.object_meta("obj-r1"));
+        // 復元済みフラグも保たれる（14日保護の判定に影響）。
+        assert!(restored
+            .stashes("a.md")
+            .iter()
+            .any(|e| e.object_hash == "obj-c1" && !e.unrestored));
     }
 }

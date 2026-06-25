@@ -12,13 +12,16 @@
 // debug 時はパニックログを見たいので console を残す。
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
+mod access;
 mod commands;
 mod diagnostic;
 mod document;
 mod jumplist;
 mod preview;
+mod settings_service;
 mod single_instance;
 mod snapshot;
+mod snapshot_persist;
 mod state_store;
 mod watcher;
 mod webview2;
@@ -59,7 +62,6 @@ fn run() {
         commands::open_workspace,
         commands::list_dir,
         commands::read_file,
-        commands::save_file,
         commands::f5_resync,
         commands::save_app_state,
         commands::restore_app_state,
@@ -82,6 +84,7 @@ fn run() {
         document::search_in_text,
         document::replace_in_text,
         diagnostic::log_folder_path,
+        settings_service::get_settings,
     ];
 
     let app = tauri::Builder::default()
@@ -129,10 +132,35 @@ fn run() {
             app.manage(watcher::WatcherService::new(app.handle().clone()));
             // スナップショット/差分/確認済みサービス（ベースライン索引＋内容 object）を登録する。
             app.manage(snapshot::SnapshotService::new());
+            // パスアクセス制御（任意ファイル読み書き封じ込め・#5/#46）。open_workspace で root を張り、
+            // open-request / restore タブで個別ファイルを許可する。I/O command はこのゲートを通す。
+            app.manage(access::AccessControl::new());
             // プレビューサービス（サニタイズ済みレスポンスを世代キーで保持・custom protocol が引く）。
             app.manage(preview::PreviewService::new());
             // 検索/置換のキャンセルトークン置き場（新しい検索で前のを打ち切る＝固まらない・要件5.4）。
             app.manage(document::SearchCancelService::new());
+            // 設定サービス（settings.toml の監視反映・要件10.3/10.4）。data_root を state.json と同じ
+            // 手段（state_store::resolve）で解決し `<root>/settings.toml` を見る。起動時に一度ロードして
+            // current を確定し（破損なら既定＋警告）、managed state（Arc 共有）として登録する。
+            // ポーリング監視スレッドはイベントループ稼働後（RunEvent::Ready）に起動して起動を遅延ブロックしない。
+            // resolve 失敗（%LOCALAPPDATA% 不在等）でも編集体験は継続させる（設定が既定のまま動く）。
+            match state_store::resolve() {
+                Ok(root) => {
+                    let path = settings_service::settings_path(&root.path);
+                    let service = std::sync::Arc::new(settings_service::SettingsService::new(path));
+                    service.load_initial(&app.handle().clone());
+                    app.manage(service);
+                }
+                Err(e) => {
+                    eprintln!("設定サービスのデータルート解決に失敗しました（既定設定で継続）: {e}");
+                    // 解決できなくても get_settings が動くよう、既定値の managed state を置く
+                    // （path は使われない＝監視スレッドは起動しない）。
+                    let service = std::sync::Arc::new(settings_service::SettingsService::new(
+                        std::path::PathBuf::new(),
+                    ));
+                    app.manage(service);
+                }
+            }
             // プレビュー別WebView（label "preview"・権限ゼロ）はここでは生成しない。
             // Windows/WebView2 では子WebView コントローラの生成完了はメッセージループ経由で通知されるため、
             // イベントループ未稼働の setup 内で add_child の完了を待つとデッドロックする（メイン窓が不可視のまま固着）。
@@ -157,6 +185,12 @@ fn run() {
                 // 生成失敗でも編集体験は継続させる（プレビューのみ不能・最上位「固まらない/データを失わない」）。
                 eprintln!("プレビュー別WebView の生成に失敗しました: {e}");
             }
+            // settings.toml のポーリング監視を起動する（要件10.3 再起動なし反映／10.4 不完全保存の直前維持）。
+            // 起動を遅延ブロックしないようイベントループ稼働後のここで始める（最初のポーリングは間隔後）。
+            use tauri::Manager;
+            let service =
+                app_handle.state::<std::sync::Arc<settings_service::SettingsService>>();
+            service.spawn_watch(app_handle.clone());
         }
     });
 }

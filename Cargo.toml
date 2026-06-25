@@ -49,6 +49,9 @@ encoding_rs = "0.8"
 # 検索/置換（後方参照・キャプチャ参照・Unicode文字クラス・第一候補は純Rust）。
 # backtrack_limit で ReDoS のバックトラック上限、協調キャンセルで処理打切りを実装（design doc 2章/12章/15章-8・要件5.4）。
 fancy-regex = "0.16"
+# settings.toml の解析（要件10.3/10.4）。parse のみ（serde derive 不使用）に絞り依存を最小化する。
+# default-features を切り、["parse"] だけ有効化（display/preserve_order 等は不要＝軽量）。
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 
 [profile.release]
 # 軽量配布（design doc 1章「軽い」）。LTO とサイズ最適化でバイナリを絞る。

@@ -4,9 +4,18 @@
 
 export type ThemeMode = "light" | "dark" | "system";
 
-/** html 要素の data-theme を切替える（既定: system 追従）。 */
+/**
+ * 任意入力を有効な ThemeMode へ正規化する（不正は "system"）。
+ * state.json 由来の破損値で未知文字列が data-theme に入り OS 追従が壊れるのを防ぐ
+ * （currentTheme() の正規化と揃える・eval #50）。
+ */
+function normalizeMode(mode: unknown): ThemeMode {
+  return mode === "light" || mode === "dark" || mode === "system" ? mode : "system";
+}
+
+/** html 要素の data-theme を切替える（既定: system 追従）。不正値は "system" に倒す。 */
 export function applyTheme(mode: ThemeMode): void {
-  document.documentElement.setAttribute("data-theme", mode);
+  document.documentElement.setAttribute("data-theme", normalizeMode(mode));
 }
 
 /**
@@ -14,8 +23,7 @@ export function applyTheme(mode: ThemeMode): void {
  * 未設定/不正値は system 扱い。
  */
 export function currentTheme(): ThemeMode {
-  const v = document.documentElement.getAttribute("data-theme");
-  return v === "light" || v === "dark" ? v : "system";
+  return normalizeMode(document.documentElement.getAttribute("data-theme"));
 }
 
 /** 起動時の初期テーマを適用する。state.json 連携前は system 固定。 */
