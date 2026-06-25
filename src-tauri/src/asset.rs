@@ -111,11 +111,15 @@ fn image_info_for(resolved: &Path, bytes: &[u8]) -> ImageInfoDto {
 /// 多層防御（順序固定・最重要不変条件）:
 /// 1. [`AccessControl::verify_read`] で封じ込め（任意パスを判定対象にしない）。
 /// 2. metadata のサイズが [`MAX_IMAGE_FILE_BYTES`] 超 → 中身を読まず [`ImageInfoDto::TooLarge`]（外部誘導）。
-/// 3. 機密再判定（`is_sensitive`）に当たれば**エラー**で拒否する（機密ファイルは表示自体させない）。
-///    ※将来 U2b で `is_sensitive_with`（設定パターン和集合）へ差し替える。今は `is_sensitive`。
+/// 3. 機密再判定（`is_sensitive_with`＝設定パターン和集合・既定は外せない）に当たれば**エラー**で拒否する
+///    （機密ファイルは表示自体させない）。state 未登録時は空 patterns＝既定のみで安全側。
 /// 4. 読んだバイトを [`image_info_for`] へ畳んで返す。
 #[tauri::command]
-pub fn image_info(path: String, access: State<'_, AccessControl>) -> Result<ImageInfoDto, String> {
+pub fn image_info(
+    path: String,
+    access: State<'_, AccessControl>,
+    settings: State<'_, std::sync::Arc<crate::settings_service::SettingsService>>,
+) -> Result<ImageInfoDto, String> {
     // (1) 封じ込め（path ゲート＝唯一の関門に委ねる）。
     let resolved = access.verify_read(&path)?;
 
@@ -128,7 +132,11 @@ pub fn image_info(path: String, access: State<'_, AccessControl>) -> Result<Imag
     }
 
     // (3) 機密再判定（解決後の実体名で・シンボリックリンク偽装も塞ぐ）。機密は表示自体させない。
-    if pika_core::snapshot::policy::is_sensitive(&resolved.to_string_lossy()) {
+    // 機密判定は既定 ∪ 設定 sensitive_patterns（既定は外せない＝U2b-2）。
+    if pika_core::snapshot::policy::is_sensitive_with(
+        &resolved.to_string_lossy(),
+        &settings.snapshot().sensitive_patterns,
+    ) {
         return Err("機密ファイルは表示できません".into());
     }
 
@@ -142,14 +150,20 @@ pub fn image_info(path: String, access: State<'_, AccessControl>) -> Result<Imag
 /// `verify_read` は**呼び出し側（[`handle_asset_request`]）が済ませた前提**で resolved を受ける
 /// （封じ込めは protocol ハンドラの唯一の関門で一度だけ通す）。配信前の各段は preview.rs の
 /// `local_resource_response` と同じ順序・同じ責務に揃える（単一系統の防御順を崩さない）:
-/// 1. 機密再判定（`is_sensitive`）→ 403。
+/// 1. 機密再判定（`is_sensitive_with`＝設定パターン和集合・既定は外せない）→ 403。
 /// 2. ファイル上限超（[`MAX_IMAGE_FILE_BYTES`]）→ 413（中身を読まず metadata で弾く）。
 /// 3. 読取り失敗 → 404。
 /// 4. 暴走ガード（[`check_image_bytes`]・寸法不明/寸法上限超）→ 413（デコード前に弾く＝固まらない）。
 /// 5. OK → Content-Type＋nosniff＋控えめキャッシュ（5分）で 200 配信。
-fn serve_verified_image(resolved: &Path) -> Response<Vec<u8>> {
-    // (1) 機密再判定（多層防御・実体名で判定）。
-    if pika_core::snapshot::policy::is_sensitive(&resolved.to_string_lossy()) {
+///
+/// `sensitive_patterns` は設定 `sensitive_patterns`（機密判定の和集合・既定は外せない＝U2b-2）。
+/// 空 patterns でも既定機密（`.env` 等）は 403 になる（is_sensitive_with が常に既定を内包＝弱めない）。
+fn serve_verified_image(resolved: &Path, sensitive_patterns: &[String]) -> Response<Vec<u8>> {
+    // (1) 機密再判定（多層防御・実体名で判定）。既定 ∪ 設定 sensitive_patterns（既定は外せない＝U2b-2）。
+    if pika_core::snapshot::policy::is_sensitive_with(
+        &resolved.to_string_lossy(),
+        sensitive_patterns,
+    ) {
         return error_response(StatusCode::FORBIDDEN, "機密ファイルの配信拒否");
     }
 
@@ -190,7 +204,8 @@ fn serve_verified_image(resolved: &Path) -> Response<Vec<u8>> {
 /// メインWebView 用の信頼画像配信。**この protocol はアプリ全体登録**で権限ゼロ別WebView からも到達しうるが、
 /// 隔離の関門は origin に依らず三重:
 ///   (a) [`AccessControl::verify_read`] の path ゲート（封じ込め）。
-///   (b) [`serve_verified_image`] 内の `is_sensitive` 再判定（機密拒否）。
+///   (b) [`serve_verified_image`] 内の `is_sensitive_with` 再判定（機密拒否・設定パターン和集合・
+///       既定は外せない＝U2b-2）。state 未登録時は空 patterns＝既定のみで安全側（弱めない）。
 ///   (c) プレビュー別WebView の CSP に `pika-asset` を入れない（CSP 面で塞ぐ＝`tauri.conf.json`）。
 ///
 /// ルーティング: URL パス（先頭 `/` を除き percent-decode した絶対パス文字列）を `verify_read` へ通し、
@@ -217,7 +232,14 @@ pub fn handle_asset_request(
         return error_response(StatusCode::FORBIDDEN, "許可されていないパス");
     };
 
-    serve_verified_image(&resolved)
+    // 機密判定の設定 sensitive_patterns（和集合・既定は外せない＝U2b-2）を state から取る。
+    // state 未登録時は空 patterns＝既定のみで安全側（機密判定を弱めない不変条件）。
+    let sensitive_patterns = app
+        .try_state::<std::sync::Arc<crate::settings_service::SettingsService>>()
+        .map(|s| s.snapshot().sensitive_patterns)
+        .unwrap_or_default();
+
+    serve_verified_image(&resolved, &sensitive_patterns)
 }
 
 #[cfg(test)]
@@ -317,7 +339,8 @@ mod tests {
     fn serve_verified_image_正常pngは200とnosniff() {
         let dir = temp_dir("serve-ok");
         let path = write_bytes(&dir, "ok.png", &png_header(800, 600));
-        let resp = serve_verified_image(&path);
+        // 空 patterns（既定のみ）で配信＝設定なしの既定挙動を検証する。
+        let resp = serve_verified_image(&path, &[]);
         assert_eq!(resp.status(), StatusCode::OK, "正常 PNG が 200 にならない");
         assert_eq!(
             resp.headers().get(header::CONTENT_TYPE).unwrap(),
@@ -337,13 +360,37 @@ mod tests {
         // `.env`（機密）は is_sensitive 再判定で 403。中身が正常 PNG でも配信しない。
         let dir = temp_dir("serve-secret");
         let path = write_bytes(&dir, ".env", &png_header(100, 100));
-        let resp = serve_verified_image(&path);
+        // 不変条件: 空 patterns（設定に .env を入れていない）でも .env は既定機密で 403（外せない）。
+        let resp = serve_verified_image(&path, &[]);
         assert_eq!(
             resp.status(),
             StatusCode::FORBIDDEN,
             "機密名ファイルが配信拒否されない"
         );
         assert!(resp.body().is_empty(), "機密拒否で本体が漏れた");
+    }
+
+    #[test]
+    fn serve_verified_image_設定パターン該当は403_和集合で足せる() {
+        // U2b-2: 既定外の通常名（normal.png）でも、設定 sensitive_patterns に `*.png` を足すと
+        // 機密扱いで 403 になる（和集合＝設定は足すだけ）。中身が正常 PNG でも配信しない。
+        let dir = temp_dir("serve-userpat");
+        let path = write_bytes(&dir, "normal.png", &png_header(100, 100));
+        let patterns = vec!["*.png".to_string()];
+        let resp = serve_verified_image(&path, &patterns);
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "設定パターン該当ファイルが配信拒否されない（和集合で足せない）"
+        );
+        assert!(resp.body().is_empty(), "設定機密拒否で本体が漏れた");
+        // 同じファイルでも空 patterns（設定なし）なら 200 で配信される（パターンは足すだけ）。
+        let resp_default = serve_verified_image(&path, &[]);
+        assert_eq!(
+            resp_default.status(),
+            StatusCode::OK,
+            "設定パターンなしでは通常 PNG は配信される（既定挙動）"
+        );
     }
 
     #[test]
@@ -360,7 +407,7 @@ mod tests {
             f.set_len(MAX_IMAGE_FILE_BYTES + 1).expect("サイズ設定");
         }
         let path = std::fs::canonicalize(&p).expect("canonicalize");
-        let resp = serve_verified_image(&path);
+        let resp = serve_verified_image(&path, &[]);
         assert_eq!(
             resp.status(),
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -373,7 +420,7 @@ mod tests {
         // 寸法上限超（10000x7000=7000万px）の PNG ヘッダは暴走ガードで 413。
         let dir = temp_dir("serve-bigdim");
         let path = write_bytes(&dir, "bigdim.png", &png_header(10_000, 7_000));
-        let resp = serve_verified_image(&path);
+        let resp = serve_verified_image(&path, &[]);
         assert_eq!(
             resp.status(),
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -386,7 +433,7 @@ mod tests {
         // 既知画像マジックに当たらないバイトは check_image_bytes が寸法不明で Block → 413（fail-closed）。
         let dir = temp_dir("serve-unknown");
         let path = write_bytes(&dir, "broken.png", b"not a real image at all");
-        let resp = serve_verified_image(&path);
+        let resp = serve_verified_image(&path, &[]);
         assert_eq!(
             resp.status(),
             StatusCode::PAYLOAD_TOO_LARGE,

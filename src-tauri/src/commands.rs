@@ -69,8 +69,14 @@ pub fn open_workspace(
     // 列挙・並び順は list_dir と同一規則を共有する（enumerate_dir）。除外ディレクトリ（settings.toml
     // excluded_dirs・既定 .git/node_modules）はここで弾く。除外されたディレクトリ配下は列挙されないため
     // 下の baseline ループ（除外後の entries に対して回る）にも lazy 展開にも自然に乗らない。
-    let excluded = settings.snapshot().excluded_dirs;
+    let settings_now = settings.snapshot();
+    let excluded = settings_now.excluded_dirs;
     let entries = enumerate_dir(dir, &excluded)?;
+    // 設定 sensitive_patterns（機密判定の和集合）を baseline 判定へ流し込む（baseline ループ前＝U2b-2）。
+    // 以後 SnapshotInner の baseline_policy_with と pre-check（capture_baseline_for）が同じ patterns で
+    // 一致する。**既定機密は外せない**（is_sensitive_with が常に内包）＝設定は足すだけ（減らせない不変条件）。
+    let sensitive_patterns = settings_now.sensitive_patterns;
+    snapshot.set_sensitive_patterns(sensitive_patterns.clone());
     // 直下ファイルの差分ベースライン内容を取得する（全既読スタート＝要件8.1）。
     // 機密/10MB以上/画像はハッシュのみ（pika-core::snapshot::policy が判定）。
     // ロード済みベースラインがある path は capture_baseline がスキップする（非クロバー・#3）。
@@ -81,7 +87,7 @@ pub fn open_workspace(
     // ループ完了後に persist_index を **1回だけ**呼んで index.json をまとめて書く（confirm_all と同じ作法）。
     for entry in &entries {
         if !entry.is_dir {
-            capture_baseline_for(Path::new(&entry.path), &snapshot);
+            capture_baseline_for(Path::new(&entry.path), &snapshot, &sensitive_patterns);
         }
     }
     // バッチ capture で遅延していた index 永続化をここで1回だけ行う（per-file fsync の解消）。
@@ -160,13 +166,15 @@ fn enumerate_dir(dir: &Path, excluded: &[String]) -> Result<Vec<TreeEntry>, Stri
 /// open_workspace のループから呼ばれる。capture_baseline / capture_baseline_hash_only は内容 object を
 /// 即時永続化するが index.json はここで書かず、呼び出し側がループ後に snapshot.persist_index() で
 /// 1回まとめて永続化する（per-file の index 直列化＋fsync を避ける＝固まらない・設計原則2）。
-fn capture_baseline_for(path: &Path, snapshot: &SnapshotService) {
-    use pika_core::snapshot::baseline_policy;
+fn capture_baseline_for(path: &Path, snapshot: &SnapshotService, sensitive_patterns: &[String]) {
+    use pika_core::snapshot::baseline_policy_with;
     let path_str = path.to_string_lossy().to_string();
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     // index 永続化はループ後に1回（capture_* は index を遅延し object のみ即時永続化）＝per-file fsync を避ける。
     // policy 判定を read より先に行う（HashOnly なら平文を一切読まない）。
-    if !baseline_policy(&path_str, size).stores_content() {
+    // 機密判定は設定 sensitive_patterns 和集合（既定は外せない＝U2b-2）。pre-check と SnapshotInner 内の
+    // 判定（snapshot.set_sensitive_patterns 済み）を同じ patterns で揃え、機密ファイルの平文を読まない。
+    if !baseline_policy_with(&path_str, size, sensitive_patterns).stores_content() {
         // 機密/画像/10MB以上: 内容を読まない（#20）。ハッシュのみ（content 空＝未読検知は watcher が担う）。
         snapshot.capture_baseline(&path_str, "", size);
         return;

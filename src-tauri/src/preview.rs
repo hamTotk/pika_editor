@@ -428,7 +428,13 @@ pub fn handle_preview_request(
         // #19: doc を clone 済み。ロックを解放してから canonicalize+read（FS I/O）を行う
         // （ロック保持のまま FS I/O すると他の preview 操作が詰まるため）。
         drop(inner);
-        return local_resource_response(&doc, reference);
+        // 機密判定の設定 sensitive_patterns（和集合・既定は外せない＝U2b-2）を state から取る。
+        // state 未登録時は空 patterns＝既定のみで安全側（機密判定を弱めない不変条件）。
+        let sensitive_patterns = app
+            .try_state::<std::sync::Arc<crate::settings_service::SettingsService>>()
+            .map(|s| s.snapshot().sensitive_patterns)
+            .unwrap_or_default();
+        return local_resource_response(&doc, reference, &sensitive_patterns);
     }
 
     error_response(StatusCode::NOT_FOUND, "不明な経路")
@@ -465,7 +471,15 @@ fn document_response(doc: &PreparedDoc) -> Response<Vec<u8>> {
 ///
 /// pika-core::render::path で `../`/絶対パス/機密ファイルを拒否し、canonicalize+prefix 検証で
 /// シンボリックリンク脱出を弾く。配信できない参照は 403/404 を返す（frontend がプレースホルダ表示）。
-fn local_resource_response(doc: &PreparedDoc, reference: &str) -> Response<Vec<u8>> {
+///
+/// `sensitive_patterns` は設定 `sensitive_patterns`（機密判定の和集合・既定は外せない＝U2b-2）。
+/// 解決後の実体名で `is_sensitive_with`（既定 ∪ 設定）を再判定し機密は 403（custom protocol からも
+/// 配信拒否＝要件9.1）。空 patterns でも既定機密は拒否される（is_sensitive_with が常に既定を内包）。
+fn local_resource_response(
+    doc: &PreparedDoc,
+    reference: &str,
+    sensitive_patterns: &[String],
+) -> Response<Vec<u8>> {
     let Some(base) = &doc.base_dir else {
         return error_response(StatusCode::NOT_FOUND, "基準ディレクトリ不明");
     };
@@ -490,7 +504,11 @@ fn local_resource_response(doc: &PreparedDoc, reference: &str) -> Response<Vec<u
     }
     // 多層防御: 非機密名のシンボリックリンクが基準内の機密ファイルを指すケースを、
     // 解決後の実体名でも機密判定して弾く（要件9.1「機密は custom protocol からも配信拒否」）。
-    if pika_core::snapshot::policy::is_sensitive(&resolved.to_string_lossy()) {
+    // 機密判定は既定 ∪ 設定 sensitive_patterns（既定は外せない＝U2b-2）。
+    if pika_core::snapshot::policy::is_sensitive_with(
+        &resolved.to_string_lossy(),
+        sensitive_patterns,
+    ) {
         return error_response(StatusCode::FORBIDDEN, "機密ファイルの配信拒否");
     }
 
