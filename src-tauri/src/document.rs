@@ -160,7 +160,8 @@ pub fn open_document(
 ///
 /// `open_document` と同じく先頭で `access.verify_read` で封じ込め、段階制を再判定する。
 /// 編集テキストを持つ段階（normal/stage1）のみ対象。第2段階（仮想ビューア）/上限超は編集テキストを
-/// 持たないため拒否する（フロントも誘導しないが、多層防御として backend でも弾く）。自動判定は行わず
+/// 持たないため拒否する（フロントもこれらの段階（editing_off）ではメニューを無効化するが、多層防御として
+/// backend でも弾く）。自動判定は行わず
 /// `decode_with` で強制デコードし、妥当でなければエラー（フロントがトースト通知）。
 #[tauri::command]
 pub fn reopen_document_with_encoding(

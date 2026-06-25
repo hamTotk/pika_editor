@@ -81,6 +81,8 @@ interface OpenTab extends TabModel {
    * （eval high: 削除済みタブの回復導線欠落＝旧 wx 版 F-017 と同質の行き止まり防止）。
    */
   deleted: boolean;
+  /** 第2段階以降（編集不可・読み取り専用ビューア）か。開き直しメニューの無効化に使う（backend degrade.editing_off を保存）。 */
+  editingOff: boolean;
   /**
    * 開いたときに検出した元エンコーディング（保存時に維持する＝要件5.2・eval medium）。
    * open_document が判定した値。これを save_document に渡し、Shift_JIS 等が暗黙に UTF-8 化
@@ -456,6 +458,7 @@ async function activateTab(path: string): Promise<void> {
       tab.encoding = doc.encoding;
       tab.hasBom = doc.has_bom;
       tab.lineEnding = doc.line_ending;
+      tab.editingOff = doc.degrade.editing_off;
     }
     // 未保存編集を持つタブ（dirty かつ draft あり）は **ディスク内容で上書きしない**（eval high #11・
     // データを失わない）。退避しておいた編集中テキスト（draft）を CM6 へ載せ直し、未保存状態を保つ。
@@ -620,6 +623,7 @@ function newTab(path: string, title: string): OpenTab {
     cursorColumn: 1,
     scrollTop: 1,
     deleted: false,
+    editingOff: false,
     // 既定は BOM なし UTF-8（新規ファイル/不明時）。既存ファイルは open 時に open_document の判定で上書きする。
     encoding: "utf-8",
     hasBom: false,
@@ -831,6 +835,7 @@ async function reopenActiveWithEncoding(enc: DocEncoding): Promise<void> {
     tab.encoding = doc.encoding;
     tab.hasBom = doc.has_bom;
     tab.lineEnding = doc.line_ending;
+    tab.editingOff = doc.degrade.editing_off;
     // 破棄確認済み: dirty/draft をクリアし開いた内容を正にする。
     tab.dirty = false;
     tab.draft = undefined;
@@ -1501,7 +1506,8 @@ function buildMenuSpecs(): MenuSpec[] {
                     label: `　${encodingLabel(e, false)}`,
                     checked: tab.encoding === e,
                     // 削除済みタブは実体が無く開き直せない（backend verify_read も弾くが UI でも無効化）。
-                    disabled: tab.deleted,
+                    // 巨大ファイル（編集不可＝第2段階以降）も無効化（backend reopen 拒否と同条件）。
+                    disabled: tab.deleted || tab.editingOff,
                     onSelect: () => void reopenActiveWithEncoding(e),
                   }),
                 ),
