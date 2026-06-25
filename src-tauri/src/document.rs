@@ -156,6 +156,50 @@ pub fn open_document(
     })
 }
 
+/// 指定エンコーディングで文書を開き直す（要件5.6 Reopen・自動判定の誤り/曖昧をユーザー選択で上書き）。
+///
+/// `open_document` と同じく先頭で `access.verify_read` で封じ込め、段階制を再判定する。
+/// 編集テキストを持つ段階（normal/stage1）のみ対象。第2段階（仮想ビューア）/上限超は編集テキストを
+/// 持たないため拒否する（フロントもこれらの段階（editing_off）ではメニューを無効化するが、多層防御として
+/// backend でも弾く）。自動判定は行わず
+/// `decode_with` で強制デコードし、妥当でなければエラー（フロントがトースト通知）。
+#[tauri::command]
+pub fn reopen_document_with_encoding(
+    path: String,
+    encoding: String,
+    access: State<'_, crate::access::AccessControl>,
+) -> Result<OpenedDocument, String> {
+    let canon = access.verify_read(&path)?;
+    let path = canon.to_string_lossy().to_string();
+    let enc = dto_to_enc(&encoding)?;
+    let size = std::fs::metadata(&path)
+        .map_err(|e| format!("メタデータ取得に失敗: {e}"))?
+        .len();
+    let stage = FileStage::from_size(size);
+    // 編集テキストを持つ段階のみ再オープン対象（第2段階以降は仮想ビューア＝再デコード対象外）。
+    if !stage.can_open() || stage.needs_virtual_viewer() {
+        return Err("このファイルは大きすぎてエンコーディングを指定して開き直せません".into());
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("読み込みに失敗: {e}"))?;
+    let decoded = encoding::decode_with(enc, &bytes).ok_or_else(|| {
+        format!(
+            "選択したエンコーディング（{}）では読み込めませんでした",
+            enc.label()
+        )
+    })?;
+    let degrade = degrade_flags(size, &decoded.text);
+    Ok(OpenedDocument {
+        stage: stage_to_dto(stage).into(),
+        degrade: to_degrade_dto(degrade),
+        text: decoded.text,
+        encoding: enc_to_dto(decoded.encoding).into(),
+        has_bom: decoded.has_bom,
+        line_ending: line_ending_dto(decoded.line_ending).into(),
+        decode_warning: false,
+        size_bytes: size,
+    })
+}
+
 fn to_degrade_dto(f: pika_core::huge::DegradeFlags) -> DegradeFlagsDto {
     DegradeFlagsDto {
         preview_off: f.preview_off,
