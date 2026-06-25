@@ -432,6 +432,8 @@ body {
   grid-template-rows: auto 1fr auto;
   min-height: 0;
   background: var(--bg-raised);
+  /* 検索/置換バー（.search-bar）を右上へ position:absolute で重ねる土台（U4/U5・要件5.4）。 */
+  position: relative;
 }
 
 /* プレビュー＋差分の左右並置（ui-design 8章「左＝整形プレビュー／右＝テキスト差分」）。
@@ -1100,6 +1102,120 @@ body {
   background: var(--bg-raised);
   color: var(--text-1);
   cursor: pointer;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   検索/置換バー（U4/U5・要件5.4）。#editor-pane（position:relative）の右上へ重ねる
+   小さなフローティングバー。色はすべてトークン変数（ライト/ダーク追従＝直書き禁止）。
+   キー処理は search モジュールが担う（ここは見た目のみ）。 */
+.search-bar {
+  position: absolute;
+  top: 38px; /* タブバー(#tabbar min-height:35px)の直下へ落とす。 */
+  right: 12px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  font-family: var(--font-ui);
+}
+
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 置換行は replace モードでのみ表示（search モジュールが hidden を切り替える）。 */
+.search-replace-row[hidden] {
+  display: none;
+}
+
+.search-input {
+  font: inherit;
+  font-size: 12.5px;
+  width: 180px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  color: var(--text-1);
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* 件数表示（"3/27"・"0件"・"27+"）。狭めの固定幅で桁送りのちらつきを抑える。 */
+.search-count {
+  min-width: 48px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* 無効な正規表現のときだけ強調色に寄せる（accent でテーマ追従・色記号のみに依存しない文言も出す）。 */
+.search-count-error {
+  color: var(--accent);
+  min-width: auto;
+}
+
+.search-btn {
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 7px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.search-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-1);
+}
+
+.search-btn:focus-visible {
+  outline: 2px solid var(--accent, Highlight);
+  outline-offset: 1px;
+}
+
+/* 置換などテキストボタンは少し横を広げる。 */
+.search-text-btn {
+  padding: 3px 10px;
+  color: var(--text-1);
+}
+
+/* オプショントグル（Aa / \b / .*）。on は .image-fit-btn.on と同系（accent 寄り）。 */
+.search-toggle.on,
+.search-toggle[aria-pressed="true"] {
+  background: var(--bg-active);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   CM6 検索ハイライト（editor/index.ts の StateField が当てる class）。
+   色はトークン変数のみ＝ライト/ダーク追従（pikaHighlightStyle と同方針）。 */
+.cm-editor .cm-search-hit {
+  /* 全ヒットは薄い強調（地と差をつけつつ主張しすぎない）。 */
+  background: var(--bg-active);
+  border-radius: 2px;
+}
+
+.cm-editor .cm-search-hit-current {
+  /* 現在ヒットは枠色を accent にして 1 件だけ強める（背景色だけに依存しない＝弁別性）。 */
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+  background: var(--bg-hover);
 }
 
 /* ステータスは右下隅に貼り付く灰背景の帯（ui-design §9・ui-mock .status）。
