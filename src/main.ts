@@ -30,6 +30,8 @@ import {
   getSettings,
   onSettingsWarning,
   onSettingsChanged,
+  imageInfo,
+  assetUrl,
   type TreeEntry,
   type Settings,
   type OpenRequestPayload,
@@ -37,6 +39,7 @@ import {
   type DocEncoding,
   type LineEnding,
   type PreviewRect,
+  type ImageInfo,
 } from "./ipc";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
@@ -49,7 +52,12 @@ import { renderTabs, type TabModel } from "./ui/tabs";
 import { notify, notices } from "./ui/notifications";
 import { setStatus, renderStatus } from "./ui/status";
 import { UnreadStore } from "./ui/unread";
-import { isImageExt } from "./ui/image";
+import {
+  renderImageView,
+  renderOpenExternally,
+  classifyExtension,
+  type ImageFit,
+} from "./ui/image";
 import { degradeReasonsFromFlags, degradeMessage, emptyMessage } from "./ui/viewstate";
 import { createEditor, type EditorHandle } from "./editor";
 import { renderDiff, type DiffHandle } from "./diff";
@@ -82,6 +90,11 @@ interface OpenTab extends TabModel {
    * （eval high: 削除済みタブの回復導線欠落＝旧 wx 版 F-017 と同質の行き止まり防止）。
    */
   deleted: boolean;
+  /**
+   * 非テキスト（画像/非対応バイナリ＝要件12.2・U3）か。true のとき CM6 を作らず image-host で表示する
+   * （画像は簡易ビュー、巨大画像/非対応は「既定アプリで開く」誘導）。モード/差分は無効・カーソルステータス無し。
+   */
+  nonText: boolean;
   /** 第2段階以降（編集不可・読み取り専用ビューア）か。開き直しメニューの無効化に使う（backend degrade.editing_off を保存）。 */
   editingOff: boolean;
   /**
@@ -156,6 +169,12 @@ const state = {
   settings: null as Settings | null,
 };
 
+/**
+ * 画像簡易ビューの表示倍率（要件12.2・U3）。アプリ全体で 1 つ。画像タブを開く/切替えるたびに "fit" へ
+ * リセットする（前画像で「等倍」にしていても新しい画像はウィンドウフィットで開く＝予期しない巨大表示を避ける）。
+ */
+let imageFit: ImageFit = "fit";
+
 const workbench = () => document.getElementById("workbench") as HTMLElement;
 const treeHeadLabel = () => document.getElementById("tree-head-label") as HTMLElement;
 const treeCollapseBtn = () => document.getElementById("tree-collapse") as HTMLButtonElement;
@@ -164,6 +183,8 @@ const editorPane = () => document.getElementById("editor-pane") as HTMLElement;
 const editorHost = () => document.getElementById("editor-host") as HTMLElement;
 const diffHost = () => document.getElementById("diff-host") as HTMLElement;
 const previewHost = () => document.getElementById("preview-host") as HTMLElement;
+// 非テキスト（画像/非対応バイナリ）の簡易ビュー占有領域（要件12.2・U3）。CM6 を作らずここで表示する。
+const imageHost = () => document.getElementById("image-host") as HTMLElement;
 // タブバー右端 tab-tools（UIブラッシュアップ T6 差分 C4）。モード切替セグメント・差分トグル・確認ボタン。
 const modeButtons = () =>
   Array.from(
@@ -283,17 +304,21 @@ function scrollToHiddenUnread(): void {
  */
 function refreshViewTools(): void {
   const hasActive = !!state.active;
+  // 非テキスト（画像/非対応バイナリ＝要件12.2・U3）にモード/差分は無いので無効化する。
+  const activeTab = state.tabs.find((t) => t.path === state.active);
+  const nonText = !!activeTab && activeTab.nonText && !activeTab.deleted;
   for (const btn of modeButtons()) {
     const on = btn.dataset.mode === state.viewMode;
     btn.classList.toggle("on", on);
     btn.setAttribute("aria-pressed", String(on));
-    btn.disabled = !hasActive;
+    btn.disabled = !hasActive || nonText;
   }
   const diffBtn = toggleDiffBtn();
-  diffBtn.disabled = !hasActive;
+  diffBtn.disabled = !hasActive || nonText;
   diffBtn.classList.toggle("on", state.diffOn);
   diffBtn.setAttribute("aria-pressed", String(state.diffOn));
-  // 「ブラウザで開く」はアクティブタブのファイルが対象。アクティブが無い間は無効にする（誤クリック防止）。
+  // 「ブラウザで開く」はアクティブタブのファイルが対象。画像も既定アプリで開けるので活性のまま。
+  // アクティブが無い間のみ無効にする（誤クリック防止）。
   openExternalBtn().disabled = !hasActive;
 }
 
@@ -431,6 +456,22 @@ async function activateTab(path: string): Promise<void> {
   // 外部リソース許可は **タブ切替で必ず既定オフに戻す**（要件6.2「既定は必ずオフに戻る」・永続しない）。
   // 「許可して再読込」はこのタブをアクティブに見ている間だけ有効で、切り替えると遮断へ戻る。
   if (tab) tab.allowExternal = undefined;
+  // 非テキスト（画像/非対応バイナリ＝要件12.2・U3）は CM6 を作らず image-host で表示する。
+  // 削除済みでない非テキストタブのみここで処理する（削除済みは下の deleted 分岐＝rollback 導線を優先）。
+  if (tab && tab.nonText && !tab.deleted) {
+    // 新しい画像はウィンドウフィットで開く（前画像の「等倍」を引きずらない）。
+    imageFit = "fit";
+    // CM6 を破棄して editor を null にする（captureActivePosition/refreshStatus/captureTabHash は
+    // !state.editor で早期 return するため、画像タブ中はこれらが安全に no-op になる）。
+    state.editor?.destroy();
+    state.editor = null;
+    refreshTabs();
+    await renderNonTextTab(tab);
+    // host 可視を正規化する（image-host のみ表示・preview 子WebView は隠す）。
+    applyOccupancy();
+    void persistAppState();
+    return;
+  }
   // 削除済みタブはディスクから読めない。退避/ベースラインは snapshot に残るので、
   // 直近内容を空にしてエディタを出し「確認済み時点に戻す（rollback）」導線を保つ（eval high）。
   // ただし削除済みタブを編集して別タブへ切り替えていた場合（dirty かつ draft あり）は、その未保存編集を
@@ -447,6 +488,8 @@ async function activateTab(path: string): Promise<void> {
       state.tabWidth,
     );
     refreshTabs();
+    // 直前に画像タブを見ていた場合に image-host が残らないよう隠す（画像→削除済みタブ切替の正規化）。
+    imageHost().hidden = true;
     setStatus(`削除済み: ${path}（［確認済み時点に戻す］で退避から復元できます）`);
     return;
   }
@@ -481,6 +524,10 @@ async function activateTab(path: string): Promise<void> {
       state.lineWrapping,
       state.tabWidth,
     );
+    // host 可視を正規化する（画像タブ→テキストタブ切替で image-host が残らないよう必ず隠す＝U3）。
+    // applyOccupancy は hidden 切替＋bounds のみで preview ナビゲートはしないため、下の
+    // renderActiveDiff/renderActivePreview（実ナビゲート）の前に置いても順序を壊さない。
+    applyOccupancy();
     // 段階制で機能が縮退するとき（preview/diff/highlight 等の自動オフ）は理由を通知バー提示する（要件2.2）。
     notifyDegrade(path, doc.degrade);
     if (doc.decode_warning) {
@@ -507,6 +554,53 @@ async function activateTab(path: string): Promise<void> {
     }
   } catch (e) {
     notify(`開けませんでした: ${String(e)}`, "error");
+  }
+}
+
+/**
+ * 非テキストタブ（画像/非対応バイナリ＝要件12.2・U3）を image-host へ描画する。
+ *
+ * backend の image_info で種別を確かめ、画像なら assetUrl の custom protocol 経由で <img> 表示
+ * （ウィンドウフィット/等倍トグル付き）、巨大画像/非対応/開けない（機密拒否等）は「既定アプリで開く」
+ * 誘導を出して行き止まりにしない（要件12 縮退時の next-action）。通知は出しすぎない（描画自体が状態提示）。
+ *
+ * 画像の内容ハッシュ baseline（復元時の別物検知）は MVP 外＝未対応。live 変更検知は watcher の
+ * パスイベント（fs-changed の未読）で満たされ、画像タブも特別な結線なしにそれへ乗る（要件12.2）。
+ */
+async function renderNonTextTab(tab: OpenTab): Promise<void> {
+  const host = imageHost();
+  host.replaceChildren();
+  host.hidden = false;
+  try {
+    const info: ImageInfo = await imageInfo(tab.path);
+    // await 中に別タブへ切り替わっていたら描画を破棄する（最新性チェック・後着結果で別タブを汚さない）。
+    if (state.active !== tab.path) return;
+    if (info.kind === "image") {
+      // fit/actual トグル付きで描画する。トグルは imageFit を更新して同じ画像を再描画する
+      // （コールバックを再生成するため draw を自己参照する）。
+      const draw = (): void =>
+        renderImageView(imageHost(), assetUrl(tab.path), imageFit, (f) => {
+          imageFit = f;
+          draw();
+        });
+      draw();
+    } else if (info.kind === "too-large") {
+      renderOpenExternally(
+        host,
+        "画像が大きすぎるため簡易ビューでは表示できません（既定のアプリで開いてください）",
+        () => void onOpenExternal(),
+      );
+    } else {
+      renderOpenExternally(
+        host,
+        "対応していない形式です（既定のアプリで開いてください）",
+        () => void onOpenExternal(),
+      );
+    }
+  } catch (e) {
+    // image_info が Err を返すケース（機密ファイル拒否・I/O 失敗等）。行き止まりにせず外部誘導を出す。
+    if (state.active !== tab.path) return;
+    renderOpenExternally(host, `開けませんでした: ${String(e)}`, () => void onOpenExternal());
   }
 }
 
@@ -584,15 +678,15 @@ function markDirty(path: string): void {
 }
 
 async function openFile(entry: TreeEntry): Promise<void> {
-  // 非テキスト（画像）は簡易ビュー扱い（要件12.2）。寸法プリチェック（6000万px 超は外部誘導）は
-  // backend（custom protocol/command）が行う。ここでは種別判定で CM6 へテキスト全量ロードしない分岐を持つ
-  // （実描画・寸法プリチェックの実効は系統C＝acceptance TG5/TG6）。
-  if (isImageExt(entry.name)) {
-    notify(`画像ファイルです（簡易ビューで表示・編集はできません）: ${entry.name}`, "info");
-  }
+  // 非テキスト（画像/非対応バイナリ）は CM6 へテキスト全量ロードせず簡易ビュー扱いにする（要件12.2・U3）。
+  // 拡張子で種別判定し、image も unsupported も「非テキスト」＝nonText=true として CM6 を作らない
+  // （実画像配信・寸法プリチェックは backend の image_info / custom protocol が担う＝activateTab で結線）。
+  const kind = classifyExtension(entry.name);
   if (!state.tabs.some((t) => t.path === entry.path)) {
     state.tabs.push(newTab(entry.path, entry.name));
   }
+  const tab = state.tabs.find((t) => t.path === entry.path);
+  if (tab) tab.nonText = kind !== "text";
   await activateTab(entry.path);
   // 最近使ったファイルへ記録（要件10.2・ジャンプリスト反映は backend）。
   void noteRecent("file", entry.path).catch(() => undefined);
@@ -631,6 +725,7 @@ function newTab(path: string, title: string): OpenTab {
     cursorColumn: 1,
     scrollTop: 1,
     deleted: false,
+    nonText: false,
     editingOff: false,
     // 既定は BOM なし UTF-8（新規ファイル/不明時）。既存ファイルは open 時に open_document の判定で上書きする。
     encoding: "utf-8",
@@ -998,6 +1093,23 @@ async function onToggleSplit(): Promise<void> {
 
 /** 3モード×差分トグルの直交占有を DOM へ適用する（要件6.1・ui-design 8章）。 */
 function applyOccupancy(): void {
+  // 非テキスト（画像/非対応バイナリ＝要件12.2・U3）が占有なら他の host を全て隠して image-host だけ出す。
+  // 画像にモード/差分/プレビューは無いので resolveOccupancy より前に分岐して image-host を専有させる。
+  const activeTab = state.tabs.find((t) => t.path === state.active);
+  if (activeTab && activeTab.nonText && !activeTab.deleted) {
+    editorHost().hidden = true;
+    diffHost().hidden = true;
+    previewHost().hidden = true;
+    imageHost().hidden = false;
+    editorPane().removeAttribute("data-split");
+    // プレビュー子WebView は OS 子ウィンドウで z-index 制御不可＝画像占有中は必ず隠す（手前に残らない）。
+    void hidePreview();
+    // editor 無しなので no-op（カーソル/行/文字を出さない）。状態提示は image-host の描画自体が担う。
+    refreshStatus();
+    return;
+  }
+  // 非画像占有（テキスト/差分/プレビュー）では image-host を必ず隠す（画像→テキスト切替の正規化）。
+  imageHost().hidden = true;
   const occ = resolveOccupancy(state.viewMode, state.diffOn);
   editorHost().hidden = !occ.showEditor;
   diffHost().hidden = !occ.showDiff;
@@ -2022,6 +2134,9 @@ function closeTab(path: string): void {
       state.lineWrapping,
       state.tabWidth,
     );
+    // 直前が画像タブだった場合に image-host が残らないよう host 可視を正規化する（画像→空状態の正規化・U3）。
+    // state.active=null なので applyOccupancy は image-host を隠し空エディタ（editor-host）を出す。
+    applyOccupancy();
     refreshTabs();
     setStatus(emptyMessage("no-folder"));
   }

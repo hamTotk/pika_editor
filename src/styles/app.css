@@ -1020,9 +1020,55 @@ body {
   text-align: center;
 }
 
+/* 非テキスト: 画像簡易ビューの占有領域（要件12.2・U3）。エディタ/差分/プレビューと同じ grid-row:2 を
+   占有する兄弟。CM6 を作らず <img>（または「既定アプリで開く」誘導）をここに出す。ツールバー＋画像の
+   縦並びにし、画像はスクロールで全体を見られるようにする（等倍時に領域を超えても見られる）。 */
+#image-host {
+  grid-row: 2;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-raised);
+  display: flex;
+  flex-direction: column;
+}
+
+#image-host[hidden] {
+  display: none;
+}
+
+/* 画像簡易ビュー上端のフィット切替バー（ウィンドウフィット/等倍＝要件12.2）。 */
+.image-toolbar {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-1);
+  background: var(--bg-sunken);
+}
+
+/* フィット切替ボタン（控えめ・テーマ追従＝色は直書きせずトークン変数）。 */
+.image-fit-btn {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-1);
+  cursor: pointer;
+}
+
+/* 現在のフィット値を accent 寄りの背景で示す（色記号だけに依存しないよう枠色も変える）。 */
+.image-fit-btn.on,
+.image-fit-btn[aria-pressed="true"] {
+  background: var(--bg-active);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* 非テキスト: 画像簡易ビュー（表示のみ・ウィンドウフィット/等倍＝要件12.2）。 */
 #preview-host .image-fit,
-#editor-host .image-fit {
+#editor-host .image-fit,
+#image-host .image-fit {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
@@ -1031,7 +1077,8 @@ body {
 }
 
 #preview-host .image-actual,
-#editor-host .image-actual {
+#editor-host .image-actual,
+#image-host .image-actual {
   display: block;
 }
 

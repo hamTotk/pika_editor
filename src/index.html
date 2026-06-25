@@ -293,6 +293,10 @@
                ここはその配置先プレースホルダ。HTML 本体は custom protocol が別WebView へ直配信し、
                メインWebView（このページ）の DOM/JS には一切載らない（design doc 6章）。 -->
           <div id="preview-host" aria-label="プレビュー" hidden></div>
+          <!-- 非テキスト（画像/非対応バイナリ）の簡易ビュー占有領域（要件12.2・U3）。
+               エディタ/差分/プレビューと同じグリッドセル（grid-row:2）を占有する兄弟。CM6 を作らず
+               画像は <img src="pika-asset://..."> で表示し、巨大画像/非対応は「既定アプリで開く」誘導を出す。 -->
+          <div id="image-host" aria-label="画像" hidden></div>
           <!-- 通知バー（非モーダル・role=status・要件11.1）。
                エディタ領域（#editor-pane）の **最下段バンド**に置く（content の下）。プレビューは
                ネイティブ子WebView のオーバーレイで #preview-host を覆うため、通知を従来の
