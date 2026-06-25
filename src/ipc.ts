@@ -507,6 +507,39 @@ export function replaceInText(
   });
 }
 
+// ── U3: 画像簡易ビュー（要件12.2）──────────────────────────────────────────
+
+/**
+ * `image_info` command の戻り（src-tauri asset::ImageInfoDto と round-trip・serde internally tagged・kebab-case）。
+ * - `"image"`: 画像として簡易ビューで描ける（寸法/ファイル上限内・既知画像マジック）。
+ * - `"too-large"`: 寸法上限超 or 寸法不明 or ファイル上限超（「既定アプリで開く」へ誘導）。
+ * - `"unsupported"`: 既知画像として解釈できない（非対応バイナリ＝「既定アプリで開く」へ誘導）。
+ */
+export type ImageInfo =
+  | { kind: "image"; width: number; height: number; mime: string }
+  | { kind: "too-large"; pixels: number }
+  | { kind: "unsupported" };
+
+/**
+ * 画像/非対応バイナリ/巨大画像の判定を取得する（要件12.2・U3）。
+ * backend は AccessControl::verify_read で封じ込め検証し、機密/上限超は表示させない（fail-closed）。
+ * 画像バイト自体はこの戻りには乗らず assetUrl の custom protocol が別配信する。
+ */
+export function imageInfo(path: string): Promise<ImageInfo> {
+  return invoke<ImageInfo>("image_info", { path });
+}
+
+/**
+ * 画像バイトを配信する custom protocol の実体 URL（要件12.2・U3）。
+ * `pika-asset://` は WebView2 上では `http://pika-asset.localhost/<percent-encoded 絶対パス>` として現れる。
+ * backend は先頭 `/` を除去し percent-decode してから verify_read で封じ込め検証し、暴走ガード
+ * （寸法/ファイル上限・機密拒否）を通したバイトのみを配信する。`encodeURIComponent` で `:` や `\\` を
+ * 確実にエンコードし、絶対パス（C:\... 等）をそのまま安全にクエリパスへ載せる。
+ */
+export function assetUrl(path: string): string {
+  return `http://pika-asset.localhost/${encodeURIComponent(path)}`;
+}
+
 /**
  * 診断ログフォルダの絶対パスを取得する（要件12.3「メニューからログフォルダを開ける」）。
  * バックエンドがフォルダ（<データルート>/logs/）を作成してからパスを返す。
