@@ -39,6 +39,11 @@ twox-hash = { workspace = true }
 # （commands::open_in_default_app / open_log_folder）の内部からのみ Rust API（open_path）を呼ぶ。
 # detached 起動なので UI スレッドを塞がない（design doc 1章「固まらない」）。
 tauri-plugin-opener = "2"
+# OS ネイティブ選択ダイアログ（フォルダを開く/ファイルを開く・要件3.2/11.2）。Tauri 公式・軽量。
+# **最小権限**＝capability では `dialog:allow-open` のみ付与し保存ダイアログ（allow-save）は付けない。
+# 返却パスは必ず既存の open_workspace / read_file（AccessControl 再検証）経由で読むため
+# ダイアログ結果を直接 FS read する近道 command は新設しない（迂回経路を作らない）。
+tauri-plugin-dialog = "2"
 
 [target.'cfg(windows)'.dependencies]
 # WebView2 Runtime 不在検出（レジストリ読取）・最小ネイティブ MessageBox（design doc 18章）、

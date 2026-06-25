@@ -39,6 +39,7 @@ import {
   type PreviewRect,
 } from "./ipc";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
 import { initTheme, applyTheme, currentTheme, type ThemeMode } from "./theme";
 import { initMenuBar, type MenuItemSpec, type MenuSpec } from "./ui/menu";
 import { initA11y, announce } from "./a11y";
@@ -633,20 +634,51 @@ function newTab(path: string, title: string): OpenTab {
 }
 
 async function onOpenFolder(): Promise<void> {
-  // パス入力欄(#folder-path)はツールバー廃止（T8）で撤去したため window.prompt で受け取る
-  //（ネイティブ選択ダイアログは capability を増やすため別途・最薄方針を踏襲）。
+  // OS ネイティブ選択ダイアログでフォルダを選ぶ（要件3.2・dialog:allow-open）。
   // 現在フォルダを既定値として提示し、キャンセル（null）時は何もしない。
-  const dir = window.prompt(
-    "開くフォルダのパスを入力してください（例 C:\\work\\notes）",
-    state.folder ?? "",
-  );
-  if (dir === null) return; // キャンセル＝何もしない。
-  const trimmed = dir.trim();
+  // 返却パスは必ず switchFolder 経由で open_workspace に渡す（AccessControl で core 再検証）。
+  const picked = await pickNativePath({
+    directory: true,
+    defaultPath: state.folder ?? undefined,
+    // dev ブラウザ単体（Tauri 非依存・open 不在）では prompt にフォールバックする。
+    promptMessage: "開くフォルダのパスを入力してください（例 C:\\work\\notes）",
+  });
+  if (picked === null) return; // キャンセル＝何もしない。
+  const trimmed = picked.trim();
   if (!trimmed) {
     notify("フォルダのパスを入力してください", "warn");
     return;
   }
   await switchFolder(trimmed);
+}
+
+/**
+ * OS ネイティブ選択ダイアログでパスを選ぶ薄いラッパ（要件3.2/11.2）。
+ * dev ブラウザ単体（Tauri 非依存・dialog plugin の open が使えない環境）では従来 window.prompt に
+ * フォールバックして実機外でも壊さない（存在しない/失敗時はプロンプトへ退避）。
+ * 返り値: 選択パス（string）／キャンセル時は null。返却パスの FS 読取は呼び出し側が
+ * switchFolder / openPath（AccessControl 再検証経由）で行う＝ここでは直接 FS を触らない。
+ */
+async function pickNativePath(opts: {
+  directory: boolean;
+  defaultPath?: string;
+  promptMessage: string;
+}): Promise<string | null> {
+  try {
+    // ファイル選択は multiple:false で string|null、フォルダ選択は directory:true で string|null。
+    const result = await openNativeDialog({
+      directory: opts.directory,
+      multiple: false,
+      defaultPath: opts.defaultPath,
+    });
+    // 単一選択なので戻りは string | null（配列にはならない）。配列で来た場合も先頭を採る防御。
+    if (result === null) return null; // キャンセル。
+    return Array.isArray(result) ? (result[0] ?? null) : result;
+  } catch {
+    // dialog plugin 不在/失敗（dev ブラウザ単体等）。従来の手入力プロンプトへ退避する。
+    const p = window.prompt(opts.promptMessage, state.folder ?? "");
+    return p; // null=キャンセル、文字列=入力値（trim は呼び出し側）。
+  }
 }
 
 /**
@@ -1876,14 +1908,19 @@ function dispatchAction(action: Action): boolean {
 }
 
 /**
- * ファイルを開く（Ctrl+O・要件11.2）。パス入力欄(#folder-path)はツールバー廃止（T8）で撤去したため
- * window.prompt で受け取る（ネイティブ選択ダイアログは capability を増やすため別途・最薄方針を踏襲）。
- * キャンセル（null）時は何もしない。存在しないパスは openPath が新規タブとして開く（要件3.2）。
+ * ファイルを開く（Ctrl+O・要件11.2）。OS ネイティブ選択ダイアログでファイルを選ぶ
+ * （dialog:allow-open・dev ブラウザ単体では window.prompt にフォールバック）。
+ * キャンセル（null）時は何もしない。返却パスは openPath 経由（read_file の AccessControl 再検証）で開く。
+ * 存在しないパスは openPath が新規タブとして開く（要件3.2）。
  */
 async function onOpenFile(): Promise<void> {
-  const p = window.prompt("開くファイルのパスを入力してください", state.folder ?? "");
-  if (p === null) return; // キャンセル＝何もしない。
-  const trimmed = p.trim();
+  const picked = await pickNativePath({
+    directory: false,
+    defaultPath: state.folder ?? undefined,
+    promptMessage: "開くファイルのパスを入力してください",
+  });
+  if (picked === null) return; // キャンセル＝何もしない。
+  const trimmed = picked.trim();
   if (!trimmed) {
     notify("開くファイルのパスを入力してください", "warn");
     return;

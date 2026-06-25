@@ -96,6 +96,12 @@ fn run() {
         // open_log_folder（自前の薄い command）の内部から opener の Rust API を呼ぶ経路に限定する。
         // プレビュー別WebView（権限ゼロ）へは当然付与しない（capability ファイル不在＝ゼロのまま）。
         .plugin(tauri_plugin_opener::init())
+        // dialog plugin（OS ネイティブ選択ダイアログ・「フォルダを開く」「ファイルを開く」= 要件3.2/11.2）。
+        // 【最小権限】capabilities/main.json は `dialog:allow-open` のみ付与（保存 `dialog:allow-save` は不付与）。
+        // ダイアログで選んだパスは frontend から既存の open_workspace / read_file へ渡し、
+        // AccessControl（set_root/verify_read）で core 再検証する（直接 FS read の近道は作らない）。
+        // プレビュー別WebView（権限ゼロ）へは当然付与しない（capability ファイル不在＝ゼロのまま）。
+        .plugin(tauri_plugin_dialog::init())
         // プレビュー custom protocol（pika-preview://）= Rust から別WebView へサニタイズ済み HTML を
         // 直配信する（HTML を JS のメインワールドに通さない＝design doc 6章）。CSP はレスポンスヘッダで強制。
         // この protocol が読むのは PreviewService（サニタイズ済み素材）のみで、Tauri command には到達しない。
