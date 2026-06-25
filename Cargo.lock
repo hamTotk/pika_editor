@@ -2947,6 +2947,7 @@ version = "0.1.0"
 dependencies = [
  "include_dir",
  "notify",
+ "percent-encoding",
  "pika-core",
  "serde",
  "serde_json",

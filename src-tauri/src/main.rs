@@ -13,6 +13,7 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod access;
+mod asset;
 mod commands;
 mod diagnostic;
 mod document;
@@ -86,6 +87,7 @@ fn run() {
         document::replace_in_text,
         diagnostic::log_folder_path,
         settings_service::get_settings,
+        asset::image_info,
     ];
 
     let app = tauri::Builder::default()
@@ -106,6 +108,11 @@ fn run() {
         // 直配信する（HTML を JS のメインワールドに通さない＝design doc 6章）。CSP はレスポンスヘッダで強制。
         // この protocol が読むのは PreviewService（サニタイズ済み素材）のみで、Tauri command には到達しない。
         .register_uri_scheme_protocol(preview::PREVIEW_SCHEME, preview::handle_preview_request)
+        // 画像配信 custom protocol（pika-asset://）= メインWebView 用の信頼画像配信（要件12.2・U3）。
+        // アプリ全体登録だが、隔離の関門は origin に依らず (a) AccessControl の path ゲート
+        // (b) is_sensitive 再判定 (c) プレビュー別WebView の CSP に pika-asset を入れない、の三重
+        // （asset.rs のドキュメント参照）。ハンドラは verify_read 成功した実体パスのみを配信する。
+        .register_uri_scheme_protocol(asset::ASSET_SCHEME, asset::handle_asset_request)
         .invoke_handler(move |invoke| {
             // 権限ゼロ別WebView（プレビュー・label = preview::PREVIEW_WEBVIEW_LABEL）からの IPC は
             // command 実行前に全拒否する（自前 app command は ACL で自動ゲートされない＝上記ドキュメント）。
