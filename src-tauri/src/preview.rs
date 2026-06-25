@@ -550,7 +550,10 @@ fn guard_local_resource(content_type: &str, bytes: &[u8]) -> GuardDecision {
 }
 
 /// 拡張子から最小限の Content-Type を推定する（ローカル画像/CSS の配信用）。
-fn guess_content_type(path: &std::path::Path) -> &'static str {
+///
+/// `pub(crate)`: pika-asset:// の配信ヘルパ（[`crate::asset`]）も同じ Content-Type 推定を使い
+/// 重複実装を作らない（単一源・U3 画像簡易ビュー）。
+pub(crate) fn guess_content_type(path: &std::path::Path) -> &'static str {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -610,7 +613,10 @@ fn asset_response(reference: &str) -> Response<Vec<u8>> {
 }
 
 /// エラーレスポンス（本文を最小化し情報漏れを避ける）。
-fn error_response(status: StatusCode, _detail: &str) -> Response<Vec<u8>> {
+///
+/// `pub(crate)`: pika-asset:// のハンドラ（[`crate::asset`]）も同じ最小エラー応答を使い
+/// 重複実装を作らない（単一源・U3 画像簡易ビュー）。
+pub(crate) fn error_response(status: StatusCode, _detail: &str) -> Response<Vec<u8>> {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")

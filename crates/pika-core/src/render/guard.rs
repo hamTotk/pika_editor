@@ -128,7 +128,11 @@ pub fn check_svg_bytes(bytes: &[u8], pixel_limit: u64, element_limit: u64) -> Gu
 }
 
 /// 画像ヘッダから (width, height) を読む（フルデコードしない・既知マジックのみ）。
-fn image_dimensions(b: &[u8]) -> Option<(u64, u64)> {
+///
+/// 判定（`image_info` command）と配信前ガード（[`check_image_bytes`]）が**同一実装**で寸法を読むため
+/// 公開する（U3 画像簡易ビュー・要件12.2）。判定と配信で寸法解釈が割れないよう、両者ともこの関数を
+/// 唯一の寸法読取り元にする。**戻り値型 `Option<(u64, u64)>` は配信ガードの呼び出し規約のため変えない**。
+pub fn image_dimensions(b: &[u8]) -> Option<(u64, u64)> {
     // PNG: 8 バイトシグネチャ + IHDR(width/height は big-endian u32)。
     if b.len() >= 24 && b.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
         let w = be_u32(&b[16..20])? as u64;

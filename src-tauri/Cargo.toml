@@ -26,6 +26,9 @@ pika-core = { path = "../crates/pika-core" }
 tauri = { version = "2", features = ["unstable"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# pika-asset:// custom protocol の URL パス復号（percent-decode）に使う（U3 画像簡易ビュー・要件12.2）。
+# 既に推移的依存として Cargo.lock に存在するためビルド追加コストは最小。
+percent-encoding = "2"
 # プレビュー別WebView へ配信する同梱ベンダーアセット（Mermaid/KaTeX/highlight・約3.84MiB）を
 # exe へ埋め込む（自己完結・ポータブル配布。実行時 FS 依存にしない＝design doc 1章「軽い/ワークスペースを汚さない」）。
 # fonts が 16 個ありビルド時に静的ツリーで畳む方が `include_bytes!` 列挙より簡潔。

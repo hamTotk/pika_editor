@@ -19,9 +19,10 @@ pub mod sanitize;
 
 pub use csp::{build_csp, generate_nonce, validate_allow_hosts, ExternalResourceAllow, Nonce};
 pub use guard::{
-    check_image_bytes, check_image_pixels, check_svg, check_svg_bytes, has_long_line, BlockReason,
-    GuardDecision, DEFAULT_HTML_TIMEOUT_MS, DEFAULT_IMAGE_MAX_PIXELS, DEFAULT_LONG_LINE_CHARS,
-    DEFAULT_SVG_MAX_ELEMENTS, DEFAULT_SVG_MAX_PIXELS,
+    check_image_bytes, check_image_pixels, check_svg, check_svg_bytes, has_long_line,
+    image_dimensions, BlockReason, GuardDecision, DEFAULT_HTML_TIMEOUT_MS,
+    DEFAULT_IMAGE_MAX_PIXELS, DEFAULT_LONG_LINE_CHARS, DEFAULT_SVG_MAX_ELEMENTS,
+    DEFAULT_SVG_MAX_PIXELS,
 };
 pub use path::{
     confine_under, join_under, resolve_local_ref, rewrite_local_image_refs, LocalRefDecision,
