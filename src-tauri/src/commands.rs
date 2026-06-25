@@ -70,11 +70,20 @@ pub fn open_workspace(
     // 直下ファイルの差分ベースライン内容を取得する（全既読スタート＝要件8.1）。
     // 機密/10MB以上/画像はハッシュのみ（pika-core::snapshot::policy が判定）。
     // ロード済みベースラインがある path は capture_baseline がスキップする（非クロバー・#3）。
+    //
+    // 性能（設計原則2「固まらない」）: ここは UI 起点・command スレッドで N 件ループする。各 capture が
+    // index.json をフル直列化＋fsync すると N 回の超線形コストでフォルダオープンが 200ms 予算を超えうる。
+    // そこで capture_baseline / capture_baseline_hash_only は内容 object のみ即時永続化し index 永続化は遅延、
+    // ループ完了後に persist_index を **1回だけ**呼んで index.json をまとめて書く（confirm_all と同じ作法）。
     for entry in &entries {
         if !entry.is_dir {
             capture_baseline_for(Path::new(&entry.path), &snapshot);
         }
     }
+    // バッチ capture で遅延していた index 永続化をここで1回だけ行う（per-file fsync の解消）。
+    // クラッシュ耐性: 仮にここへ到達前にクラッシュしても内容 object/メタは各 capture で永続化済みなので、
+    // 次回 open の再 capture（非クロバー）＋recover_from_meta で復元できる安全網は崩れない。
+    snapshot.persist_index();
 
     // 監視を開始（ベースライン取得・外部変更の emit）。監視不能 FS はポーリングへ縮退する。
     watcher.watch_root(dir)?;
@@ -124,10 +133,15 @@ fn enumerate_dir(dir: &Path) -> Result<Vec<TreeEntry>, String> {
 /// （機密ファイルの平文を read_to_string で展開しない＝#20）。StoreContent のときだけバイト読み→
 /// UTF-8 検査し、テキストのみ内容を保存する。バイナリ（非UTF-8）はバイト由来ハッシュのみ、
 /// 読取失敗はベースラインを張らない（空文字を内容ベースライン化しない＝差分誤り/空ハッシュ衝突を防ぐ・#54）。
+///
+/// open_workspace のループから呼ばれる。capture_baseline / capture_baseline_hash_only は内容 object を
+/// 即時永続化するが index.json はここで書かず、呼び出し側がループ後に snapshot.persist_index() で
+/// 1回まとめて永続化する（per-file の index 直列化＋fsync を避ける＝固まらない・設計原則2）。
 fn capture_baseline_for(path: &Path, snapshot: &SnapshotService) {
     use pika_core::snapshot::baseline_policy;
     let path_str = path.to_string_lossy().to_string();
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    // index 永続化はループ後に1回（capture_* は index を遅延し object のみ即時永続化）＝per-file fsync を避ける。
     // policy 判定を read より先に行う（HashOnly なら平文を一切読まない）。
     if !baseline_policy(&path_str, size).stores_content() {
         // 機密/画像/10MB以上: 内容を読まない（#20）。ハッシュのみ（content 空＝未読検知は watcher が担う）。
