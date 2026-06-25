@@ -413,13 +413,16 @@ pub fn confirm_file(
     };
 
     // 確定直前にディスクを実読みして再照合（mtime 据え置きの取りこぼし対策にハッシュも見る）。
+    // FS 操作（読み・mtime・policy）は canon 実体パスで揃える（生パスと canon が別表現の
+    // 場合のちぐはぐを避ける）。索引キー `key` は上で生パス由来に保つ（frozen との照合不変条件）。
+    let canon_str = canon.to_string_lossy();
     let disk_content =
         std::fs::read_to_string(&canon).map_err(|e| format!("ディスク再読みに失敗: {e}"))?;
     let disk = DiskState {
-        mtime_ms: file_mtime_ms(&path),
+        mtime_ms: file_mtime_ms(&canon_str),
         content_hash: hash_normalized(&disk_content),
     };
-    let policy = baseline_policy(&path, disk_content.len() as u64);
+    let policy = baseline_policy(&canon_str, disk_content.len() as u64);
 
     match decide_confirm(&frozen, &disk, policy) {
         ConfirmDecision::AbortReDiff => Ok(false), // 中断＝未読維持・再差分を促す。
@@ -473,9 +476,12 @@ pub fn rollback_file(
         return Err("内容ベースラインが無いため巻き戻せません（10MB以上/画像）".into());
     };
 
+    // FS 操作（読み・policy）は canon 実体パスで揃える。索引キー `key` は生パス由来のまま
+    // 維持する（baseline との一致＝不変条件）。rollback は mtime を見ないので policy のみ canon 化。
     let disk_content =
         std::fs::read_to_string(&canon).map_err(|e| format!("ディスク再読みに失敗: {e}"))?;
-    let current_storable = baseline_policy(&path, disk_content.len() as u64).stores_content();
+    let current_storable =
+        baseline_policy(&canon.to_string_lossy(), disk_content.len() as u64).stores_content();
 
     // pika-core の退避不能ガードで判定（要件7.3）。
     decide_rollback(baseline.has_content(), current_storable).map_err(|e| e.to_string())?;
@@ -563,11 +569,14 @@ pub fn confirm_all(
             Ok(c) => c,
             Err(_) => continue,
         };
+        // FS 操作（読み・mtime・policy）は canon 実体パスで揃える。索引キー `key` は生パス由来の
+        // まま維持する（frozen diff_snapshot との照合不変条件＝confirm_file と同じ作法）。
+        let canon_str = canon.to_string_lossy();
         let disk = DiskState {
-            mtime_ms: file_mtime_ms(path),
+            mtime_ms: file_mtime_ms(&canon_str),
             content_hash: hash_normalized(&disk_content),
         };
-        let policy = baseline_policy(path, disk_content.len() as u64);
+        let policy = baseline_policy(&canon_str, disk_content.len() as u64);
         let prev_baseline_object = inner
             .store
             .baseline(&key)
