@@ -79,6 +79,7 @@ fn run() {
         preview::hide_preview,
         preview::set_preview_bounds,
         document::open_document,
+        document::reopen_document_with_encoding,
         document::save_document,
         document::read_range,
         document::search_in_text,

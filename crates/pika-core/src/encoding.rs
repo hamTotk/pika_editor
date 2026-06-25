@@ -167,6 +167,33 @@ pub fn decode(bytes: &[u8]) -> DecodedFile {
     }
 }
 
+/// 指定エンコーディングで強制的にデコードする（自動判定を行わない・要件5.6 Reopen）。
+///
+/// 「Shift_JIS と誤判定された UTF-8」や「BOM なし日本語 UTF-16」のように自動判定（[`decode`]）が
+/// 原理的に効かないケースを、ユーザーが「表示」メニューで明示選択したエンコーディングで開き直すための API。
+/// 候補探索をせず指定エンコーディング一本で `decode_strict` する（妥当でなければ `None`）。
+///
+/// - BOM: 指定エンコーディングに対応する BOM が先頭にあれば剥がして `has_bom=true`（保存で往復維持）。
+///   対応しない種の BOM（例: UTF-8 指定で先頭が UTF-16 BOM）は本文の一部として扱い剥がさない。
+/// - 失敗: そのエンコーディングで不正シーケンスなら `None`（呼び出し側がユーザーへ通知する）。
+/// - `had_decode_warning` は常に `false`（ユーザーが明示選択したため警告不要）。
+pub fn decode_with(encoding: TextEncoding, bytes: &[u8]) -> Option<DecodedFile> {
+    // 指定エンコーディングに対応する BOM だけを剥がす（他種 BOM は本文として残す）。
+    let (has_bom, body) = match strip_bom(bytes) {
+        Some((bom_enc, rest)) if bom_enc == encoding => (true, rest),
+        _ => (false, bytes),
+    };
+    let text = decode_strict(encoding, body)?;
+    let line_ending = classify_line_ending(&text);
+    Some(DecodedFile {
+        line_ending,
+        text,
+        encoding,
+        has_bom,
+        had_decode_warning: false,
+    })
+}
+
 impl DecodedFile {
     /// `has_bom` を差し替えて返す（BOM 経路の組み立てを簡潔にするヘルパ）。
     fn with_bom(mut self, has_bom: bool) -> Self {
@@ -888,5 +915,68 @@ mod tests {
     fn ラベルは表示メニュー用() {
         assert_eq!(TextEncoding::Utf8.label(), "UTF-8");
         assert_eq!(TextEncoding::ShiftJis.label(), "Shift_JIS");
+    }
+
+    #[test]
+    fn decode_with_bomなし日本語utf16leを復元する() {
+        // 自動判定（decode）では掴めない低ヌル日本語 UTF-16LE を、ユーザー明示選択で正しく復元する
+        //（要件5.6 Reopen）。あわせて読込→保存の往復で元バイトに一致する（要件5.2）。
+        let utf16 = utf16_bytes("あいうえお", false); // BOM なし LE。
+        let d = decode_with(TextEncoding::Utf16Le, &utf16).expect("UTF-16LE で復元できるはず");
+        assert_eq!(d.text, "あいうえお");
+        assert_eq!(d.encoding, TextEncoding::Utf16Le);
+        assert!(!d.has_bom);
+        assert!(!d.had_decode_warning); // 明示選択なので警告なし。
+        // 往復維持: 開いた内容を同エンコ/BOM で保存すると元バイトに一致する。
+        match encode_for_save(&d.text, d.encoding, d.has_bom) {
+            SaveOutcome::Encoded(bytes) => assert_eq!(bytes, utf16),
+            other => panic!("UTF-16LE 保存が中断: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_with_shift_jisを復元する() {
+        let (sjis, _, _) = SHIFT_JIS.encode("日本語");
+        let d = decode_with(TextEncoding::ShiftJis, &sjis).expect("Shift_JIS で復元できるはず");
+        assert_eq!(d.text, "日本語");
+        assert_eq!(d.encoding, TextEncoding::ShiftJis);
+        assert!(!d.has_bom);
+    }
+
+    #[test]
+    fn decode_with_妥当でないとnoneを返す() {
+        // "日本語" の UTF-8 は 9 バイト（奇数長）。奇数長の UTF-16 は不正シーケンス→None
+        //（呼び出し側がユーザーへ通知する）。
+        let bytes = "日本語".as_bytes();
+        assert_eq!(bytes.len() % 2, 1, "前提崩れ: 奇数長でないと UTF-16 不正にならない");
+        assert!(decode_with(TextEncoding::Utf16Be, bytes).is_none());
+    }
+
+    #[test]
+    fn decode_with_utf8_bomを剥がしてhas_bomを立てる() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"abc");
+        let d = decode_with(TextEncoding::Utf8, &bytes).expect("UTF-8 BOM 付きで復元できるはず");
+        assert_eq!(d.text, "abc"); // BOM は本文に残さない。
+        assert!(d.has_bom);
+        // 往復維持: BOM 付きで保存すると元バイト（BOM 付き）に一致する。
+        match encode_for_save(&d.text, d.encoding, d.has_bom) {
+            SaveOutcome::Encoded(out) => assert_eq!(out, bytes),
+            other => panic!("UTF-8 BOM 保存が中断: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_with_utf16le_bomを剥がす() {
+        let mut bytes = vec![0xFF, 0xFE]; // LE BOM。
+        bytes.extend_from_slice(&utf16_bytes("こんにちはAB", false));
+        let d = decode_with(TextEncoding::Utf16Le, &bytes).expect("UTF-16LE BOM 付きで復元できるはず");
+        assert_eq!(d.text, "こんにちはAB");
+        assert!(d.has_bom);
+        // 往復維持: BOM 付きで保存すると元バイトに一致する。
+        match encode_for_save(&d.text, d.encoding, d.has_bom) {
+            SaveOutcome::Encoded(out) => assert_eq!(out, bytes),
+            other => panic!("UTF-16LE BOM 保存が中断: {:?}", other),
+        }
     }
 }

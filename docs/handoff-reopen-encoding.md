@@ -1,8 +1,11 @@
 # ハンドオフ: エンコーディングを指定して開き直す（TF3 / 要件5.2・5.6）
 
-> **状態**: 未着手。`fix/review-findings-2026-06-24`（PR#1）**マージ後**に TF3 専用ブランチで実装する。
+> **状態**: ✅ 完了（2026-06-25・ブランチ `feat/reopen-encoding`・実装コミット `1d72bb5`）。PR#1 マージ後の main から分岐して実装。
+> 3層（pika-core `decode_with`／src-tauri `reopen_document_with_encoding`／frontend 表示メニュー結線+dirty確認）を実装。
+> `cargo test`(pika-core 401 PASS・decode_with 5件追加)／`cargo build`(warnings=deny)／`npm run typecheck` 緑。
+> 系統C 実機GUI（PrintWindow検証）で TF3/C2 を確認済み（acceptance.md 更新済み）。
 > **背景**: 日本語 BOM なし UTF-16 の無言データ喪失修正（コミット `fdd70f7`）は「無言喪失→警告表示」までで、
-> 警告が **actionable でない**（実際に別エンコーディングで開き直す手段が未結線）。本作業でそのギャップを閉じる。
+> 警告が **actionable でない**（実際に別エンコーディングで開き直す手段が未結線）。本作業でそのギャップを閉じた。
 
 ## ゴール
 

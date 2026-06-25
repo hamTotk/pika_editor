@@ -7,6 +7,7 @@ import {
   readFile,
   pathKind,
   openDocument,
+  reopenDocumentWithEncoding,
   saveDocument,
   f5Resync,
   computeFileDiff,
@@ -80,6 +81,8 @@ interface OpenTab extends TabModel {
    * （eval high: 削除済みタブの回復導線欠落＝旧 wx 版 F-017 と同質の行き止まり防止）。
    */
   deleted: boolean;
+  /** 第2段階以降（編集不可・読み取り専用ビューア）か。開き直しメニューの無効化に使う（backend degrade.editing_off を保存）。 */
+  editingOff: boolean;
   /**
    * 開いたときに検出した元エンコーディング（保存時に維持する＝要件5.2・eval medium）。
    * open_document が判定した値。これを save_document に渡し、Shift_JIS 等が暗黙に UTF-8 化
@@ -455,6 +458,7 @@ async function activateTab(path: string): Promise<void> {
       tab.encoding = doc.encoding;
       tab.hasBom = doc.has_bom;
       tab.lineEnding = doc.line_ending;
+      tab.editingOff = doc.degrade.editing_off;
     }
     // 未保存編集を持つタブ（dirty かつ draft あり）は **ディスク内容で上書きしない**（eval high #11・
     // データを失わない）。退避しておいた編集中テキスト（draft）を CM6 へ載せ直し、未保存状態を保つ。
@@ -619,6 +623,7 @@ function newTab(path: string, title: string): OpenTab {
     cursorColumn: 1,
     scrollTop: 1,
     deleted: false,
+    editingOff: false,
     // 既定は BOM なし UTF-8（新規ファイル/不明時）。既存ファイルは open 時に open_document の判定で上書きする。
     encoding: "utf-8",
     hasBom: false,
@@ -798,6 +803,63 @@ async function saveOnce(
     notify("保存しました");
   } catch (e) {
     notify(`保存に失敗しました: ${String(e)}`, "error");
+  }
+}
+
+/**
+ * アクティブタブを指定エンコーディングで開き直す（要件5.6 Reopen）。
+ *
+ * 自動判定の誤り/曖昧（Shift_JIS 誤判定・BOM なし日本語 UTF-16 等）をユーザー選択で上書きする。
+ * dirty タブはバッファを差し替えるため破棄確認を出す（最上位原則「データを失わない」）。成功後は
+ * タブの encoding/has_bom/line_ending を新値へ更新し、以後の save_document がそのエンコーディングを
+ * 維持する（要件5.2）。失敗時（妥当でないエンコーディング等）は現状を一切変えずトースト通知する。
+ */
+async function reopenActiveWithEncoding(enc: DocEncoding): Promise<void> {
+  const path = state.active;
+  if (!path || !state.editor) return;
+  const tab = state.tabs.find((t) => t.path === path);
+  if (!tab) return;
+  // dirty タブ保護: 未保存編集をバッファ差し替えで失う前に破棄確認する（最優先原則）。
+  if (tab.dirty) {
+    const ok = window.confirm(
+      `「${tab.title}」には未保存の変更があります。\n` +
+        `${encodingLabel(enc, false)} で開き直すと、未保存の変更は破棄されます。続けますか？`,
+    );
+    if (!ok) return;
+  }
+  try {
+    const doc = await reopenDocumentWithEncoding(path, enc);
+    // await 中に別タブへ切り替わっていたら以後の差し替えを行わない（activateTab と同じ最新性ガード）。
+    if (state.active !== path) return;
+    // タブのエンコーディング/BOM/改行を新値へ（以後の保存がこれを維持する＝要件5.2）。
+    tab.encoding = doc.encoding;
+    tab.hasBom = doc.has_bom;
+    tab.lineEnding = doc.line_ending;
+    tab.editingOff = doc.degrade.editing_off;
+    // 破棄確認済み: dirty/draft をクリアし開いた内容を正にする。
+    tab.dirty = false;
+    tab.draft = undefined;
+    // エディタを開いた内容で作り直す（activateTab の載せ替えと同じ作法）。
+    state.editor?.destroy();
+    state.editor = createEditor(
+      editorHost(),
+      doc.text,
+      () => markDirty(path),
+      () => refreshStatus(),
+      state.lineWrapping,
+    );
+    // 開いた内容のハッシュを基準に取り直し未読をクリアする（復元の別物判定の素・eval high）。
+    void captureTabHash(path, doc.text);
+    state.unread.clearFile(path);
+    refreshTabs();
+    refreshStatus();
+    if (state.diffOn) await renderActiveDiff();
+    if (resolveOccupancy(state.viewMode, state.diffOn).showPreview) {
+      await renderActivePreview();
+    }
+    notify(`${encodingLabel(enc, false)} で開き直しました`, "info");
+  } catch (e) {
+    notify(`${encodingLabel(enc, false)} で開き直せませんでした: ${String(e)}`, "error");
   }
 }
 
@@ -1426,16 +1488,30 @@ function buildMenuSpecs(): MenuSpec[] {
             onSelect: () => onToggleWrap(),
           },
           { kind: "separator" },
-          // エンコーディング・改行コードは**現在値の表示のみ**（再オープン/変換 backend は未実装＝要件14章）。
-          // アクティブタブが無いときは出さない。disabled で操作不能にし誤クリックを防ぐ。
+          // エンコーディングは「指定して開き直す」を実結線（要件5.6 Reopen）。改行コードは現在値の表示のみ
+          // （変換 backend は未実装＝要件14章）。アクティブタブが無いときは出さない。
           ...(tab
             ? ([
+                // エンコーディングを指定して開き直す（要件5.6 Reopen）。見出しに現在値を表示し、
+                // 下の4項目で強制再デコードする。入れ子サブメニュー非対応のためフラット展開（テーマと同型）。
                 {
                   kind: "item",
-                  label: "エンコーディング",
+                  label: "エンコーディングを指定して開き直す",
                   accel: encodingLabel(tab.encoding, tab.hasBom),
                   disabled: true,
                 },
+                ...(["utf-8", "utf-16le", "utf-16be", "shift_jis"] as DocEncoding[]).map(
+                  (e): MenuItemSpec => ({
+                    kind: "item",
+                    label: `　${encodingLabel(e, false)}`,
+                    checked: tab.encoding === e,
+                    // 削除済みタブは実体が無く開き直せない（backend verify_read も弾くが UI でも無効化）。
+                    // 巨大ファイル（編集不可＝第2段階以降）も無効化（backend reopen 拒否と同条件）。
+                    disabled: tab.deleted || tab.editingOff,
+                    onSelect: () => void reopenActiveWithEncoding(e),
+                  }),
+                ),
+                { kind: "separator" },
                 {
                   kind: "item",
                   label: "改行コード",

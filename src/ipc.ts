@@ -381,6 +381,17 @@ export function openDocument(path: string): Promise<OpenedDocument> {
   return invoke<OpenedDocument>("open_document", { path });
 }
 
+/**
+ * 指定エンコーディングで開き直す（要件5.6 Reopen）。自動判定の誤り/曖昧をユーザー選択で上書きする。
+ * 戻りは open_document と同形（OpenedDocument）。妥当でなければ reject（呼び出し側がトースト通知）。
+ */
+export function reopenDocumentWithEncoding(
+  path: string,
+  encoding: DocEncoding,
+): Promise<OpenedDocument> {
+  return invoke<OpenedDocument>("reopen_document_with_encoding", { path, encoding });
+}
+
 /** 表現不能文字 1 件（［該当文字を確認］のジャンプ用・要件5.6）。 */
 export interface UnmappableChar {
   ch: string;
