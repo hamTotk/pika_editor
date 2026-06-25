@@ -211,7 +211,21 @@ fn sanitize_style_element_bodies(html: &str) -> String {
 /// 抱える）場合は [`sanitize_css_value`]（`;` 分割の宣言サニタイズ）ではなく本関数を**再帰適用**して
 /// 内部ルールを個別にサニタイズする。これにより危険な `.b{background:url(x)}` だけを落とし、安全な
 /// `.a{color:red}` を温存できる（従来は本体全体が 1 宣言扱いになり安全ルールごと黙って失われていた）。
+///
+/// **再帰深さ上限（DoS 対策）**: ネストブロックは [`sanitize_css_block_depth`] へ深さを引き継いで再帰する。
+/// 未信頼 HTML の `<style>` に `a{a{a{…}}}` のような過大ネストを仕込まれるとスタックを食い潰し
+/// プロセス abort（STATUS_STACK_BUFFER_OVERRUN）し得るため、[`CSS_MAX_NEST_DEPTH`] を超えたネスト本体は
+/// 再帰せず**破棄する**（安全側＝誤除去に倒す既存方針と整合）。
 fn sanitize_css_block(css: &str) -> String {
+    sanitize_css_block_depth(css, 0)
+}
+
+/// CSS ネストブロックの最大再帰深さ。これを超えるネスト本体は破棄する（DoS 対策の fail-closed）。
+/// 正当な CSS（@media の 1 段、@supports と @media の入れ子など）は浅く、32 段で十分余裕がある。
+const CSS_MAX_NEST_DEPTH: usize = 32;
+
+/// [`sanitize_css_block`] の実体。`depth` は現在の再帰深さ（最外は 0）。
+fn sanitize_css_block_depth(css: &str, nest_depth: usize) -> String {
     let mut out = String::with_capacity(css.len());
     let mut buf = String::new(); // セレクタ/at-rule のプレリュード蓄積。
     let mut depth = 0usize;
@@ -246,7 +260,13 @@ fn sanitize_css_block(css: &str) -> String {
                     // ネストブロック（@media 等）は内部の各ルールを再帰サニタイズし、危険ルールだけ落として
                     // 安全ルールを温存する。平坦ブロック（セレクタ{宣言;宣言}）は従来通り宣言単位で落とす。
                     let sanitized_block = if block_has_nested {
-                        sanitize_css_block(&block)
+                        // 深さ上限を超えるネスト本体は再帰せず破棄する（スタック食い潰し DoS の防止）。
+                        // ネストブロックを丸ごと落とすため、ここでルール自体を出力しないことで安全側に倒す。
+                        if nest_depth + 1 > CSS_MAX_NEST_DEPTH {
+                            buf.clear();
+                            continue;
+                        }
+                        sanitize_css_block_depth(&block, nest_depth + 1)
                     } else {
                         sanitize_css_value(&block)
                     };
@@ -787,6 +807,44 @@ mod tests {
         assert!(out.contains("color:green"), "安全な宣言まで落ちた: {out}");
         assert!(!out.contains("url("), "ネスト宣言内 url( が残った: {out}");
         assert!(!out.contains("evil"), "外部参照が残った: {out}");
+    }
+
+    #[test]
+    fn css_深いネストでもスタックオーバーフローせず返る() {
+        // DoS 回帰: 未信頼 HTML の <style> に `a{a{a{…}}}` を仕込むと 1 ネスト=1 再帰フレームで
+        // スタックを食い潰し pika.exe が abort（STATUS_STACK_BUFFER_OVERRUN）していた。
+        // 深さ上限（CSS_MAX_NEST_DEPTH）超は破棄し、クラッシュせず返ること。
+        let depth = 100_000usize;
+        let mut css = String::with_capacity(depth * 2 + 16);
+        css.push_str("<style>");
+        for _ in 0..depth {
+            css.push_str("a{");
+        }
+        css.push_str("color:red");
+        for _ in 0..depth {
+            css.push('}');
+        }
+        css.push_str("</style>");
+        // パニック/abort せず返ればよい（出力内容は安全側に破棄されていてよい）。
+        let out = sanitize_html(&css, PreviewFlavor::HtmlNoJs);
+        // 上限超のネストは破棄されるため、最深の color:red は出力に残らない（安全側）。
+        assert!(
+            !out.contains("color:red"),
+            "深い過大ネストの中身が温存された（破棄されるべき）: 末尾={}",
+            &out[out.len().saturating_sub(60)..]
+        );
+    }
+
+    #[test]
+    fn css_正当な浅いネストは温存される() {
+        // 上限導入で正当な @media（1 段）/@supports と @media の入れ子（2 段）が壊れないこと。
+        let out = sanitize_html(
+            r#"<style>@supports (display:grid){@media screen{.a{color:red}}}</style>"#,
+            PreviewFlavor::HtmlNoJs,
+        );
+        assert!(out.contains("@supports"), "@supports が落ちた: {out}");
+        assert!(out.contains("@media"), "@media が落ちた: {out}");
+        assert!(out.contains("color:red"), "安全な宣言が落ちた: {out}");
     }
 
     #[test]
