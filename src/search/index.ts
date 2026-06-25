@@ -29,6 +29,13 @@ export interface SearchController {
   close(): void;
   /** いま開いているか。 */
   isOpen(): boolean;
+  /**
+   * 外部リロードで内容が変わったら再検索してハイライト/件数を新内容へ追従させる
+   * （手動編集中の stale は再入力で更新する既存方針の補完）。
+   * バーが open かつ query が空でなければ現クエリで再検索し、現在位置を可能な範囲で維持する。
+   * open でない/query 空/検索不可ビュー（画像・差分ON等）では no-op。
+   */
+  refresh(): void;
 }
 
 /** createSearchController の依存（main が最新の editor/content を getter で渡す）。 */
@@ -299,7 +306,9 @@ export function createSearchController(deps: SearchDeps): SearchController {
       // 外部リロード注釈は付けない＝編集として反映し dirty 化する（保存対象になる）。
       deps.getEditor()?.setContent(result.text);
       // 置換後の新テキストで再検索してハイライト/件数を更新する。
-      await runSearch();
+      // keepCurrent=true で直前の現在ヒット位置の近傍へ復帰させ、先頭ヒットへスクロールで
+      // 飛ばさない（ユーザーが見ていた位置を保つ・doReplaceOne 後の近傍維持と同方針）。
+      await runSearch(/* keepCurrent */ true);
       deps.notify?.(`${result.replaced} 件置換しました`, "info");
     } catch {
       deps.notify?.("無効な正規表現のため置換できませんでした", "warn");
@@ -460,7 +469,19 @@ export function createSearchController(deps: SearchDeps): SearchController {
     return state.open;
   }
 
-  return { open, close, isOpen };
+  /**
+   * 外部リロードで内容が変わった直後に呼ぶ再検索フック。
+   * 開いていて query があれば現クエリで再検索（keepCurrent=true で現在位置を近傍維持）し、
+   * 件数/ハイライトを新内容へ追従させる。閉じている/空クエリなら何もしない。
+   * runSearch 内の canSearch()/getContent() ガードにより、画像タブ（editor=null）や
+   * 検索不可ビューでは安全に素通る。
+   */
+  function refresh(): void {
+    if (!state.open || state.query === "") return;
+    void runSearch(/* keepCurrent */ true);
+  }
+
+  return { open, close, isOpen, refresh };
 }
 
 // ── DOM ヘルパ（class はトークン CSS が当てる・色は直書きしない）────────────────────
