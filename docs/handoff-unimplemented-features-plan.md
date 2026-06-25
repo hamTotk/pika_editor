@@ -101,6 +101,19 @@ v2 で是正した主要点（詳細は各ユニットへ反映済み）:
 
 ## U2b. 設定反映（バックエンド消費分の配線）
 
+> **【2026-06-25 スコープ確定・高価値サブセット】** ユーザー判断で U2b は**高価値3項目に限定**して実装した
+> （実装済み・commit 群）:
+> - **excluded_dirs**（ツリー列挙の除外・commit a4c00b1）
+> - **sensitive_patterns**（is_sensitive_with／baseline_policy_with の和集合・既定を外せない・配信拒否＋平文回避・commit 9fc70ab）
+> - **feature_mermaid/math/highlight**（wrap_preview_document_with の機能ゲート・commit e4c6d42）
+>
+> **系統C／将来送り（MVP 除外・実装しない）**＝上級者向け/エッジで費用対効果が低く、軽量さ＞開発効率の方針に従い後回し:
+> - `huge_file_threshold_bytes` / `long_line_chars`（pika-core 純粋関数の引数化＋下限クランプ）
+> - `allow_remote_resources`（プレビュー外部リソース既定・CSP／build_csp 変更を伴う）
+> - `full_hash_on_startup`（復元時ハッシュ照合の有無）
+>
+> 下記の元計画はこの確定により部分実装（上記3項目のみ）。残り3項目の節は将来の参考として残す。
+
 **目的**：要件10.3 の残り。`SettingsService` が `get_settings` でしか使われておらず、バックエンド挙動は
 pika-core のハードコード既定で動いている。設定値を各 command／pika-core 関数へ通す。**ただし安全側・中心体験を
 設定で弱めない不変条件を守る**。
@@ -292,11 +305,15 @@ acceptance.md TF6・acceptance-findings.md L6 を整合修正）。
 - プレビュー内検索（要件5.4 WebView2 find）＝系統C 繰り越し。
 - 第2段階（読み取り専用・巨大）の検索＝MVP 除外（要件改訂提案。通常/第1段階に限定）。
 - 表示モードのファイル種別別記憶（要件6.1）＝state.json 拡張要・MVP は `default_mode` 初期値まで。
+- **U2b の `huge_file_threshold_bytes`/`long_line_chars`・`allow_remote_resources`・`full_hash_on_startup`
+  ＝MVP 除外（2026-06-25 高価値サブセット確定）**。設定 UI/取得（U2a 機構）には現れるが backend 挙動は
+  既定固定（pika-core ハードコード）。系統C/将来送り。
 
 ## 要件トレーサビリティ
 
 - U1 → 3.2 / 11.2
-- U2a/U2b → 10.3 / 10.4（＋ 5.2 Tab挙動）／**6.1 は初回既定のみ充足（種別別記憶＝MVP外・要件改訂提案）**
+- U2a → 10.3 / 10.4（theme/wrap_default/tab_width/default_mode＋ 5.2 Tab挙動）／**6.1 は初回既定のみ充足（種別別記憶＝MVP外・要件改訂提案）**
+- U2b → 10.3（excluded_dirs）／9.1（sensitive_patterns＝配信拒否＋平文回避・和集合で既定を外せない）／6.2（feature_*＝プレビュー機能トグル）。**閾値/remote/full_hash は MVP 除外（2026-06-25 確定・上記後回し参照）**
 - U3 → 12.2（＋ 2.2 暴走ガード・9.1 機密配信拒否）
 - U4 → 5.4（検索。第2段階検索＝MVP外・要件改訂提案）
 - U5 → 5.4 / 5.6（置換・キャプチャ参照全置換）
