@@ -85,6 +85,7 @@ fn run() {
         document::read_range,
         document::search_in_text,
         document::replace_in_text,
+        document::replace_one,
         diagnostic::log_folder_path,
         settings_service::get_settings,
         asset::image_info,
