@@ -60,6 +60,7 @@ import {
 } from "./ui/image";
 import { degradeReasonsFromFlags, degradeMessage, emptyMessage } from "./ui/viewstate";
 import { createEditor, type EditorHandle } from "./editor";
+import { createSearchController, type SearchController } from "./search";
 import { renderDiff, type DiffHandle } from "./diff";
 import {
   buildPreview,
@@ -174,6 +175,13 @@ const state = {
  * リセットする（前画像で「等倍」にしていても新しい画像はウィンドウフィットで開く＝予期しない巨大表示を避ける）。
  */
 let imageFit: ImageFit = "fit";
+
+/**
+ * 検索/置換バー（U4/U5・要件5.4）。main() で 1 度だけ生成し、open/close する。
+ * deps は getter 経由で常に最新の state.editor / 内容を取るので、タブ切替で editor を作り直しても
+ * 正しいエディタへハイライト/置換が向く。
+ */
+let searchController: SearchController | null = null;
 
 const workbench = () => document.getElementById("workbench") as HTMLElement;
 const treeHeadLabel = () => document.getElementById("tree-head-label") as HTMLElement;
@@ -447,6 +455,9 @@ function setMutatingButtonsDisabled(disabled: boolean): void {
 }
 
 async function activateTab(path: string): Promise<void> {
+  // タブ切替はエディタを destroy→再生成するため、検索バーのハイライト（StateField）は破棄される。
+  // 古いエディタ向けの検索状態を残さないようバーを閉じる（U4・要件5.4）。
+  searchController?.close();
   // 切替前に現在タブの位置を退避しておく（後でこのタブへ戻ったとき位置を復元するため）。
   captureActivePosition();
   state.active = path;
@@ -840,6 +851,8 @@ async function switchFolder(dir: string): Promise<void> {
   try {
     const entries = await openWorkspace(dir);
     if (switching) {
+      // フォルダ切替で前フォルダのエディタを畳むので検索バーを閉じる（古いハイライトを残さない）。
+      searchController?.close();
       // 切替時は前フォルダのタブ/未読/エディタを畳む（複数フォルダ同時オープンはしない＝要件14章）。
       state.editor?.destroy();
       state.editor = null;
@@ -1102,6 +1115,8 @@ function applyOccupancy(): void {
     previewHost().hidden = true;
     imageHost().hidden = false;
     editorPane().removeAttribute("data-split");
+    // 画像占有ではエディタが消えるので検索バーも閉じる（canSearch=false と整合・古いハイライト残さない）。
+    if (searchController?.isOpen()) searchController.close();
     // プレビュー子WebView は OS 子ウィンドウで z-index 制御不可＝画像占有中は必ず隠す（手前に残らない）。
     void hidePreview();
     // editor 無しなので no-op（カーソル/行/文字を出さない）。状態提示は image-host の描画自体が担う。
@@ -1111,6 +1126,9 @@ function applyOccupancy(): void {
   // 非画像占有（テキスト/差分/プレビュー）では image-host を必ず隠す（画像→テキスト切替の正規化）。
   imageHost().hidden = true;
   const occ = resolveOccupancy(state.viewMode, state.diffOn);
+  // エディタが見えなくなる占有（差分ON/プレビューのみ）へ移ったら検索バーを閉じる（U4・要件5.4）。
+  // 差分ビュー内検索・プレビュー内検索は系統C 繰り越しなので、ここで自然に無効化する（canSearch と整合）。
+  if (!occ.showEditor && searchController?.isOpen()) searchController.close();
   editorHost().hidden = !occ.showEditor;
   diffHost().hidden = !occ.showDiff;
   previewHost().hidden = !occ.showPreview;
@@ -1985,6 +2003,22 @@ function restoreTabPosition(path: string, line: number, column: number, scrollTo
  * いまフォーカスのあるペインを判定する（Ctrl+Enter 誤爆防止に使う＝要件11.2）。
  * 差分/プレビュー領域にフォーカスがあるときだけ Ctrl+Enter で「確認済み」を発火させる。
  */
+/**
+ * 検索/置換バーを使えるビューか（U4/U5・要件5.4）。
+ *
+ * 条件: アクティブな**テキスト**タブがエディタとして見えていること。
+ * - 画像/非対応バイナリ（nonText）・削除済み（deleted）・第2段階以降（editingOff）は CM6 が無い/編集不可。
+ * - 差分ビューは CM6 でないため **差分内検索は系統C 繰り越し**（diffOn で showEditor が落ちると false）。
+ *   プレビューのみは WebView2 の find に任せる想定で同じく系統C 繰り越し（要件5.4）。
+ * → ソース／分割（エディタが可視）のときだけ true。
+ */
+function canSearch(): boolean {
+  if (!state.active || !state.editor) return false;
+  const tab = state.tabs.find((t) => t.path === state.active);
+  if (!tab || tab.nonText || tab.deleted || tab.editingOff) return false;
+  return resolveOccupancy(state.viewMode, state.diffOn).showEditor;
+}
+
 function currentFocus(): Focus {
   const active = document.activeElement;
   if (!active) return "other";
@@ -2050,11 +2084,13 @@ function dispatchAction(action: Action): boolean {
       return true;
     case "find":
     case "replace": {
-      // 検索/置換バー UI はソース/分割向けに用意する（要件5.4）。検索バー実体は系統C（GUI 実機）。
-      // ここではキーが死蔵されないよう導線（通知）を出し、core 側 search_in_text/replace_in_text へ繋ぐ枠を持つ。
-      // 編集メニューの検索/置換もこの dispatchAction を呼ぶ（実バーは未実装＝案内に留める）。
-      const label = action === "find" ? "検索（Ctrl+F）" : "置換（Ctrl+H）";
-      notify(`${label}：検索バーは今後対応します`, "info");
+      // 検索/置換バーを開く（U4/U5・要件5.4）。差分ON/プレビュー/画像/第2段階では検索できない
+      //（canSearch=false なら開かず案内のみ）。編集メニューの検索/置換もこの dispatchAction を呼ぶ。
+      if (!canSearch()) {
+        notify("このビューでは検索できません（ソース/分割で使えます）", "info");
+        return true;
+      }
+      searchController?.open(action === "find" ? "find" : "replace");
       return true;
     }
   }
@@ -2094,6 +2130,8 @@ function onCloseActiveTab(): void {
 function closeTab(path: string): void {
   const tab = state.tabs.find((t) => t.path === path);
   if (!tab) return;
+  // タブを閉じるとエディタが作り直される/畳まれるので検索バーを閉じる（古いハイライトを残さない）。
+  searchController?.close();
   if (tab.dirty) {
     const name = tab.title;
     const ok = window.confirm(
@@ -2156,6 +2194,15 @@ async function main(): Promise<void> {
   // フレームレス化の自前ウィンドウ操作（最小化/最大化/閉じる・ui-design §7）。ドラッグ移動は
   // メニュー帯の data-tauri-drag-region（index.html）が担う。
   initWindowControls();
+  // 検索/置換バー（U4/U5・要件5.4）。deps は getter 経由で常に最新の state.editor / 内容を取る
+  //（タブ切替で editor を作り直しても正しいエディタへ向く）。バー実体は #editor-pane の右上へ重ねる。
+  searchController = createSearchController({
+    editorPane: editorPane(),
+    getEditor: () => state.editor,
+    getContent: () => state.editor?.getContent() ?? null,
+    canSearch,
+    notify,
+  });
   // tab-tools: モード切替セグメント（ソース/分割/プレビュー）。data-mode を読んで setViewMode へ流す。
   for (const btn of modeButtons()) {
     btn.addEventListener("click", () => {

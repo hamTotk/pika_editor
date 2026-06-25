@@ -454,10 +454,16 @@ export interface SearchOptions {
   regex: boolean;
 }
 
-/** 検索 1 ヒット（バイトオフセット半開区間・要件5.4）。 */
+/** 検索 1 ヒット（要件5.4・src-tauri document::MatchDto と対応）。 */
 export interface SearchMatch {
+  /** バイトオフセット半開区間の開始（replace_one の from 起点に使う＝backend はバイトで位置を扱う）。 */
   start: number;
+  /** バイトオフセット半開区間の終了。 */
   end: number;
+  /** UTF-16 コードユニット単位の開始（CM6 はこの座標系でデコレーション/選択を扱う）。 */
+  utf16_start: number;
+  /** UTF-16 コードユニット単位の終了。 */
+  utf16_end: number;
 }
 
 /** 検索結果（src-tauri document::SearchResultDto と対応・要件5.4）。 */
@@ -504,6 +510,41 @@ export function replaceInText(
     query,
     replacement,
     options,
+  });
+}
+
+/** 1 件置換の結果（src-tauri document::ReplaceOneResultDto と対応・要件5.4）。 */
+export interface ReplaceOneResult {
+  /** 置換後の全文（replaced=false なら入力 text と同一＝不変）。 */
+  text: string;
+  /** 1 件置換できたか（from バイト以降にヒットが無ければ false）。 */
+  replaced: boolean;
+  /** 置換した区間の開始バイト（replaced=false のとき値は意味を持たない）。 */
+  start: number;
+  /** 置換した区間の終了バイト（replaced=false のとき値は意味を持たない）。 */
+  end: number;
+  /** 新テキスト上の「次の検索開始バイト」（置換テキスト末尾＝連続置換の起点）。 */
+  next: number;
+}
+
+/**
+ * `from` バイト位置以降の **1 件のみ** 置換する（要件5.4「置換（1件）」）。
+ * 現在ヒットを置換 → 再検索し next 以降の次ヒットへ進む流れに使う。replaced=false（以降に無し）なら
+ * text は不変で、呼び出し側が先頭ラップ等を判断する。キャプチャ参照は backend が展開済み。
+ */
+export function replaceOne(
+  text: string,
+  query: string,
+  replacement: string,
+  options: SearchOptions,
+  from: number,
+): Promise<ReplaceOneResult> {
+  return invoke<ReplaceOneResult>("replace_one", {
+    text,
+    query,
+    replacement,
+    options,
+    from,
   });
 }
 

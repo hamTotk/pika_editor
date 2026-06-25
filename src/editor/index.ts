@@ -1,7 +1,21 @@
 // CodeMirror 6 エディタ配線（design doc 5章・要件5.1/7.2）。
 // 外部リロード=単一トランザクション=1Undo境界・非dirty・スクロール/カーソル維持を結線する。
-import { EditorState, type Extension, Annotation, Compartment } from "@codemirror/state";
-import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirror/view";
+import {
+  EditorState,
+  type Extension,
+  Annotation,
+  Compartment,
+  StateField,
+  StateEffect,
+} from "@codemirror/state";
+import {
+  EditorView,
+  keymap,
+  lineNumbers,
+  highlightActiveLine,
+  Decoration,
+  type DecorationSet,
+} from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting, indentUnit } from "@codemirror/language";
@@ -68,6 +82,21 @@ export interface EditorHandle {
    * setLineWrapping と全く同じく Compartment で差し替えるだけなので、内容/カーソル/スクロール/履歴は維持される。
    */
   setTabWidth(n: number): void;
+  /**
+   * 検索ヒットのハイライトを差し替える（U4・要件5.4）。位置は **UTF-16 コードユニット**（CM6 ネイティブ座標系）。
+   * 呼び出し側は backend の utf16_start/utf16_end を {from,to} へ写して渡す。current は現在ヒットの index
+   * （-1 で「現在」なし）。空配列でハイライトをクリアする。
+   */
+  setSearchMatches(matches: { from: number; to: number }[], current: number): void;
+  /**
+   * 現在ヒット（UTF-16 区間）を選択し中央へスクロールする（U4・要件5.4）。
+   * 置換（1件）の「現在位置」もこの選択で示す。
+   */
+  scrollToMatch(from: number, to: number): void;
+  /** 検索ハイライトを消す（バーを閉じる/query 空/不正正規表現）。 */
+  clearSearch(): void;
+  /** エディタへフォーカスを戻す（検索バーで Esc を押したとき）。 */
+  focusEditor(): void;
   /** 破棄する。 */
   destroy(): void;
 }
@@ -96,11 +125,69 @@ const pikaHighlightStyle = HighlightStyle.define([
   { tag: [tags.link, tags.url], class: "cm-tok-link" },
 ]);
 
+/**
+ * 検索ヒットのハイライトを差し替える StateEffect（U4・要件5.4）。
+ *
+ * `@codemirror/search` は使わず自前の StateField+Decoration で全ヒットを薄く、現在ヒット 1 件を
+ * 強く色付ける（CM6 既定検索 keymap と競合させない＝design 方針）。位置は **UTF-16 コードユニット**
+ * （CM6 ネイティブの座標系）で受け取る。呼び出し側（search モジュール）が backend の utf16_start/utf16_end
+ * をそのまま渡す。current は現在ヒットの index（-1 で「現在」無し＝全件を薄表示のみ）。
+ */
+const setSearchMatchesEffect = StateEffect.define<{
+  matches: { from: number; to: number }[];
+  current: number;
+}>();
+
+/** 全ヒット用デコレーション（薄い強調）。色は app.css の .cm-search-hit が当てる（テーマ追従）。 */
+const searchHitMark = Decoration.mark({ class: "cm-search-hit" });
+/** 現在ヒット用デコレーション（強い強調）。.cm-search-hit-current を重ねる。 */
+const searchHitCurrentMark = Decoration.mark({
+  class: "cm-search-hit cm-search-hit-current",
+});
+
+/**
+ * 検索ヒットのデコレーション集合を保持する StateField（U4・要件5.4）。
+ * effect を受けるたびに matches から組み直す。空配列でクリアする（query 変更/閉じる/不正正規表現）。
+ * CM6 は Decoration.set に **from<to の昇順** を要求するため呼び出し側で並べ替えて渡す前提だが、
+ * 念のためここでも from 昇順へソートしてから set する（順序崩れによる例外を防ぐ）。
+ */
+const searchHighlightField = StateField.define<DecorationSet>({
+  create() {
+    return Decoration.none;
+  },
+  update(deco, tr) {
+    let next = deco;
+    // 編集に追従して既存ハイライトを写像する（手動編集中は古くなりうるが例外で落ちないよう map する）。
+    if (tr.docChanged) next = next.map(tr.changes);
+    for (const effect of tr.effects) {
+      if (!effect.is(setSearchMatchesEffect)) continue;
+      const { matches, current } = effect.value;
+      if (matches.length === 0) {
+        next = Decoration.none;
+        continue;
+      }
+      // from 昇順に整える（CM6 の Decoration.set は昇順必須）。
+      const sorted = matches
+        .map((m, i) => ({ ...m, isCurrent: i === current }))
+        .sort((a, b) => a.from - b.from);
+      const ranges = sorted.map((m) =>
+        (m.isCurrent ? searchHitCurrentMark : searchHitMark).range(m.from, m.to),
+      );
+      // 第2引数 true = ソート済みを宣言（昇順を保証して O(n) で構築する）。
+      next = Decoration.set(ranges, true);
+    }
+    return next;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
 const baseExtensions: Extension[] = [
   lineNumbers(),
   highlightActiveLine(),
   history(),
   markdown(),
+  // 検索ハイライト（自前 StateField・要件5.4・U4）。空集合で開始（バー未起動時は何も描かない）。
+  searchHighlightField,
   // 控えめな構文ハイライトを有効化（class 指定＝テーマ追従・色は app.css）。
   syntaxHighlighting(pikaHighlightStyle),
   // Tab はタブ文字を挿入する（スペース展開しない・保守的既定＝要件5.2）。indentUnit を "\t" に固定し、
@@ -283,6 +370,21 @@ export function createEditor(
         effects: tabSizeCompartment.reconfigure(EditorState.tabSize.of(n)),
       });
     },
+    setSearchMatches: (matches: { from: number; to: number }[], current: number) => {
+      // UTF-16 座標の matches をそのまま StateField へ流す（CM6 はこの座標系でデコレーション/選択を扱う）。
+      view.dispatch({ effects: setSearchMatchesEffect.of({ matches, current }) });
+    },
+    scrollToMatch: (from: number, to: number) => {
+      // 現在ヒットを選択し中央へ。選択は置換（1件）の「現在位置」表示も兼ねる。
+      view.dispatch({
+        selection: { anchor: from, head: to },
+        effects: EditorView.scrollIntoView(from, { y: "center" }),
+      });
+    },
+    clearSearch: () => {
+      view.dispatch({ effects: setSearchMatchesEffect.of({ matches: [], current: -1 }) });
+    },
+    focusEditor: () => view.focus(),
     destroy: () => view.destroy(),
   };
 }
