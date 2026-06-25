@@ -155,21 +155,73 @@ fn image_dimensions(b: &[u8]) -> Option<(u64, u64)> {
     if b.len() >= 4 && b[0] == 0xff && b[1] == 0xd8 {
         return jpeg_dimensions(b);
     }
-    // ICO/CUR: reserved(2)=0 + type(2,LE)=1(ICO)/2(CUR) + count(2)。最初の ICONDIRENTRY 先頭の
-    // width(1)/height(1)（0 は 256 を意味する）を読む。要件の `.ico`（favicon 等）が `image_dimensions`
-    // で None になり配信前ガードで誤ブロックされる回帰を防ぐ（#24 の None=>Block は維持したまま対応形式を拡充）。
-    if b.len() >= 8
+    // ICO/CUR: reserved(2)=0 + type(2,LE)=1(ICO)/2(CUR) + count(2,LE)。
+    // 全 ICONDIRENTRY を走査して最大の width*height を採る。要件の `.ico`（favicon 等）が
+    // `image_dimensions` で None になり配信前ガードで誤ブロックされる回帰を防ぐ（#24 の None=>Block は維持）。
+    if b.len() >= 6
         && b[0] == 0x00
         && b[1] == 0x00
         && (b[2] == 0x01 || b[2] == 0x02)
         && b[3] == 0x00
     {
-        // ICONDIRENTRY 先頭（オフセット6=width, 7=height）。0 は 256 を意味する（ICO 仕様）。
-        let w = if b[6] == 0 { 256u64 } else { b[6] as u64 };
-        let h = if b[7] == 0 { 256u64 } else { b[7] as u64 };
-        return Some((w, h));
+        return ico_dimensions(b);
     }
     None
+}
+
+/// ICO/CUR の全 ICONDIRENTRY を走査し、最大の (width, height) を返す。
+///
+/// 各 ICONDIRENTRY は先頭オフセット6から 16 バイト固定:
+/// +0 width(1, 0=256) / +1 height(1, 0=256) / +8 bytesInRes(4,LE) / +12 imageOffset(4,LE)。
+/// エントリのデータ先頭（imageOffset）が PNG マジックなら、ディレクトリの 8bit 寸法ではなく
+/// 埋め込み PNG の IHDR（PNG 先頭 +16 に width u32 BE, +20 に height u32 BE）から真の寸法を読む
+/// （PNG は 256 超を表現できるため、8bit フィールドだけでは小寸法に偽装される）。
+///
+/// 壊れ/細工 ICO（count=0、エントリ配列やオフセット/IHDR がバッファ外、不整合）は寸法を信頼できないので
+/// `None` を返す（呼び出し側 `check_image_bytes` が Block＝#24 fail-closed 方針）。配列範囲外で panic しない。
+fn ico_dimensions(b: &[u8]) -> Option<(u64, u64)> {
+    const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    const DIR_HEADER: usize = 6; // ICONDIR ヘッダ長
+    const ENTRY_SIZE: usize = 16; // ICONDIRENTRY 長
+
+    let count = le_u16(b.get(4..6)?)? as usize;
+    if count == 0 {
+        return None; // エントリ無し＝寸法を信頼できない。
+    }
+    // エントリ配列がバッファ内に収まることを先に確認する（範囲外読みの防止）。
+    let entries_end = DIR_HEADER.checked_add(count.checked_mul(ENTRY_SIZE)?)?;
+    if entries_end > b.len() {
+        return None; // count 過大でバッファ長不足。
+    }
+
+    let mut best: Option<(u64, u64)> = None;
+    for i in 0..count {
+        let entry = DIR_HEADER + i * ENTRY_SIZE;
+        let w8 = *b.get(entry)?;
+        let h8 = *b.get(entry + 1)?;
+        let image_offset = le_u32(b.get(entry + 12..entry + 16)?)? as usize;
+
+        // データ先頭が PNG マジックなら IHDR から真寸法を読む（256 超を表現できる）。
+        let png_data = b.get(image_offset..);
+        let (w, h) = if png_data.is_some_and(|d| d.starts_with(&PNG_MAGIC)) {
+            // IHDR: PNG 先頭 +16 width u32 BE, +20 height u32 BE。範囲外/オーバーフローなら壊れ＝None。
+            let w_at = image_offset.checked_add(16)?;
+            let h_at = image_offset.checked_add(20)?;
+            let pw = be_u32(b.get(w_at..w_at.checked_add(4)?)?)? as u64;
+            let ph = be_u32(b.get(h_at..h_at.checked_add(4)?)?)? as u64;
+            (pw, ph)
+        } else {
+            // ディレクトリの 8bit 寸法（0 は 256 を意味する ICO 仕様）。
+            let w = if w8 == 0 { 256u64 } else { w8 as u64 };
+            let h = if h8 == 0 { 256u64 } else { h8 as u64 };
+            (w, h)
+        };
+
+        if best.is_none_or(|(bw, bh)| w.saturating_mul(h) > bw.saturating_mul(bh)) {
+            best = Some((w, h));
+        }
+    }
+    best
 }
 
 fn webp_dimensions(b: &[u8]) -> Option<(u64, u64)> {
@@ -478,7 +530,9 @@ mod tests {
         b.extend_from_slice(&1u16.to_le_bytes()); // count=1
         b.push(w8); // ICONDIRENTRY.width（オフセット6）
         b.push(h8); // ICONDIRENTRY.height（オフセット7）
-        b.extend_from_slice(&[0u8; 8]); // 残りの ICONDIRENTRY フィールド
+                    // ICONDIRENTRY 残り 14 バイト（colorCount/reserved/planes/bitCount/bytesInRes/imageOffset）。
+                    // imageOffset=0 とし PNG マジックには一致させない（ディレクトリ 8bit 寸法を使わせる）。
+        b.extend_from_slice(&[0u8; 14]);
         b
     }
 
@@ -498,6 +552,95 @@ mod tests {
         let b = ico_header(0, 0);
         assert_eq!(image_dimensions(&b), Some((256, 256)));
         assert!(check_image_bytes(&b, DEFAULT_IMAGE_MAX_PIXELS).is_allowed());
+    }
+
+    /// 任意エントリ数の ICO を組み立てる。各タプルは (8bit width, 8bit height, imageOffset, imageData)。
+    /// imageData は imageOffset 位置に配置する（PNG 埋め込みなどの細工に使う）。
+    fn ico_multi(entries: &[(u8, u8, u32, Vec<u8>)]) -> Vec<u8> {
+        let count = entries.len() as u16;
+        let mut b = vec![0x00, 0x00, 0x01, 0x00];
+        b.extend_from_slice(&count.to_le_bytes());
+        for (w8, h8, off, _) in entries {
+            b.push(*w8);
+            b.push(*h8);
+            b.extend_from_slice(&[0u8; 6]); // colorCount/reserved/planes/bitCount
+            b.extend_from_slice(&0u32.to_le_bytes()); // bytesInRes（寸法判定には未使用）
+            b.extend_from_slice(&off.to_le_bytes()); // imageOffset
+        }
+        for (_, _, off, data) in entries {
+            let off = *off as usize;
+            if off >= b.len() && !data.is_empty() {
+                b.resize(off, 0);
+                b.extend_from_slice(data);
+            }
+        }
+        b
+    }
+
+    /// 埋め込み用 PNG（IHDR の width/height のみ妥当・残りはダミー）を作る。
+    fn png_with_dims(w: u32, h: u32) -> Vec<u8> {
+        let mut p = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        p.extend_from_slice(&0u32.to_be_bytes()); // IHDR 長（未使用）
+        p.extend_from_slice(b"IHDR");
+        p.extend_from_slice(&w.to_be_bytes()); // +16 width BE
+        p.extend_from_slice(&h.to_be_bytes()); // +20 height BE
+        p
+    }
+
+    #[test]
+    fn ico_多重エントリは最大寸法を採る() {
+        // 先頭は小寸法（16x16）、後続にディレクトリ寸法 256x256 を持たせる。最大が採られること。
+        let b = ico_multi(&[(16, 16, 0, vec![]), (0, 0, 0, vec![])]); // 0=>256
+        assert_eq!(image_dimensions(&b), Some((256, 256)));
+    }
+
+    #[test]
+    fn ico_後続のpng埋め込み巨大画像はブロックする() {
+        // 先頭は小寸法だが、後続エントリのデータが 20000x20000 の PNG。真寸法を採って Block。
+        let png = png_with_dims(20000, 20000);
+        let b = ico_multi(&[(16, 16, 0, vec![]), (16, 16, 100, png)]);
+        let d = image_dimensions(&b);
+        assert_eq!(
+            d,
+            Some((20000, 20000)),
+            "PNG IHDR の真寸法が採られない: {d:?}"
+        );
+        let dec = check_image_bytes(&b, DEFAULT_IMAGE_MAX_PIXELS);
+        assert!(
+            !dec.is_allowed(),
+            "巨大 PNG 埋め込み ICO がブロックされない: {dec:?}"
+        );
+    }
+
+    #[test]
+    fn ico_壊れ入力はnoneでブロックしパニックしない() {
+        // count 過大でエントリ配列がバッファ外。
+        let mut over = vec![0x00, 0x00, 0x01, 0x00];
+        over.extend_from_slice(&9999u16.to_le_bytes()); // count=9999 だが本体なし
+        assert_eq!(image_dimensions(&over), None);
+
+        // imageOffset がバッファ外（PNG マジック判定もできない）→ 8bit 寸法にフォールバック（壊れではない）。
+        // ここでは imageOffset が PNG マジックを指すが IHDR が欠落しているケースを検証する。
+        let mut trunc = png_with_dims(20000, 20000);
+        trunc.truncate(8 + 4 + 4 + 2); // IHDR の width 途中で切る
+        let b = ico_multi(&[(16, 16, 100, trunc)]);
+        assert_eq!(image_dimensions(&b), None, "IHDR 欠落で None にならない");
+
+        // count=0。
+        let mut zero = vec![0x00, 0x00, 0x01, 0x00];
+        zero.extend_from_slice(&0u16.to_le_bytes());
+        assert_eq!(image_dimensions(&zero), None);
+
+        // 大量データで panic しないこと（範囲外アクセス回帰）。
+        let mut huge_off = vec![0x00, 0x00, 0x01, 0x00];
+        huge_off.extend_from_slice(&1u16.to_le_bytes());
+        huge_off.push(16);
+        huge_off.push(16);
+        huge_off.extend_from_slice(&[0u8; 6]);
+        huge_off.extend_from_slice(&0u32.to_le_bytes());
+        huge_off.extend_from_slice(&u32::MAX.to_le_bytes()); // imageOffset=u32::MAX
+                                                             // PNG マジックには一致しないので 8bit 寸法 16x16 を採る（panic しないことが主眼）。
+        assert_eq!(image_dimensions(&huge_off), Some((16, 16)));
     }
 
     #[test]
