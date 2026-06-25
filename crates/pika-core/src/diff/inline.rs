@@ -10,6 +10,17 @@
 use similar::{capture_diff_slices, Algorithm, ChangeTag};
 use unicode_segmentation::UnicodeSegmentation;
 
+/// 行内差分を付ける 1 行あたりの最大 grapheme 数（#39・UIスレッド予算 200ms 保護）。
+///
+/// 改行のない巨大行（minified JSON/CSS/長い1行ログ等）が置換ペアになると、grapheme 数 N の行内 LCS は
+/// 編集距離 D に対し O(N·D) で、N が数十万を超えると UIスレッドの描画予算（200ms＝design doc 1章「固まらない」）
+/// を脅かす。旧/新いずれかがこの閾値を超える行ペアは行内セグメントを付けず、行単位の add/del（純粋な
+/// 追加/削除）に倒す（差分は出るが語/文字単位の強調を諦める＝固まらない方を優先）。
+///
+/// 閾値の根拠: 通常のソース/Markdown の 1 行はせいぜい数百〜数千 grapheme。2 万を超える行は minified/巨大行で
+/// 行内強調の有用性が低い一方で計算が膨らむため、ここで打ち切る（誤って通常行を捨てない十分な余裕を取る）。
+pub const MAX_INTRALINE_GRAPHEMES: usize = 20_000;
+
 /// 行内差分の粒度（観測可能にしてテストで語/grapheme フォールバックを検証する）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Granularity {
@@ -71,6 +82,17 @@ fn pick_granularity(old: &str, new: &str) -> Granularity {
 /// 内部の空白で 2 つ以上のトークンに割れるか（前後 trim 後に空白を含むか）。
 fn has_word_boundary(s: &str) -> bool {
     s.split_whitespace().count() >= 2
+}
+
+/// 行内差分を付けるには大きすぎる行ペアか（#39・O(N·D) 爆発回避）。
+///
+/// 旧/新いずれかの grapheme 数が [`MAX_INTRALINE_GRAPHEMES`] を超えるなら `true`。呼び出し側
+/// （[`crate::diff::line`]）はこのとき行内セグメントを付けず純粋な追加/削除に倒す（固まらない）。
+/// grapheme 数の計上は [`MAX_INTRALINE_GRAPHEMES`] + 1 で打ち切り、巨大行でも数え上げ自体が重くならない。
+pub fn intraline_too_large(old: &str, new: &str) -> bool {
+    let cap = MAX_INTRALINE_GRAPHEMES + 1;
+    old.graphemes(true).take(cap).count() > MAX_INTRALINE_GRAPHEMES
+        || new.graphemes(true).take(cap).count() > MAX_INTRALINE_GRAPHEMES
 }
 
 /// 行を粒度に応じたトークン列へ割る。
@@ -197,6 +219,27 @@ mod tests {
         assert_eq!(rebuilt, "alpha BETA gamma");
         let old_rebuilt: String = r.old_segments.iter().map(|s| s.text.clone()).collect();
         assert_eq!(old_rebuilt, "alpha beta gamma");
+    }
+
+    #[test]
+    fn 巨大行ペアは行内差分対象外と判定する() {
+        // #39: 旧/新いずれかが閾値超なら行内差分を付けない（O(N·D) 爆発回避）。
+        let big = "a".repeat(MAX_INTRALINE_GRAPHEMES + 1);
+        let small = "b".repeat(10);
+        assert!(
+            intraline_too_large(&big, &small),
+            "旧が巨大なのに対象内判定"
+        );
+        assert!(
+            intraline_too_large(&small, &big),
+            "新が巨大なのに対象内判定"
+        );
+        // 閾値ちょうど（境界）は対象内。
+        let edge = "c".repeat(MAX_INTRALINE_GRAPHEMES);
+        assert!(
+            !intraline_too_large(&edge, &edge),
+            "閾値ちょうどを対象外にした"
+        );
     }
 
     #[test]

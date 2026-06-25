@@ -128,6 +128,11 @@ struct PreviewInner {
 }
 
 /// 1 プレビュー文書の保持データ（custom protocol が配信する素材）。
+///
+/// `Clone` 実装は #19 のため: custom protocol ハンドラが `inner` ロックを保持したまま FS I/O
+/// （canonicalize+read）を行うと、配信中に prepare_preview 等の他操作がロック待ちで詰まる。
+/// 必要素材を clone してから `drop(inner)` で早期解放し、I/O はロック外で行う。
+#[derive(Clone)]
 struct PreparedDoc {
     /// サニタイズ済み HTML＋CSP＋nonce（pika-core::render の成果）。
     /// オプトイン外部許可は CSP（`response.csp`）に既に織り込み済み（design doc 6章）。
@@ -302,6 +307,13 @@ pub fn show_preview(
     h: f64,
     url: String,
 ) -> Result<(), String> {
+    // #6: ナビゲート先は custom protocol 実体（pika-preview.localhost）の URL のみ許可する。
+    // frontend からの値は信頼せず、接頭辞検証で任意 URL（外部サイト等）への誘導を塞ぐ
+    // （prepare_preview が返す URL は必ずこの接頭辞で始まるため正当フローは通る）。
+    const ALLOWED_PREFIX: &str = "http://pika-preview.localhost/";
+    if !url.starts_with(ALLOWED_PREFIX) {
+        return Err("プレビューURLが不正です".into());
+    }
     let webview = app
         .get_webview(PREVIEW_WEBVIEW_LABEL)
         .ok_or("プレビュー別WebView 未生成")?;
@@ -386,10 +398,12 @@ pub fn handle_preview_request(
         let Ok(generation) = rest.trim_end_matches('/').parse::<u64>() else {
             return error_response(StatusCode::BAD_REQUEST, "不正な世代");
         };
-        let Some(doc) = inner.documents.get(&generation) else {
+        let Some(doc) = inner.documents.get(&generation).cloned() else {
             return error_response(StatusCode::NOT_FOUND, "プレビュー素材なし（世代失効）");
         };
-        return document_response(doc);
+        // #19: 必要素材を clone 済み。ロックを解放してから応答組立（FS I/O は無いが一貫させる）。
+        drop(inner);
+        return document_response(&doc);
     }
 
     // /assets/<相対パス> — exe 埋め込みの同梱ベンダーアセット（Mermaid/KaTeX/highlight・フォント・CSS）。
@@ -408,10 +422,13 @@ pub fn handle_preview_request(
         let Ok(generation) = gen_str.parse::<u64>() else {
             return error_response(StatusCode::BAD_REQUEST, "不正な世代");
         };
-        let Some(doc) = inner.documents.get(&generation) else {
+        let Some(doc) = inner.documents.get(&generation).cloned() else {
             return error_response(StatusCode::NOT_FOUND, "プレビュー素材なし（世代失効）");
         };
-        return local_resource_response(doc, reference);
+        // #19: doc を clone 済み。ロックを解放してから canonicalize+read（FS I/O）を行う
+        // （ロック保持のまま FS I/O すると他の preview 操作が詰まるため）。
+        drop(inner);
+        return local_resource_response(&doc, reference);
     }
 
     error_response(StatusCode::NOT_FOUND, "不明な経路")
@@ -492,10 +509,28 @@ fn local_resource_response(doc: &PreparedDoc, reference: &str) -> Response<Vec<u
         );
     }
 
-    Response::builder()
+    // 同一 WebView セッション内で繰り返し読まれるプレビュー素材へ控えめなキャッシュを効かせる（#53）。
+    // Range 非対応（プレビュー画像/CSS にシークは不要＝scope 外。実機での挙動確認は系統C）。
+    // 条件付き応答（304・If-None-Match 突合）は実装しない（シグネチャ非変更・max-age で十分）。
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header("X-Content-Type-Options", "nosniff")
+        // 5 分（控えめ）。素材は同一セッション内で繰り返し読まれる。
+        .header(header::CACHE_CONTROL, "max-age=300");
+    // mtime+サイズから弱い実体タグを付ける。取得失敗時は ETag を省略する（Cache-Control だけ付く）。
+    if let Ok(meta) = std::fs::metadata(&resolved) {
+        let size = meta.len();
+        if let Some(mtime_ms) = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis())
+        {
+            builder = builder.header(header::ETAG, format!("\"{mtime_ms:x}-{size:x}\""));
+        }
+    }
+    builder
         .body(bytes)
         .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "応答組立失敗"))
 }

@@ -11,6 +11,8 @@
 //   - disabled は **メニューを開いた時点で都度計算**して .mrow に反映する（aria-disabled＋クリック無効）。
 //   - a11y: menubar/menuitem/menu の role、aria-haspopup/aria-expanded、←/→（メニューバー）・
 //     ↑/↓（ドロップダウン）・Enter 実行・Esc 閉じる、を実装する（要件11.5）。
+//     さらに menubar パターンの **roving tabindex**（Tab は menubar へ 1 度だけ入り、内部移動は ←/→）
+//     を実装し、ARIA role(menubar/menuitem) の宣言と実挙動を一致させる（eval #31）。
 //
 // メニュー定義は **開くたびに評価する関数（build）** にして、checked/disabled/サブ表記（acc）が
 // その時点の state を反映できるようにする（main.ts は state を参照する build を渡す）。
@@ -69,6 +71,17 @@ export function initMenuBar(
   // 現在開いているメニューの data-menu（閉じているとき null）。
   let openId: string | null = null;
 
+  /**
+   * roving tabindex（menubar パターン・要件11.5）。menubar は Tab で 1 度だけ入り、内部移動は ←/→ で
+   * 行う。そのため「いま入口になっている 1 個」だけ tabindex=0、他は -1 にする。←/→ で focus を移す際に
+   * これも更新し、最後にフォーカスした .mi が次回 Tab の入口になるようにする。
+   */
+  function setRoving(active: HTMLElement): void {
+    for (const t of triggers) t.tabIndex = t === active ? 0 : -1;
+  }
+  // 初期入口は先頭の .mi（無ければ何もしない）。
+  if (triggers.length > 0) setRoving(triggers[0]);
+
   /** トリガ(.mi)の aria-expanded を実状態へ同期する。 */
   function syncExpanded(): void {
     for (const t of triggers) {
@@ -126,11 +139,13 @@ export function initMenuBar(
     if (e.key === "ArrowRight") {
       e.preventDefault();
       const next = triggers[(idx + 1) % triggers.length];
+      setRoving(next); // 次回 Tab の入口を移す（roving tabindex・要件11.5）。
       next.focus();
       if (openId !== null) open(next.dataset.menu ?? "");
     } else if (e.key === "ArrowLeft") {
       e.preventDefault();
       const prev = triggers[(idx - 1 + triggers.length) % triggers.length];
+      setRoving(prev);
       prev.focus();
       if (openId !== null) open(prev.dataset.menu ?? "");
     } else if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
@@ -141,10 +156,16 @@ export function initMenuBar(
     }
   }
 
+  // クリック等でトリガにフォーカスが入ったら、それを roving の入口にする（次回 Tab 復帰位置の整合）。
+  function onTriggerFocus(e: FocusEvent): void {
+    setRoving(e.currentTarget as HTMLElement);
+  }
+
   for (const t of triggers) {
     t.addEventListener("click", onTriggerClick);
     t.addEventListener("mouseenter", onTriggerHover);
     t.addEventListener("keydown", onTriggerKey);
+    t.addEventListener("focus", onTriggerFocus);
   }
 
   // 外側クリックで閉じる（メニューバー/ドロップダウン外をクリックしたとき）。
@@ -180,6 +201,7 @@ export function initMenuBar(
         t.removeEventListener("click", onTriggerClick);
         t.removeEventListener("mouseenter", onTriggerHover);
         t.removeEventListener("keydown", onTriggerKey);
+        t.removeEventListener("focus", onTriggerFocus);
       }
     },
   };

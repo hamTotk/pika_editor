@@ -39,6 +39,9 @@ pub enum BlockReason {
     SvgPixels { pixels: u64, limit: u64 },
     /// SVG の要素数が上限超過。
     SvgElements { elements: u64, limit: u64 },
+    /// 画像ヘッダから寸法を判定できなかった（壊れ/細工/未知形式）。
+    /// 配信前ガードは fail-closed でブロックし「既定アプリで開く」へ誘導する（#24・nontext と統一）。
+    ImageDimensionsUnknown,
 }
 
 impl GuardDecision {
@@ -98,13 +101,17 @@ pub fn has_long_line(text: &str, limit_chars: usize) -> bool {
 /// デコードでメモリ/CPU が爆発し UI が固まる（設計原則「固まらない」違反）ため、**配信前に**
 /// ヘッダの width/height だけ読んで [`check_image_pixels`] で弾く（フルデコードしない）。
 ///
-/// 対応フォーマット（ヘッダ寸法を取れるもの）: PNG / GIF / JPEG / BMP / WebP(VP8/VP8L/VP8X)。
-/// 寸法を判定できない形式（SVG は [`check_svg_bytes`] 側）は安全側で [`GuardDecision::Allow`]
-/// （寸法不明＝ラスタでない/小さい想定。誤ブロックよりは通す。実消費は WebView 側で頭打ち）。
+/// 対応フォーマット（ヘッダ寸法を取れるもの）: PNG / GIF / JPEG / BMP / WebP(VP8/VP8L/VP8X) / ICO。
+///
+/// **寸法不明時の既定（#24・fail-closed）**: ヘッダから width/height を判定できない（壊れ/細工/未知形式）
+/// 場合は [`GuardDecision::Block`]（[`BlockReason::ImageDimensionsUnknown`]）でブロックし「既定アプリで開く」へ
+/// 誘導する。配信前ガードは「寸法不明＝デコード爆発の危険を否定できない」として**危険側でなく安全側
+/// （ブロック寄り）に倒す**。これは [`crate::nontext::decide_image_open`] の寸法不明時方針（外部誘導）と統一する
+/// （以前は guard=Allow（危険側）/nontext=外部誘導（安全側）で割れていた）。
 pub fn check_image_bytes(bytes: &[u8], pixel_limit: u64) -> GuardDecision {
     match image_dimensions(bytes) {
         Some((w, h)) => check_image_pixels(w, h, pixel_limit),
-        None => GuardDecision::Allow,
+        None => GuardDecision::Block(BlockReason::ImageDimensionsUnknown),
     }
 }
 
@@ -148,7 +155,73 @@ fn image_dimensions(b: &[u8]) -> Option<(u64, u64)> {
     if b.len() >= 4 && b[0] == 0xff && b[1] == 0xd8 {
         return jpeg_dimensions(b);
     }
+    // ICO/CUR: reserved(2)=0 + type(2,LE)=1(ICO)/2(CUR) + count(2,LE)。
+    // 全 ICONDIRENTRY を走査して最大の width*height を採る。要件の `.ico`（favicon 等）が
+    // `image_dimensions` で None になり配信前ガードで誤ブロックされる回帰を防ぐ（#24 の None=>Block は維持）。
+    if b.len() >= 6
+        && b[0] == 0x00
+        && b[1] == 0x00
+        && (b[2] == 0x01 || b[2] == 0x02)
+        && b[3] == 0x00
+    {
+        return ico_dimensions(b);
+    }
     None
+}
+
+/// ICO/CUR の全 ICONDIRENTRY を走査し、最大の (width, height) を返す。
+///
+/// 各 ICONDIRENTRY は先頭オフセット6から 16 バイト固定:
+/// +0 width(1, 0=256) / +1 height(1, 0=256) / +8 bytesInRes(4,LE) / +12 imageOffset(4,LE)。
+/// エントリのデータ先頭（imageOffset）が PNG マジックなら、ディレクトリの 8bit 寸法ではなく
+/// 埋め込み PNG の IHDR（PNG 先頭 +16 に width u32 BE, +20 に height u32 BE）から真の寸法を読む
+/// （PNG は 256 超を表現できるため、8bit フィールドだけでは小寸法に偽装される）。
+///
+/// 壊れ/細工 ICO（count=0、エントリ配列やオフセット/IHDR がバッファ外、不整合）は寸法を信頼できないので
+/// `None` を返す（呼び出し側 `check_image_bytes` が Block＝#24 fail-closed 方針）。配列範囲外で panic しない。
+fn ico_dimensions(b: &[u8]) -> Option<(u64, u64)> {
+    const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    const DIR_HEADER: usize = 6; // ICONDIR ヘッダ長
+    const ENTRY_SIZE: usize = 16; // ICONDIRENTRY 長
+
+    let count = le_u16(b.get(4..6)?)? as usize;
+    if count == 0 {
+        return None; // エントリ無し＝寸法を信頼できない。
+    }
+    // エントリ配列がバッファ内に収まることを先に確認する（範囲外読みの防止）。
+    let entries_end = DIR_HEADER.checked_add(count.checked_mul(ENTRY_SIZE)?)?;
+    if entries_end > b.len() {
+        return None; // count 過大でバッファ長不足。
+    }
+
+    let mut best: Option<(u64, u64)> = None;
+    for i in 0..count {
+        let entry = DIR_HEADER + i * ENTRY_SIZE;
+        let w8 = *b.get(entry)?;
+        let h8 = *b.get(entry + 1)?;
+        let image_offset = le_u32(b.get(entry + 12..entry + 16)?)? as usize;
+
+        // データ先頭が PNG マジックなら IHDR から真寸法を読む（256 超を表現できる）。
+        let png_data = b.get(image_offset..);
+        let (w, h) = if png_data.is_some_and(|d| d.starts_with(&PNG_MAGIC)) {
+            // IHDR: PNG 先頭 +16 width u32 BE, +20 height u32 BE。範囲外/オーバーフローなら壊れ＝None。
+            let w_at = image_offset.checked_add(16)?;
+            let h_at = image_offset.checked_add(20)?;
+            let pw = be_u32(b.get(w_at..w_at.checked_add(4)?)?)? as u64;
+            let ph = be_u32(b.get(h_at..h_at.checked_add(4)?)?)? as u64;
+            (pw, ph)
+        } else {
+            // ディレクトリの 8bit 寸法（0 は 256 を意味する ICO 仕様）。
+            let w = if w8 == 0 { 256u64 } else { w8 as u64 };
+            let h = if h8 == 0 { 256u64 } else { h8 as u64 };
+            (w, h)
+        };
+
+        if best.is_none_or(|(bw, bh)| w.saturating_mul(h) > bw.saturating_mul(bh)) {
+            best = Some((w, h));
+        }
+    }
+    best
 }
 
 fn webp_dimensions(b: &[u8]) -> Option<(u64, u64)> {
@@ -202,6 +275,13 @@ fn jpeg_dimensions(b: &[u8]) -> Option<(u64, u64)> {
             continue;
         }
         let len = be_u16(&b[i + 2..i + 4])? as usize;
+        // セグメント長は長さフィールド自身の 2 バイトを含む＝最小 2（JPEG 仕様）。
+        // `len < 2` は仕様違反の壊れ/細工 JPEG。前進量 `2 + len` が進まず無限ループ/誤読の温床になるため
+        // 走査を**即打ち切る**（None を返す＝寸法不明）。寸法不明時の既定は配信前ガードでブロック寄りに倒す
+        // （[`check_image_bytes`] の方針・#24・nontext::decide_image_open と統一）。
+        if len < 2 {
+            return None;
+        }
         // SOF0..SOF15（0xc0..0xcf）から DHT(0xc4)/DAC(0xcc)/JPG(0xc8) を除く＝実際の SOF。
         if (0xc0..=0xcf).contains(&marker) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
             // SOF: [len(2)][precision(1)][height(2)][width(2)]...
@@ -217,8 +297,13 @@ fn jpeg_dimensions(b: &[u8]) -> Option<(u64, u64)> {
     None
 }
 
-/// SVG の要素数（開きタグの数）を数える。コメント/属性値内の `<` は素朴には拾わないため、
-/// `<` の直後が英字（要素名開始）または `/`（閉じタグ）を起点に数える簡易計数。
+/// SVG の要素数（開始タグの数）を数える。コメント/属性値内の `<` は素朴には拾わないため、
+/// `<` の直後が英字（要素名開始）の出現を数える簡易計数。
+///
+/// 注記（#43・厳密化は不要）: **開始タグのみ計数**する（閉じタグ `</`・コメント `<!`・処理命令 `<?` は数えない）。
+/// 自己終了要素（`<rect/>`）も開始タグ 1 つとして数えるため、実際の要素数を厳密に反映するわけではないが、
+/// 計上は常に過小ではなく実要素数の近似（過検出側＝誤ブロックは低確率で安全側）に倒れる。要素数上限の
+/// 目的は暴走の早期遮断であり、厳密な要素計数は不要なため簡易計数のままとする。
 fn count_svg_elements(text: &str) -> u64 {
     let bytes = text.as_bytes();
     let mut count = 0u64;
@@ -438,10 +523,147 @@ mod tests {
         assert!(!d.is_allowed(), "JPEG 7000万px がブロックされない: {d:?}");
     }
 
+    /// ICO ヘッダ（ICONDIR + 先頭 ICONDIRENTRY の width/height）を組み立てる。
+    /// `w8`/`h8` は 8bit フィールド値（0 は 256 を意味する ICO 仕様）。
+    fn ico_header(w8: u8, h8: u8) -> Vec<u8> {
+        let mut b = vec![0x00, 0x00, 0x01, 0x00]; // reserved=0, type=1(ICO)
+        b.extend_from_slice(&1u16.to_le_bytes()); // count=1
+        b.push(w8); // ICONDIRENTRY.width（オフセット6）
+        b.push(h8); // ICONDIRENTRY.height（オフセット7）
+                    // ICONDIRENTRY 残り 14 バイト（colorCount/reserved/planes/bitCount/bytesInRes/imageOffset）。
+                    // imageOffset=0 とし PNG マジックには一致させない（ディレクトリ 8bit 寸法を使わせる）。
+        b.extend_from_slice(&[0u8; 14]);
+        b
+    }
+
     #[test]
-    fn 寸法不明の画像は安全側で許可する() {
-        // マジック不一致（テキスト等）は寸法不明＝Allow（誤ブロックしない）。
-        assert!(check_image_bytes(b"not an image", DEFAULT_IMAGE_MAX_PIXELS).is_allowed());
+    fn ico_ヘッダから寸法を読み小寸法は許可する() {
+        // #24 の回帰修正: ICO（favicon 等）が image_dimensions で None になり配信前ガードで
+        // 誤ブロックされていた。16x16 の ICO は寸法を読めて Allow になること。
+        let b = ico_header(16, 16);
+        assert_eq!(image_dimensions(&b), Some((16, 16)));
+        let d = check_image_bytes(&b, DEFAULT_IMAGE_MAX_PIXELS);
+        assert!(d.is_allowed(), "小寸法 ICO がブロックされた: {d:?}");
+    }
+
+    #[test]
+    fn ico_の0サイズフィールドは256として扱う() {
+        // ICO 仕様: width/height の 8bit フィールドが 0 のときは 256。
+        let b = ico_header(0, 0);
+        assert_eq!(image_dimensions(&b), Some((256, 256)));
+        assert!(check_image_bytes(&b, DEFAULT_IMAGE_MAX_PIXELS).is_allowed());
+    }
+
+    /// 任意エントリ数の ICO を組み立てる。各タプルは (8bit width, 8bit height, imageOffset, imageData)。
+    /// imageData は imageOffset 位置に配置する（PNG 埋め込みなどの細工に使う）。
+    fn ico_multi(entries: &[(u8, u8, u32, Vec<u8>)]) -> Vec<u8> {
+        let count = entries.len() as u16;
+        let mut b = vec![0x00, 0x00, 0x01, 0x00];
+        b.extend_from_slice(&count.to_le_bytes());
+        for (w8, h8, off, _) in entries {
+            b.push(*w8);
+            b.push(*h8);
+            b.extend_from_slice(&[0u8; 6]); // colorCount/reserved/planes/bitCount
+            b.extend_from_slice(&0u32.to_le_bytes()); // bytesInRes（寸法判定には未使用）
+            b.extend_from_slice(&off.to_le_bytes()); // imageOffset
+        }
+        for (_, _, off, data) in entries {
+            let off = *off as usize;
+            if off >= b.len() && !data.is_empty() {
+                b.resize(off, 0);
+                b.extend_from_slice(data);
+            }
+        }
+        b
+    }
+
+    /// 埋め込み用 PNG（IHDR の width/height のみ妥当・残りはダミー）を作る。
+    fn png_with_dims(w: u32, h: u32) -> Vec<u8> {
+        let mut p = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        p.extend_from_slice(&0u32.to_be_bytes()); // IHDR 長（未使用）
+        p.extend_from_slice(b"IHDR");
+        p.extend_from_slice(&w.to_be_bytes()); // +16 width BE
+        p.extend_from_slice(&h.to_be_bytes()); // +20 height BE
+        p
+    }
+
+    #[test]
+    fn ico_多重エントリは最大寸法を採る() {
+        // 先頭は小寸法（16x16）、後続にディレクトリ寸法 256x256 を持たせる。最大が採られること。
+        let b = ico_multi(&[(16, 16, 0, vec![]), (0, 0, 0, vec![])]); // 0=>256
+        assert_eq!(image_dimensions(&b), Some((256, 256)));
+    }
+
+    #[test]
+    fn ico_後続のpng埋め込み巨大画像はブロックする() {
+        // 先頭は小寸法だが、後続エントリのデータが 20000x20000 の PNG。真寸法を採って Block。
+        let png = png_with_dims(20000, 20000);
+        let b = ico_multi(&[(16, 16, 0, vec![]), (16, 16, 100, png)]);
+        let d = image_dimensions(&b);
+        assert_eq!(
+            d,
+            Some((20000, 20000)),
+            "PNG IHDR の真寸法が採られない: {d:?}"
+        );
+        let dec = check_image_bytes(&b, DEFAULT_IMAGE_MAX_PIXELS);
+        assert!(
+            !dec.is_allowed(),
+            "巨大 PNG 埋め込み ICO がブロックされない: {dec:?}"
+        );
+    }
+
+    #[test]
+    fn ico_壊れ入力はnoneでブロックしパニックしない() {
+        // count 過大でエントリ配列がバッファ外。
+        let mut over = vec![0x00, 0x00, 0x01, 0x00];
+        over.extend_from_slice(&9999u16.to_le_bytes()); // count=9999 だが本体なし
+        assert_eq!(image_dimensions(&over), None);
+
+        // imageOffset がバッファ外（PNG マジック判定もできない）→ 8bit 寸法にフォールバック（壊れではない）。
+        // ここでは imageOffset が PNG マジックを指すが IHDR が欠落しているケースを検証する。
+        let mut trunc = png_with_dims(20000, 20000);
+        trunc.truncate(8 + 4 + 4 + 2); // IHDR の width 途中で切る
+        let b = ico_multi(&[(16, 16, 100, trunc)]);
+        assert_eq!(image_dimensions(&b), None, "IHDR 欠落で None にならない");
+
+        // count=0。
+        let mut zero = vec![0x00, 0x00, 0x01, 0x00];
+        zero.extend_from_slice(&0u16.to_le_bytes());
+        assert_eq!(image_dimensions(&zero), None);
+
+        // 大量データで panic しないこと（範囲外アクセス回帰）。
+        let mut huge_off = vec![0x00, 0x00, 0x01, 0x00];
+        huge_off.extend_from_slice(&1u16.to_le_bytes());
+        huge_off.push(16);
+        huge_off.push(16);
+        huge_off.extend_from_slice(&[0u8; 6]);
+        huge_off.extend_from_slice(&0u32.to_le_bytes());
+        huge_off.extend_from_slice(&u32::MAX.to_le_bytes()); // imageOffset=u32::MAX
+                                                             // PNG マジックには一致しないので 8bit 寸法 16x16 を採る（panic しないことが主眼）。
+        assert_eq!(image_dimensions(&huge_off), Some((16, 16)));
+    }
+
+    #[test]
+    fn 寸法不明の画像はfail_closedでブロックする() {
+        // #24: ヘッダから寸法を取れない（マジック不一致/壊れ/細工）画像は配信前ガードでブロックし
+        // 「既定アプリで開く」へ誘導する（nontext::decide_image_open の寸法不明時方針と統一）。
+        let d = check_image_bytes(b"not an image", DEFAULT_IMAGE_MAX_PIXELS);
+        assert_eq!(d, GuardDecision::Block(BlockReason::ImageDimensionsUnknown));
+    }
+
+    #[test]
+    fn jpeg_の不正なセグメント長は走査を打ち切りブロックする() {
+        // #24: len < 2 は JPEG 仕様違反（長さフィールド 2 バイトを含むため最小 2）。
+        // SOF を見つけられず寸法不明＝fail-closed でブロックする（無限ループ/誤読を防ぐ）。
+        let mut b = vec![0xff, 0xd8]; // SOI
+        b.extend_from_slice(&[0xff, 0xe0, 0x00, 0x00]); // APP0 だが len=0（不正・< 2）
+        b.extend_from_slice(&[0u8; 16]);
+        let d = check_image_bytes(&b, DEFAULT_IMAGE_MAX_PIXELS);
+        assert_eq!(
+            d,
+            GuardDecision::Block(BlockReason::ImageDimensionsUnknown),
+            "不正セグメント長 JPEG が寸法不明（ブロック）にならない: {d:?}"
+        );
     }
 
     #[test]

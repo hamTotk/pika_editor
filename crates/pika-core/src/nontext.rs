@@ -69,6 +69,10 @@ pub enum ImageOpenDecision {
 ///
 /// - `dims`: ヘッダから取得した `(width, height)`。取得できなければ `None`。
 /// - 総ピクセル数が [`MAX_IMAGE_PIXELS`] を**超える**ならデコードせず外部誘導（デコード爆発回避）。
+/// - **寸法不明時の既定（#24・fail-closed で統一）**: `None`（壊れ/細工/未知形式）は
+///   [`ImageOpenDecision::DimensionsUnknown`]＝デコードせず「既定アプリで開く」へ誘導する（安全側）。
+///   配信前ガード [`crate::render::guard::check_image_bytes`] も寸法不明を Block（外部誘導）に倒し、
+///   本関数と方針を揃えている（以前は guard=Allow（危険側）で割れていた）。
 pub fn decide_image_open(dims: Option<(u32, u32)>) -> ImageOpenDecision {
     match dims {
         None => ImageOpenDecision::DimensionsUnknown,

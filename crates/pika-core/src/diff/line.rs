@@ -5,50 +5,20 @@
 //! 置換ブロック（削除直後に追加が続く塊）の行ペアには行内差分セグメント（[`crate::diff::inline`]）を
 //! 付け、フロントが変更語/grapheme を下線/太字で強調できるようにする（色非依存＝要件8.2/11.5）。
 
-use crate::diff::inline::{intra_line_segments, Segment};
+use crate::diff::inline::{intra_line_segments, intraline_too_large, Segment};
 use similar::{Algorithm, ChangeTag, TextDiff};
 
 /// 改行コードを LF へ正規化する（CRLF/CR → LF）。
 ///
 /// 未読判定・差分照合はいずれも LF 正規化後の内容で行う（要件8.1）。
 /// 改行のみの差を差分に出さないための前段。保存内容そのものは別途原文の改行を維持する。
+/// LF 正規化の本体は [`crate::hashing::normalize_lf_bytes`] に集約（#40・出力不変）。
+/// CR/LF は ASCII で UTF-8 継続バイトと衝突しないため、バイト正規化でも UTF-8 妥当性は保たれる
+/// （妥当な `&str` 入力なら `from_utf8` は成功する。万一壊れても lossy で復元して落ちない）。
 pub fn normalize_lf(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\r' => {
-                out.push('\n');
-                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                    i += 1;
-                }
-            }
-            _ => {
-                // UTF-8 マルチバイトを壊さないため char 境界で押し込む。
-                let ch_len = utf8_char_len(bytes[i]);
-                out.push_str(&s[i..i + ch_len]);
-                i += ch_len - 1;
-            }
-        }
-        i += 1;
-    }
-    out
-}
-
-/// UTF-8 先頭バイトから char のバイト長を返す（継続バイトは 1 として扱う＝壊さない）。
-fn utf8_char_len(b: u8) -> usize {
-    if b < 0x80 {
-        1
-    } else if b >> 5 == 0b110 {
-        2
-    } else if b >> 4 == 0b1110 {
-        3
-    } else if b >> 3 == 0b11110 {
-        4
-    } else {
-        1
-    }
+    let normalized = crate::hashing::normalize_lf_bytes(s.as_bytes());
+    String::from_utf8(normalized)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 /// 差分行の種別（unified の行頭記号に対応）。
@@ -200,6 +170,11 @@ fn attach_intraline_segments(lines: &mut [DiffLine]) {
         for k in 0..pair {
             let old_content = lines[del_start + k].content.clone();
             let new_content = lines[ins_start + k].content.clone();
+            // 巨大行（minified JSON 等）の置換ペアは行内差分が O(N·D) で UIスレッド予算を脅かすため、
+            // 行内セグメントを付けず純粋な追加/削除に倒す（#39・固まらない方を優先）。
+            if intraline_too_large(&old_content, &new_content) {
+                continue;
+            }
             let intra = intra_line_segments(&old_content, &new_content);
             lines[del_start + k].segments = intra.old_segments;
             lines[ins_start + k].segments = intra.new_segments;
@@ -276,6 +251,35 @@ mod tests {
             .map(|s| s.text.clone())
             .collect();
         assert_eq!(changed, "雨");
+    }
+
+    #[test]
+    fn 巨大行の置換は行内セグメントを付けず純粋な追加削除に倒す() {
+        // #39: 改行のない巨大行（minified 想定）の置換ペアは行内差分が O(N·D) で UIスレッドを脅かすため、
+        // 行内セグメントを付けず行単位の add/del に倒す（差分自体は出る・固まらない方を優先）。
+        use crate::diff::inline::MAX_INTRALINE_GRAPHEMES;
+        let old_line = format!("{}X\n", "a".repeat(MAX_INTRALINE_GRAPHEMES + 5));
+        let new_line = format!("{}Y\n", "a".repeat(MAX_INTRALINE_GRAPHEMES + 5));
+        let d = compute_diff(&old_line, &new_line);
+        // 置換（del+ins）として差分は出る。
+        assert!(d.lines.iter().any(|l| l.tag == DiffTag::Delete));
+        assert!(d.lines.iter().any(|l| l.tag == DiffTag::Insert));
+        // ただし巨大行なので行内セグメントは付かない。
+        let ins = d.lines.iter().find(|l| l.tag == DiffTag::Insert).unwrap();
+        assert!(
+            ins.segments.is_empty(),
+            "巨大行に行内セグメントが付いた（O(N·D) 爆発の温床）"
+        );
+        let del = d.lines.iter().find(|l| l.tag == DiffTag::Delete).unwrap();
+        assert!(del.segments.is_empty());
+    }
+
+    #[test]
+    fn 通常サイズの置換行には引き続き行内セグメントが付く() {
+        // #39 の閾値が通常行を巻き込まないことの回帰防止。
+        let d = compute_diff("the quick fox\n", "the slow fox\n");
+        let ins = d.lines.iter().find(|l| l.tag == DiffTag::Insert).unwrap();
+        assert!(!ins.segments.is_empty(), "通常行で行内セグメントが消えた");
     }
 
     #[test]

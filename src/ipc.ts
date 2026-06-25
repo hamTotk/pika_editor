@@ -48,11 +48,6 @@ export function pathKind(path: string): Promise<"file" | "dir" | "missing"> {
   return invoke<"file" | "dir" | "missing">("path_kind", { path });
 }
 
-/** ファイルを保存する。保存後ハッシュで自己保存を抑制する（backend 側・要件7.1）。 */
-export function saveFile(path: string, content: string): Promise<void> {
-  return invoke<void>("save_file", { path, content });
-}
-
 /** F5（要件7.1/11.2）= オンデマンドの全体再スキャン＋再同期。検知件数を返す。 */
 export function f5Resync(): Promise<number> {
   return invoke<number>("f5_resync");
@@ -526,4 +521,64 @@ export function openInDefaultApp(path: string): Promise<void> {
  */
 export function openLogFolder(): Promise<void> {
   return invoke<void>("open_log_folder");
+}
+
+// ── settings.toml サブシステム（要件10.3/10.4）──────────────────────────────
+
+/** テーマ設定（settings.toml の `theme`・pika-core::settings::ThemeSetting と対応）。 */
+export type ThemeSetting = "light" | "dark" | "system";
+
+/** 起動時の既定表示モード（settings.toml の `default_mode`・pika-core::settings::DefaultMode と対応）。 */
+export type DefaultModeSetting = "source" | "preview";
+
+/**
+ * settings.toml の有効設定（src-tauri settings_service::SettingsDto と対応・要件10.3/10.4）。
+ *
+ * 無効値は backend（pika-core::settings）が既定へフォールバック済み。個別設定値の UI 適用は**段階的**
+ * （本バッチは機構の貫通＝取得・再読込通知・破損/不完全保存の警告まで。適用は後続バッチ）。
+ */
+export interface Settings {
+  excluded_dirs: string[];
+  huge_file_threshold_bytes: number;
+  long_line_chars: number;
+  sensitive_patterns: string[];
+  allow_remote_resources: boolean;
+  wrap_default: boolean;
+  tab_width: number;
+  theme: ThemeSetting;
+  full_hash_on_startup: boolean;
+  feature_mermaid: boolean;
+  feature_math: boolean;
+  feature_highlight: boolean;
+  default_mode: DefaultModeSetting;
+}
+
+/**
+ * 現在の有効設定を取得する（要件10.3/10.4）。起動時破損は backend が既定へフォールバックして返すため、
+ * 呼び出し側は値の妥当性を再検査しなくてよい（warning は onSettingsWarning で別途通知される）。
+ */
+export function getSettings(): Promise<Settings> {
+  return invoke<Settings>("get_settings");
+}
+
+/**
+ * 設定の警告通知の購読（要件10.3/10.4）。
+ * - 起動時に settings.toml が壊れていた → 既定起動の旨を通知。
+ * - 実行中に不完全保存の TOML を検知 → 直前維持の旨を通知。
+ * - 無効値（型/値域不正）→ 既定使用＋無効キー名を通知。
+ */
+export function onSettingsWarning(
+  handler: (message: string) => void,
+): Promise<UnlistenFn> {
+  return listen<string>("settings-warning", (e) => handler(e.payload));
+}
+
+/**
+ * 設定の再読み込み（settings.toml の有効な編集保存を検知）の購読（要件10.3 再起動なし反映）。
+ * ペイロードは更新後の有効設定。個別設定の即時適用は**段階的**（本バッチは反映の貫通＝通知まで）。
+ */
+export function onSettingsChanged(
+  handler: (settings: Settings) => void,
+): Promise<UnlistenFn> {
+  return listen<Settings>("settings-changed", (e) => handler(e.payload));
 }

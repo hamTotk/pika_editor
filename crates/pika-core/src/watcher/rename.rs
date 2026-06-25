@@ -67,8 +67,10 @@ pub const DEFAULT_RENAME_WINDOW_MS: u64 = 200;
 ///
 /// ペアリング戦略（要件4.2・design doc 168行）:
 /// 1. **FileId が両側で取れるもの**を最優先でペア化（相互スワップ・上書き rename を正しく解く）。
-/// 2. FileId が取れない From/To は、**時間窓内で一意なら**パスベースでペア化。
-/// 3. ペアにならなかった From は削除・To は新規（片側欠落＝安全側）。
+/// 2. FileId が取れない From/To は、**時間窓内で候補がちょうど 1 件のときだけ**パスベースでペア化する。
+///    候補が 0 件 or 2 件以上、あるいはその To を窓内で狙う未使用 From が他にも居る（対称性が崩れる）なら
+///    曖昧としてペア化しない＝段3 で安全側に分解（#15・近接した複数 rename の誤結合を防ぐ）。
+/// 3. ペアにならなかった From は削除・To は新規（片側欠落／曖昧＝安全側）。
 /// 4. ペアの旧パス＝新パスなら往復として `NoChange` に畳む。
 pub fn normalize_renames(events: &[RawFsEvent]) -> Vec<RenameResolution> {
     let froms: Vec<&RawFsEvent> = events
@@ -94,21 +96,47 @@ pub fn normalize_renames(events: &[RawFsEvent]) -> Vec<RenameResolution> {
         }
     }
 
-    // --- 段2: FileId が片方でも欠ける残りを、時間窓内で一意ならパスでペア化。
-    //          From を時刻順に見て、未使用の To の中から時間窓内のものを 1 件選ぶ。
-    for (fi, f) in froms.iter().enumerate() {
+    // --- 段2: FileId が片方でも欠ける残りを「時間窓内で一意」ならパスでペア化（曖昧なら分解）。
+    //          docstring の通り、候補がちょうど 1 件のときだけペア化し、0 件 or 2 件以上、
+    //          または対称性が崩れる場合はスキップする（#15・近接した複数 rename の誤結合を防ぐ）。
+    for fi in 0..froms.len() {
         if from_used[fi] {
             continue;
         }
-        if let Some((ti, t)) = find_matching_to(&tos, &to_used, |t| {
-            // 片方でも FileId が欠ける場合のみパスベースのペア化対象。両側 FileId 有りは
-            // 段1 で解決済みなので、ここでは時間窓内かどうかだけで一意ペアを決める。
-            (f.file_id.is_none() || t.file_id.is_none()) && within_window(f.at_ms, t.at_ms)
-        }) {
-            from_used[fi] = true;
-            to_used[ti] = true;
-            push_pair(&mut out, f, t);
+        let f = froms[fi];
+        // f の To 候補（未使用・FileId 片側欠落・窓内）を列挙する。
+        let cands: Vec<usize> = tos
+            .iter()
+            .enumerate()
+            .filter(|(ti, t)| {
+                !to_used[*ti]
+                    && (f.file_id.is_none() || t.file_id.is_none())
+                    && within_window(f.at_ms, t.at_ms)
+            })
+            .map(|(ti, _)| ti)
+            .collect();
+        if cands.len() != 1 {
+            continue; // 0 or 2+ は曖昧＝ペア化しない（安全側＝段3 で分解）。
         }
+        let ti = cands[0];
+        let t = tos[ti];
+        // 対称性: その To を窓内で狙う未使用 From が他にも居るなら曖昧＝スキップ。
+        let competing = froms
+            .iter()
+            .enumerate()
+            .filter(|(ofi, of)| {
+                *ofi != fi
+                    && !from_used[*ofi]
+                    && (of.file_id.is_none() || t.file_id.is_none())
+                    && within_window(of.at_ms, t.at_ms)
+            })
+            .count();
+        if competing > 0 {
+            continue;
+        }
+        from_used[fi] = true;
+        to_used[ti] = true;
+        push_pair(&mut out, f, t);
     }
 
     // --- 段3: ペアにならなかった片側を安全側に倒す。
@@ -312,6 +340,60 @@ mod tests {
                 overwrote_existing: false,
             }]
         );
+    }
+
+    #[test]
+    fn fileid_なしで窓内に複数_from_to_は曖昧として全て分解する() {
+        // #15: 窓内に From2件・To2件（FileId None）。一意に決まらないので誤結合せず、
+        //      全て安全側へ分解する（RemovedSource×2 + CreatedTarget×2・Renamed を含まない）。
+        let evs = vec![
+            from("a1.md", 100, None),
+            from("a2.md", 110, None),
+            to("b1.md", 120, None),
+            to("b2.md", 130, None),
+        ];
+        let r = normalize_renames(&evs);
+        assert_eq!(r.len(), 4);
+        assert!(!r
+            .iter()
+            .any(|x| matches!(x, RenameResolution::Renamed { .. })));
+        assert!(r.contains(&RenameResolution::RemovedSource {
+            path: "a1.md".into()
+        }));
+        assert!(r.contains(&RenameResolution::RemovedSource {
+            path: "a2.md".into()
+        }));
+        assert!(r.contains(&RenameResolution::CreatedTarget {
+            path: "b1.md".into()
+        }));
+        assert!(r.contains(&RenameResolution::CreatedTarget {
+            path: "b2.md".into()
+        }));
+    }
+
+    #[test]
+    fn fileid_なしで窓内に_to_が複数なら曖昧として分解する() {
+        // #15: 窓内に From1件・To2件（FileId None）。候補が一意でないのでペア化せず、
+        //      From は RemovedSource、To2件は CreatedTarget へ分解する（曖昧回避）。
+        let evs = vec![
+            from("a.md", 100, None),
+            to("b1.md", 110, None),
+            to("b2.md", 120, None),
+        ];
+        let r = normalize_renames(&evs);
+        assert_eq!(r.len(), 3);
+        assert!(!r
+            .iter()
+            .any(|x| matches!(x, RenameResolution::Renamed { .. })));
+        assert!(r.contains(&RenameResolution::RemovedSource {
+            path: "a.md".into()
+        }));
+        assert!(r.contains(&RenameResolution::CreatedTarget {
+            path: "b1.md".into()
+        }));
+        assert!(r.contains(&RenameResolution::CreatedTarget {
+            path: "b2.md".into()
+        }));
     }
 
     #[test]

@@ -26,7 +26,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
-use pika_core::watcher::overflow::{resync_against_baseline, BaselineEntry, FileFingerprint};
+use pika_core::watcher::overflow::{
+    resync_against_baseline, BaselineEntry, FileFingerprint, ResyncOutcome,
+};
 
 /// 監視ルート直下の既定除外（要件4.1・7.1。監視対象外かつツリー非表示）。
 const EXCLUDED_DIRS: &[&str] = &[".git", "node_modules"];
@@ -184,17 +186,17 @@ impl WatcherService {
 
     /// F5（要件7.1/11.2）= オンデマンドの全再列挙＋再同期。ポーリングと同じ処理を共有する。
     pub fn resync_now(&self) -> Result<usize, String> {
-        let inner = self.inner.lock().map_err(|_| "watcher 状態ロック失敗")?;
+        let mut inner = self.inner.lock().map_err(|_| "watcher 状態ロック失敗")?;
         let Some(root) = inner.root.clone() else {
             return Ok(0);
         };
         let _ = self.app.emit("watch-mode", "再同期中...".to_string());
         let current = enumerate_fingerprints(&root);
         let outcome = resync_against_baseline(&inner.baseline, &current);
-        // ベースラインを現状へ更新（再同期で未読化したものは確認時に確定）。
-        // ここでは未読の算定のみ行い、ベースラインの更新は確認済み操作（sprint 3）に委ねるため
-        // baseline は据え置く（取りこぼし防止のため列挙結果だけ通知する）。
         let count = outcome.total();
+        // #14: baseline を現状へ前進させる（前進させないと F5 が毎回同じ変更を再 emit する）。
+        // 次回 prescreen（mtime+size 一致）で短絡＝再 emit 停止。差分/確認用 baseline とは別物。
+        advance_baseline(&mut inner, &current, &outcome);
         let changes: Vec<FsChangeDto> =
             outcome.into_changes().into_iter().map(Into::into).collect();
         drop(inner);
@@ -218,10 +220,23 @@ impl WatcherService {
                 // raw event を最大 DRAIN_INTERVAL 待って受ける（キューに積むだけ＝軽量）。
                 match rx.recv_timeout(DRAIN_INTERVAL) {
                     Ok(Ok(event)) => {
-                        handle_notify_event(&event, &inner, &mut debouncer, &mut rename_buf, &app);
+                        // #37: notify の正式なオーバーフロー通知 API。need_rescan() が true なら
+                        // 「取りこぼし（バッファ溢れ等）→全再列挙が必要」を意味する（notify 6.1）。
+                        // 実オーバーフロー挙動は系統C実機検証が要る（acceptance T-005）。
+                        if event.need_rescan() {
+                            do_overflow_resync(&inner, &app);
+                        } else {
+                            handle_notify_event(
+                                &event,
+                                &inner,
+                                &mut debouncer,
+                                &mut rename_buf,
+                                &app,
+                            );
+                        }
                     }
                     Ok(Err(e)) => {
-                        // notify のエラー。オーバーフロー相当なら全再列挙で再同期する。
+                        // notify の Error 経路。オーバーフロー相当なら全再列挙で再同期する（保険）。
                         if is_overflow_error(&e) {
                             do_overflow_resync(&inner, &app);
                         }
@@ -255,17 +270,20 @@ impl WatcherService {
             if !still_root {
                 break;
             }
+            // enumerate はロック外（重い I/O）。比較と baseline 前進は同一ロック内で行う（#14）。
             let current = enumerate_fingerprints(&root);
-            let changes = {
-                let guard = inner.lock();
-                match guard {
-                    Ok(g) => resync_against_baseline(&g.baseline, &current),
-                    Err(_) => continue,
+            let (count, dto) = match inner.lock() {
+                Ok(mut g) => {
+                    let outcome = resync_against_baseline(&g.baseline, &current);
+                    let count = outcome.total();
+                    advance_baseline(&mut g, &current, &outcome);
+                    let dto: Vec<FsChangeDto> =
+                        outcome.into_changes().into_iter().map(Into::into).collect();
+                    (count, dto)
                 }
+                Err(_) => continue,
             };
-            if changes.total() > 0 {
-                let dto: Vec<FsChangeDto> =
-                    changes.into_changes().into_iter().map(Into::into).collect();
+            if count > 0 {
                 let _ = app.emit("fs-changed", FsChangedPayload { changes: dto });
             }
         });
@@ -309,7 +327,9 @@ fn handle_notify_event(
             kind: kind.clone(),
             path: path_str.clone(),
             at_ms: now,
-            file_id: file_id_of(path),
+            // FileId は rename 正規化（段1）でしか使わない。Modified/Created の洪水で
+            // CreateFileW を撒かないよう、rename イベントのときだけ採取する（#36 コスト削減）。
+            file_id: if is_rename { file_id_of(path) } else { None },
             mtime_ms: meta.as_ref().map(|f| f.mtime_ms),
             size: meta.as_ref().map(|f| f.size),
         };
@@ -320,9 +340,12 @@ fn handle_notify_event(
         }
 
         // 自己保存抑制: 内容ハッシュ一致ならワンショットで抑制（未読を付けない）。
+        // #13: ハッシュ採取と decide を 1 つの critical section に閉じ込め、ロック外で採った
+        // stale なハッシュで判定する TOCTOU 窓を消す（hash_file は対象 1 ファイルの read のみで
+        // ロック保持は短時間＝固まらない原則の範囲内）。
         if matches!(kind, RawFsEventKind::Modified | RawFsEventKind::Created) {
-            let disk_hash = hash_file(path);
             if let Ok(mut g) = inner.lock() {
+                let disk_hash = hash_file(path);
                 if matches!(
                     g.save_tokens.decide(&path_str, disk_hash.as_deref(), now),
                     pika_core::watcher::SuppressDecision::Suppress
@@ -361,6 +384,7 @@ fn drain_and_emit(
     }
 
     // ベースライン台帳を変更内容で前進させる（自己保存以外の外部変更。再同期と整合）。
+    // #14: Modified/Created も前進させないと、イベント経路で報告済みの変更を F5/overflow が再検知する。
     if let Ok(mut g) = inner.lock() {
         for c in &changes {
             match &c.kind {
@@ -372,7 +396,20 @@ fn drain_and_emit(
                         g.baseline.insert(c.path.clone(), entry);
                     }
                 }
-                _ => {}
+                FsChangeKind::Modified | FsChangeKind::Created => {
+                    // FsChange は mtime/size を持たないので stat のみで採取（全文 read しない）。
+                    // content_hash 空でも次回 prescreen は mtime+size で短絡＝再 emit しない。
+                    if let Some(fp) = fingerprint(Path::new(&c.path)) {
+                        g.baseline.insert(
+                            c.path.clone(),
+                            BaselineEntry {
+                                mtime_ms: fp.mtime_ms,
+                                size: fp.size,
+                                content_hash: String::new(),
+                            },
+                        );
+                    }
+                }
             }
         }
     }
@@ -381,18 +418,53 @@ fn drain_and_emit(
     let _ = app.emit("fs-changed", FsChangedPayload { changes: dto });
 }
 
+/// 再同期 outcome で baseline 台帳を現状へ前進させる（#14・二重 emit 防止）。
+///
+/// watcher の baseline は「変更検知の参照点（last seen）」であり、SnapshotService の
+/// 差分/確認用 baseline とは別物なので、前進させても差分・確認済み・未読の永続（frontend 管理）には
+/// 影響しない。前進させないと F5/ポーリング/オーバーフローが毎回同じ変更を再 emit する。
+/// 次回 prescreen（mtime+size 一致）で短絡させるため content_hash は current 由来でよい（再ハッシュ不要）。
+fn advance_baseline(
+    inner: &mut WatcherInner,
+    current: &BTreeMap<String, FileFingerprint>,
+    outcome: &ResyncOutcome,
+) {
+    for path in outcome.created.iter().chain(outcome.modified.iter()) {
+        if let Some(fp) = current.get(path) {
+            inner.baseline.insert(
+                path.clone(),
+                BaselineEntry {
+                    mtime_ms: fp.mtime_ms,
+                    size: fp.size,
+                    content_hash: fp.content_hash.clone().unwrap_or_default(),
+                },
+            );
+        }
+    }
+    for path in &outcome.removed {
+        inner.baseline.remove(path);
+    }
+}
+
 /// オーバーフロー検知時の全再列挙＋再同期（要件7.4・design doc 166行）。
 fn do_overflow_resync(inner: &Arc<Mutex<WatcherInner>>, app: &AppHandle) {
     let root = inner.lock().ok().and_then(|g| g.root.clone());
     let Some(root) = root else { return };
     let _ = app.emit("watch-mode", "オーバーフロー再同期中...".to_string());
+    // enumerate はロック外。比較と baseline 前進は再ロックして同一ロック内で行う（#14）。
     let current = enumerate_fingerprints(&root);
-    let outcome = match inner.lock() {
-        Ok(g) => resync_against_baseline(&g.baseline, &current),
+    let (count, dto) = match inner.lock() {
+        Ok(mut g) => {
+            let outcome = resync_against_baseline(&g.baseline, &current);
+            let count = outcome.total();
+            advance_baseline(&mut g, &current, &outcome);
+            let dto: Vec<FsChangeDto> =
+                outcome.into_changes().into_iter().map(Into::into).collect();
+            (count, dto)
+        }
         Err(_) => return,
     };
-    if outcome.total() > 0 {
-        let dto: Vec<FsChangeDto> = outcome.into_changes().into_iter().map(Into::into).collect();
+    if count > 0 {
         let _ = app.emit("fs-changed", FsChangedPayload { changes: dto });
     }
 }
@@ -530,44 +602,66 @@ fn fingerprint(path: &Path) -> Option<FileFingerprint> {
 
 /// ファイル内容を LF 正規化してハッシュ化する（自己保存抑制・再同期の最終照合用）。
 /// 改行のみの差を差分に出さない方針（要件8.1）と整合させるため LF 正規化してからハッシュする。
+/// LF 正規化＋XxHash64 の本体は pika-core の単一ルーチンへ委譲（#40・出力完全一致）。
 fn hash_file(path: &Path) -> Option<String> {
-    use std::hash::Hasher;
     let bytes = std::fs::read(path).ok()?;
-    let normalized: Vec<u8> = normalize_lf(&bytes);
-    let mut h = twox_hash::XxHash64::with_seed(0);
-    h.write(&normalized);
-    Some(format!("{:016x}", h.finish()))
-}
-
-/// CRLF/CR を LF に正規化する（照合のみ。保存時は原文の改行を維持する＝要件5.2）。
-fn normalize_lf(bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\r' => {
-                out.push(b'\n');
-                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                    i += 1;
-                }
-            }
-            b => out.push(b),
-        }
-        i += 1;
-    }
-    out
+    Some(pika_core::hashing::hash_normalized_lf(&bytes))
 }
 
 /// OS のファイル ID を採取する（rename 正規化の主キー。取得不能なら None）。
+///
+/// `GetFileInformationByHandle` でボリュームシリアル＋ファイルインデックスを採取する（#36）。
+/// 安定版 std では file_index/volume_serial が未提供のため windows-sys を直叩きする。
+/// **限界**: rename の From 側は呼び出し時点でファイルが既に消えており `CreateFileW` が失敗→None になる
+/// （正常。From↔To のペア化は段2 のパス一意性が主役で、FileId は段1 のスワップ/上書き解決の補強）。
 #[cfg(windows)]
 fn file_id_of(path: &Path) -> Option<pika_core::watcher::FileId> {
-    use std::os::windows::fs::MetadataExt;
-    let meta = std::fs::metadata(path).ok()?;
-    // file_index / volume_serial_number は nightly 限定 API のため、安定版では取得不能扱い。
-    // sprint 2 では取得不能（None）として時間窓ベースのペア化に倒し、ID 補強は
-    // windows crate 直叩きへ切替える段（系統C 判断後）で有効化する。
-    let _ = (&meta, MetadataExt::file_size(&meta));
-    None
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    // パスを NUL 終端 UTF-16 へ変換（Win32 境界・CLAUDE.md「Win32 境界で UTF-16 に変換」）。
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+
+    // SAFETY: wide は NUL 終端済みの有効な UTF-16 バッファ。属性読取のみ・全共有モードで開く
+    // （他プロセスのアクセスを妨げない）。FILE_FLAG_BACKUP_SEMANTICS でディレクトリも開ける。
+    // 不在・アクセス不可なら INVALID_HANDLE_VALUE が返り、その場合は None を返す。
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+        return None;
+    }
+
+    // SAFETY: info は GetFileInformationByHandle が全フィールドを埋めるため zeroed 初期化で足りる。
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: handle は CreateFileW が返した有効なハンドル。info は書き込み可能な領域。
+    let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+    // SAFETY: handle は有効。早期 return でも漏らさないようここで必ず閉じる。
+    unsafe {
+        CloseHandle(handle);
+    }
+    if ok == 0 {
+        return None;
+    }
+
+    let index = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+    Some(pika_core::watcher::FileId {
+        volume: info.dwVolumeSerialNumber as u64,
+        index,
+    })
 }
 
 #[cfg(not(windows))]
