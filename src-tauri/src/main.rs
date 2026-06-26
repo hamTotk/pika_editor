@@ -71,6 +71,8 @@ fn run() {
         commands::path_kind,
         commands::open_in_default_app,
         commands::open_log_folder,
+        commands::create_entry,
+        commands::delete_entry,
         snapshot::compute_file_diff,
         snapshot::confirm_file,
         snapshot::confirm_all,
