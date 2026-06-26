@@ -19,9 +19,10 @@ pub mod sanitize;
 
 pub use csp::{build_csp, generate_nonce, validate_allow_hosts, ExternalResourceAllow, Nonce};
 pub use guard::{
-    check_image_bytes, check_image_pixels, check_svg, check_svg_bytes, has_long_line, BlockReason,
-    GuardDecision, DEFAULT_HTML_TIMEOUT_MS, DEFAULT_IMAGE_MAX_PIXELS, DEFAULT_LONG_LINE_CHARS,
-    DEFAULT_SVG_MAX_ELEMENTS, DEFAULT_SVG_MAX_PIXELS,
+    check_image_bytes, check_image_pixels, check_svg, check_svg_bytes, has_long_line,
+    image_dimensions, BlockReason, GuardDecision, DEFAULT_HTML_TIMEOUT_MS,
+    DEFAULT_IMAGE_MAX_PIXELS, DEFAULT_LONG_LINE_CHARS, DEFAULT_SVG_MAX_ELEMENTS,
+    DEFAULT_SVG_MAX_PIXELS,
 };
 pub use path::{
     confine_under, join_under, resolve_local_ref, rewrite_local_image_refs, LocalRefDecision,
@@ -105,6 +106,36 @@ impl PreviewTheme {
     }
 }
 
+/// 設定 `feature_mermaid`/`feature_math`/`feature_highlight` によるプレビュー注入のゲート（要件10・U2b-3）。
+///
+/// 条件付き注入（[`detect_assets`] の自動検出）に **設定の機能トグルを AND で重ねる**ためのフラグ集合。
+/// OFF の機能は body に該当記法があっても対応アセット（CSS link / JS）を注入しない（生テキストのまま
+/// 描画＝graceful degrade）。CSP は不変（nonce ベース・注入が減るだけ）で、緩めも厳しめもしない。
+///
+/// **既定は全 ON**（[`PreviewFeatures::all`]）＝従来挙動。シグネチャ非変更の薄い委譲
+/// （[`wrap_preview_document`] → [`wrap_preview_document_with`] へ `all()` を渡す）で既存呼び出し/テストを
+/// 一切壊さずに、設定ゲートだけを backend（src-tauri）から差し込めるようにする（回帰ゼロ）。
+#[derive(Debug, Clone, Copy)]
+pub struct PreviewFeatures {
+    /// Mermaid 図の注入を許すか（`feature_mermaid`）。
+    pub mermaid: bool,
+    /// KaTeX 数式の注入を許すか（`feature_math`）。
+    pub math: bool,
+    /// highlight.js コードハイライトの注入を許すか（`feature_highlight`）。
+    pub highlight: bool,
+}
+
+impl PreviewFeatures {
+    /// 全機能 ON（従来挙動・設定ゲート未適用時の既定）。
+    pub fn all() -> Self {
+        Self {
+            mermaid: true,
+            math: true,
+            highlight: true,
+        }
+    }
+}
+
 /// custom protocol が別WebView へ直配信する 1 レスポンス分（要件6・design doc 6章）。
 ///
 /// `body`（サニタイズ済み HTML）と `csp`（レスポンスヘッダ値）を**必ずセットで**配信する。
@@ -179,11 +210,38 @@ pub fn wrap_preview_document(
     flavor: PreviewFlavor,
     theme: Option<&PreviewTheme>,
 ) -> String {
+    // 薄い委譲（回帰ゼロ）: 既存呼び出し/テストは全機能 ON のまま現挙動を維持する。
+    // 設定ゲート（feature_*）を効かせたい backend（src-tauri）は wrap_preview_document_with を直接呼ぶ。
+    wrap_preview_document_with(body, nonce, flavor, theme, PreviewFeatures::all())
+}
+
+/// [`wrap_preview_document`] に **機能ゲート（[`PreviewFeatures`]）** を加えた版（要件10・U2b-3）。
+///
+/// 設定 `feature_mermaid`/`feature_math`/`feature_highlight` で、自動検出（[`detect_assets`]）の結果を
+/// AND ゲートする。OFF の機能は body に該当記法があっても対応アセットを注入しない（生テキストのまま＝
+/// graceful degrade）。系統B（[`PreviewFlavor::HtmlNoJs`]）は従来どおり [`AssetNeeds::none`]（features 無関係）。
+///
+/// CSP は不変（nonce ベース・注入が減るだけで緩めも厳しめもしない）。ラップの構造（head_links/style/scripts/
+/// 完全文書フォーマット）・テーマ注入・各種不変条件は [`wrap_preview_document`] のドキュメントと同一。
+pub fn wrap_preview_document_with(
+    body: &str,
+    nonce: &str,
+    flavor: PreviewFlavor,
+    theme: Option<&PreviewTheme>,
+    features: PreviewFeatures,
+) -> String {
     // 系統A のみベンダーアセット注入の対象（系統B は文書 JS 完全無効）。
     // 条件付き注入（「軽い」原則・F-004）: 使われている機能だけ CSS link / JS を入れる。
     let is_markdown = matches!(flavor, PreviewFlavor::MarkdownTrustedJs);
     let assets = if is_markdown {
-        detect_assets(body)
+        // 自動検出（detect）に設定の機能トグル（features）を AND で重ねる（U2b-3）。
+        // OFF の機能は検出されても注入しない（生テキストのまま描画＝graceful degrade）。
+        let detected = detect_assets(body);
+        AssetNeeds {
+            mermaid: detected.mermaid && features.mermaid,
+            katex: detected.katex && features.math,
+            highlight: detected.highlight && features.highlight,
+        }
     } else {
         AssetNeeds::none()
     };
@@ -931,5 +989,183 @@ mod tests {
         // 色関数（rgb/rgba/hsl/hsla）は引き続き許可する。
         assert!(PreviewTheme::is_safe_color("hsl(210, 50%, 40%)"));
         assert!(PreviewTheme::is_safe_color("hsla(210,50%,40%,.5)"));
+    }
+
+    /// 全機能を含む body（Mermaid・数式・コードブロック）。各機能ゲートの ON/OFF を観測するための共通入力。
+    const FEATURE_BODY: &str = "<pre><code class=\"language-mermaid\">graph TD;A--&gt;B</code></pre>\n\
+<p>数式 $E=mc^2$ です</p>\n\
+<pre><code class=\"language-rust\">fn main(){}</code></pre>";
+
+    #[test]
+    fn wrap_with_feature_mermaid_offは検出されても注入しない() {
+        // U2b-3: feature_mermaid=false なら language-mermaid を含んでも mermaid.min.js を入れない。
+        let features = PreviewFeatures {
+            mermaid: false,
+            math: true,
+            highlight: true,
+        };
+        let doc = wrap_preview_document_with(
+            FEATURE_BODY,
+            "n",
+            PreviewFlavor::MarkdownTrustedJs,
+            None,
+            features,
+        );
+        assert!(
+            !doc.contains("/assets/mermaid.min.js"),
+            "feature OFF なのに Mermaid を注入した: {doc}"
+        );
+        // 他機能（数式・コード）は ON のまま注入される（ゲートは独立）。
+        assert!(
+            doc.contains("/assets/katex.min.js"),
+            "math ON なのに KaTeX が無い: {doc}"
+        );
+        assert!(
+            doc.contains("/assets/highlight.min.js"),
+            "highlight ON なのに highlight が無い: {doc}"
+        );
+        // body は一字一句改変しない（生テキストのまま＝graceful degrade）。
+        assert!(doc.contains(FEATURE_BODY), "body が改変された: {doc}");
+    }
+
+    #[test]
+    fn wrap_with_feature_math_offは検出されても注入しない() {
+        // U2b-3: feature_math=false なら数式区切りを含んでも katex.min.js / katex.min.css を入れない。
+        let features = PreviewFeatures {
+            mermaid: true,
+            math: false,
+            highlight: true,
+        };
+        let doc = wrap_preview_document_with(
+            FEATURE_BODY,
+            "n",
+            PreviewFlavor::MarkdownTrustedJs,
+            None,
+            features,
+        );
+        assert!(
+            !doc.contains("/assets/katex.min.js"),
+            "feature OFF なのに KaTeX JS を注入した: {doc}"
+        );
+        assert!(
+            !doc.contains("/assets/katex.min.css"),
+            "feature OFF なのに KaTeX CSS を注入した: {doc}"
+        );
+        // 他機能は独立に ON のまま。
+        assert!(
+            doc.contains("/assets/mermaid.min.js"),
+            "mermaid ON なのに無い: {doc}"
+        );
+        assert!(
+            doc.contains("/assets/highlight.min.js"),
+            "highlight ON なのに無い: {doc}"
+        );
+    }
+
+    #[test]
+    fn wrap_with_feature_highlight_offは検出されても注入しない() {
+        // U2b-3: feature_highlight=false ならコードブロックを含んでも highlight.min.js を入れない。
+        let features = PreviewFeatures {
+            mermaid: true,
+            math: true,
+            highlight: false,
+        };
+        let doc = wrap_preview_document_with(
+            FEATURE_BODY,
+            "n",
+            PreviewFlavor::MarkdownTrustedJs,
+            None,
+            features,
+        );
+        assert!(
+            !doc.contains("/assets/highlight.min.js"),
+            "feature OFF なのに highlight を注入した: {doc}"
+        );
+        // hljs の CSS link も入れない（highlight ゲートに連動）。
+        assert!(
+            !doc.contains("hljs-github"),
+            "feature OFF なのに hljs CSS link を注入した: {doc}"
+        );
+        // 他機能は独立に ON のまま。
+        assert!(
+            doc.contains("/assets/mermaid.min.js"),
+            "mermaid ON なのに無い: {doc}"
+        );
+        assert!(
+            doc.contains("/assets/katex.min.js"),
+            "math ON なのに無い: {doc}"
+        );
+    }
+
+    #[test]
+    fn wrap_with_全機能offは何も注入しない() {
+        // U2b-3: 3 機能すべて OFF なら検出があっても何も注入しない（生テキストのまま＝完全 graceful degrade）。
+        let features = PreviewFeatures {
+            mermaid: false,
+            math: false,
+            highlight: false,
+        };
+        let doc = wrap_preview_document_with(
+            FEATURE_BODY,
+            "n",
+            PreviewFlavor::MarkdownTrustedJs,
+            None,
+            features,
+        );
+        assert!(
+            !doc.contains("<script"),
+            "全機能 OFF なのに script を注入した: {doc}"
+        );
+        assert!(
+            !doc.contains("/assets/"),
+            "全機能 OFF なのにアセット link を注入した: {doc}"
+        );
+        assert!(doc.contains(FEATURE_BODY), "body が改変された: {doc}");
+    }
+
+    #[test]
+    fn wrap_with_allは現挙動と同一_委譲の確認() {
+        // 回帰ゼロの根拠: wrap_preview_document_with(.., all()) と wrap_preview_document(..) の出力が一致する
+        // （後者は前者への薄い委譲）。theme 有無・系統 A/B いずれでも一致を確認する。
+        let theme = theme_fixture(false);
+        for (flavor, theme) in [
+            (PreviewFlavor::MarkdownTrustedJs, None),
+            (PreviewFlavor::MarkdownTrustedJs, Some(&theme)),
+            (PreviewFlavor::HtmlNoJs, None),
+        ] {
+            let via_with = wrap_preview_document_with(
+                FEATURE_BODY,
+                "abc123",
+                flavor,
+                theme,
+                PreviewFeatures::all(),
+            );
+            let via_plain = wrap_preview_document(FEATURE_BODY, "abc123", flavor, theme);
+            assert_eq!(
+                via_with, via_plain,
+                "all() の委譲が現挙動と一致しない（flavor={flavor:?}, theme={})",
+                theme.is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_with_feature_onは従来どおり注入する_回帰確認() {
+        // U2b-3: 検出あり＋feature ON は従来どおり全アセットを注入する（OFF ゲートの裏返しの回帰確認）。
+        let doc = wrap_preview_document_with(
+            FEATURE_BODY,
+            "n",
+            PreviewFlavor::MarkdownTrustedJs,
+            None,
+            PreviewFeatures::all(),
+        );
+        for asset in [
+            "/assets/mermaid.min.js",
+            "/assets/katex.min.js",
+            "/assets/katex.min.css",
+            "/assets/highlight.min.js",
+        ] {
+            assert!(doc.contains(asset), "feature ON なのに {asset} が無い: {doc}");
+        }
     }
 }

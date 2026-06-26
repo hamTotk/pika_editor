@@ -33,6 +33,7 @@ pub fn open_workspace(
     watcher: State<'_, WatcherService>,
     snapshot: State<'_, SnapshotService>,
     access: State<'_, crate::access::AccessControl>,
+    settings: State<'_, std::sync::Arc<crate::settings_service::SettingsService>>,
 ) -> Result<Vec<TreeEntry>, String> {
     let dir = Path::new(&path);
     if !dir.is_dir() {
@@ -65,19 +66,28 @@ pub fn open_workspace(
             );
         }
     }
-    // 列挙・並び順は list_dir と同一規則を共有する（enumerate_dir）。
-    let entries = enumerate_dir(dir)?;
+    // 列挙・並び順は list_dir と同一規則を共有する（enumerate_dir）。除外ディレクトリ（settings.toml
+    // excluded_dirs・既定 .git/node_modules）はここで弾く。除外されたディレクトリ配下は列挙されないため
+    // 下の baseline ループ（除外後の entries に対して回る）にも lazy 展開にも自然に乗らない。
+    let settings_now = settings.snapshot();
+    let excluded = settings_now.excluded_dirs;
+    let entries = enumerate_dir(dir, &excluded)?;
+    // 設定 sensitive_patterns（機密判定の和集合）を baseline 判定へ流し込む（baseline ループ前＝U2b-2）。
+    // 以後 SnapshotInner の baseline_policy_with と pre-check（capture_baseline_for）が同じ patterns で
+    // 一致する。**既定機密は外せない**（is_sensitive_with が常に内包）＝設定は足すだけ（減らせない不変条件）。
+    let sensitive_patterns = settings_now.sensitive_patterns;
+    snapshot.set_sensitive_patterns(sensitive_patterns.clone());
     // 直下ファイルの差分ベースライン内容を取得する（全既読スタート＝要件8.1）。
     // 機密/10MB以上/画像はハッシュのみ（pika-core::snapshot::policy が判定）。
     // ロード済みベースラインがある path は capture_baseline がスキップする（非クロバー・#3）。
     //
     // 性能（設計原則2「固まらない」）: ここは UI 起点・command スレッドで N 件ループする。各 capture が
     // index.json をフル直列化＋fsync すると N 回の超線形コストでフォルダオープンが 200ms 予算を超えうる。
-    // そこで capture_baseline / capture_baseline_hash_only は内容 object のみ即時永続化し index 永続化は遅延、
+    // そこで capture_baseline は内容 object のみ即時永続化し index 永続化は遅延、
     // ループ完了後に persist_index を **1回だけ**呼んで index.json をまとめて書く（confirm_all と同じ作法）。
     for entry in &entries {
         if !entry.is_dir {
-            capture_baseline_for(Path::new(&entry.path), &snapshot);
+            capture_baseline_for(Path::new(&entry.path), &snapshot, &sensitive_patterns);
         }
     }
     // バッチ capture で遅延していた index 永続化をここで1回だけ行う（per-file fsync の解消）。
@@ -85,6 +95,11 @@ pub fn open_workspace(
     // 次回 open の再 capture（非クロバー）＋recover_from_meta で復元できる安全網は崩れない。
     snapshot.persist_index();
 
+    // 監視の除外をツリー列挙（enumerate_dir）と同じ excluded_dirs に揃える。
+    // watch_root が baseline 列挙で inner.excluded_dirs を読むため、**watch_root より前**に設定する
+    // （これまで watcher は .git/node_modules をハードコードし、dist/target を足すとツリーから消えるのに
+    // fs-changed が飛び続け未読が消せない不整合があった＝解消）。`excluded` はここ以降未使用なので move する。
+    watcher.set_excluded_dirs(excluded);
     // 監視を開始（ベースライン取得・外部変更の emit）。監視不能 FS はポーリングへ縮退する。
     watcher.watch_root(dir)?;
     Ok(entries)
@@ -98,24 +113,43 @@ pub fn open_workspace(
 /// 監視/スナップショットには一切触れない（design doc 3章: command 層は薄い境界）。
 /// 列挙・並び順は `open_workspace` と同一規則（`enumerate_dir`）を共有する。
 #[tauri::command]
-pub fn list_dir(path: String) -> Result<Vec<TreeEntry>, String> {
+pub fn list_dir(
+    path: String,
+    settings: State<'_, std::sync::Arc<crate::settings_service::SettingsService>>,
+) -> Result<Vec<TreeEntry>, String> {
     let dir = Path::new(&path);
     if !dir.is_dir() {
         return Err(format!("フォルダではありません: {path}"));
     }
-    enumerate_dir(dir)
+    // サブフォルダ展開でも open_workspace と同じ除外（excluded_dirs）を効かせる。
+    enumerate_dir(dir, &settings.snapshot().excluded_dirs)
+}
+
+/// 除外ディレクトリ判定（settings.toml `excluded_dirs` をツリー列挙へ配線）。
+///
+/// `excluded_dirs`（既定 `[".git","node_modules"]`）は**ディレクトリ名**を意味するので、
+/// `is_dir == true` のときだけ判定する（同名のファイルは除外しない）。一致は Windows のパス大小無視に
+/// 合わせて**大文字小文字を無視**する（`.git` も `.GIT` も同一視）。
+/// MVP のため判定は直下名の完全一致のみ（glob・パス全体マッチは対象外＝design doc 15章「足さない」）。
+fn is_excluded_dir(name: &str, is_dir: bool, excluded: &[String]) -> bool {
+    is_dir && excluded.iter().any(|e| e.eq_ignore_ascii_case(name))
 }
 
 /// フォルダ直下のエントリを列挙し、安定順（フォルダ先・名前昇順）で返す。
 /// `open_workspace`（監視開始＋ベースライン取得つき）と `list_dir`（副作用なし展開）で共有する。
-/// 除外リスト/自然順/シンボリックリンク循環検出は後続スプリントで workspace モジュールへ移す。
-fn enumerate_dir(dir: &Path) -> Result<Vec<TreeEntry>, String> {
+/// `excluded`（settings.toml の `excluded_dirs`）に名前が一致するディレクトリは列挙から除外する。
+/// 自然順/シンボリックリンク循環検出は後続スプリントで workspace モジュールへ移す。
+fn enumerate_dir(dir: &Path, excluded: &[String]) -> Result<Vec<TreeEntry>, String> {
     let mut entries = Vec::new();
     let read = std::fs::read_dir(dir).map_err(|e| format!("読み取りに失敗: {e}"))?;
     for ent in read.flatten() {
         let p = ent.path();
         let name = ent.file_name().to_string_lossy().to_string();
         let is_dir = p.is_dir();
+        // 除外ディレクトリ（.git/node_modules 等）は列挙しない＝lazy 展開も監視もベースラインも対象外になる。
+        if is_excluded_dir(&name, is_dir, excluded) {
+            continue;
+        }
         entries.push(TreeEntry {
             name,
             path: p.to_string_lossy().to_string(),
@@ -127,37 +161,51 @@ fn enumerate_dir(dir: &Path) -> Result<Vec<TreeEntry>, String> {
     Ok(entries)
 }
 
-/// 差分のベースライン内容を取得する（要件8.1・#20/#54）。
+/// 差分のベースライン内容を取得する（要件8.1・#20/#54・指摘6）。
 ///
 /// 機密/画像/10MB以上（policy=HashOnly）は **内容を read せず**ハッシュのみ経路へ倒す
 /// （機密ファイルの平文を read_to_string で展開しない＝#20）。StoreContent のときだけバイト読み→
-/// UTF-8 検査し、テキストのみ内容を保存する。バイナリ（非UTF-8）はバイト由来ハッシュのみ、
+/// **open_document と同じ encoding::decode** でデコードしてテキスト内容を保存する（Shift_JIS/UTF-16/
+/// UTF-8 BOM を含め baseline ソースを editor 内容＝decoded.text に揃える＝指摘6）。
 /// 読取失敗はベースラインを張らない（空文字を内容ベースライン化しない＝差分誤り/空ハッシュ衝突を防ぐ・#54）。
 ///
-/// open_workspace のループから呼ばれる。capture_baseline / capture_baseline_hash_only は内容 object を
-/// 即時永続化するが index.json はここで書かず、呼び出し側がループ後に snapshot.persist_index() で
-/// 1回まとめて永続化する（per-file の index 直列化＋fsync を避ける＝固まらない・設計原則2）。
-fn capture_baseline_for(path: &Path, snapshot: &SnapshotService) {
-    use pika_core::snapshot::baseline_policy;
+/// open_workspace のループから呼ばれる。capture_baseline は内容 object を即時永続化するが index.json は
+/// ここで書かず、呼び出し側がループ後に snapshot.persist_index() で1回まとめて永続化する
+/// （per-file の index 直列化＋fsync を避ける＝固まらない・設計原則2）。
+fn capture_baseline_for(path: &Path, snapshot: &SnapshotService, sensitive_patterns: &[String]) {
+    use pika_core::snapshot::baseline_policy_with;
     let path_str = path.to_string_lossy().to_string();
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     // index 永続化はループ後に1回（capture_* は index を遅延し object のみ即時永続化）＝per-file fsync を避ける。
     // policy 判定を read より先に行う（HashOnly なら平文を一切読まない）。
-    if !baseline_policy(&path_str, size).stores_content() {
+    // 機密判定は設定 sensitive_patterns 和集合（既定は外せない＝U2b-2）。pre-check と SnapshotInner 内の
+    // 判定（snapshot.set_sensitive_patterns 済み）を同じ patterns で揃え、機密ファイルの平文を読まない。
+    if !baseline_policy_with(&path_str, size, sensitive_patterns).stores_content() {
         // 機密/画像/10MB以上: 内容を読まない（#20）。ハッシュのみ（content 空＝未読検知は watcher が担う）。
         snapshot.capture_baseline(&path_str, "", size);
         return;
     }
     match std::fs::read(path) {
-        Ok(bytes) => match String::from_utf8(bytes) {
-            // テキスト: 内容を保存（差分・巻き戻し可能）。
-            Ok(text) => snapshot.capture_baseline(&path_str, &text, size),
-            // バイナリ（非UTF-8）: 内容保存に適さない。バイト由来ハッシュのみ（空文字ベースライン化しない・#54）。
-            Err(e) => {
-                let hash = hash_normalized_lf(e.as_bytes());
+        Ok(bytes) => {
+            // **open_document と同じ encoding::decode** で判定する（指摘6 の direct-children 漏れ）。
+            // 旧実装は String::from_utf8 を使い、Shift_JIS/UTF-16（非UTF-8テキスト）が Err→ハッシュのみへ倒れて
+            // 直下ファイルが誤って「差分非対象」になり、UTF-8 BOM はベースラインに BOM が残って未編集でも偽差分が
+            // 出ていた。decode は BOM を剥がし元エンコーディングを判定するので、テキストは baseline ソースが editor
+            // 内容（open_document の decoded.text / ensure_baseline）と一致し、直下/サブフォルダ・全エンコーディングで
+            // 差分が一貫する（機密/巨大/画像は上の policy 早期 return で既に除外済み）。
+            let decoded = pika_core::encoding::decode(&bytes);
+            if decoded.had_decode_warning {
+                // strict UTF-8 も Shift_JIS 等も判定できず lossy デコードへ倒れた＝テキストでない（バイナリ）。
+                // 旧 from_utf8 Err 分岐の意図（内容を保存しない）を復元する: ロッシーデコードしたバイナリ内容を
+                // data root へ保存せず、バイト由来ハッシュのみベースライン化する（データ最小化#20・肥大/
+                // folder-open コスト回避・第2巡 回帰修正。空文字で確定しない＝#54）。
+                let hash = hash_normalized_lf(&bytes);
                 snapshot.capture_baseline_hash_only(&path_str, &hash);
+            } else {
+                // テキスト（UTF-8/Shift_JIS/UTF-16・BOM 除去済み）: デコード済み内容を保存（差分・巻き戻し可能）。
+                snapshot.capture_baseline(&path_str, &decoded.text, size);
             }
-        },
+        }
         // 読めない（権限/一時ロック等）: ベースラインを張らない（次回 open で再試行。空文字で確定しない・#54）。
         Err(_) => {}
     }
@@ -420,4 +468,206 @@ pub fn open_log_folder() -> Result<(), String> {
     let dir = crate::diagnostic::log_folder_path()?;
     let p = validate_openable(&dir)?;
     tauri_plugin_opener::open_path(p, None::<&str>).map_err(|e| e.to_string())
+}
+
+// ── ツリーからのファイル/フォルダ 新規作成・削除（要件11「新規ファイル/新規フォルダ/削除」・design G）──
+//
+// 【セキュリティ境界】frontend からのパスは信頼せず、AccessControl で**開いているワークスペース配下**へ
+// 封じ込める（任意パスへの作成/削除を塞ぐ＝#5/#46）。削除は**完全削除でなくごみ箱へ移動**して復元可能性を
+// 残す（要件11「Delete＝ごみ箱へ移動」・最上位原則「データを失わない」）。別WebView（プレビュー・権限
+// ゼロ）からの到達は main.rs の発信元ラベル検査で全拒否される。
+
+/// 新規作成する名前を検証する（ファイル名のみ・パス脱出や予約文字の混入を防ぐ）。
+///
+/// `dir` への `join` 前にこれを通し、`..`/区切り文字/Windows 予約文字/制御文字を弾く（封じ込めの一次防御。
+/// 最終的な配下確認は AccessControl::verify_write が親 canonicalize で行う＝多層防御）。
+fn validate_entry_name(name: &str) -> Result<(), String> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Err("名前を入力してください".to_string());
+    }
+    if n == "." || n == ".." {
+        return Err("その名前は使用できません".to_string());
+    }
+    if n.contains('/') || n.contains('\\') {
+        return Err("名前にパス区切り文字（/ \\）は使えません".to_string());
+    }
+    // Windows で使用不可の文字（: * ? " < > |）と制御文字を弾く。
+    if n.chars()
+        .any(|c| (c as u32) < 0x20 || matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+    {
+        return Err("名前に使用できない文字が含まれています".to_string());
+    }
+    Ok(())
+}
+
+/// ツリーから新規ファイル/フォルダを作る（要件11・design G 右クリックメニュー）。
+///
+/// `dir` 直下に `name` の空ファイル（`is_dir=false`）/フォルダ（`is_dir=true`）を作成し、作成した絶対パスを
+/// 返す（frontend がツリー更新＋新規ファイルを開くのに使う）。AccessControl::verify_write で**親（=dir）が
+/// ワークスペース配下**かを検証し、任意パスへの作成を塞ぐ。同名が既にあればエラー（既存を上書きしない）。
+#[tauri::command]
+pub fn create_entry(
+    dir: String,
+    name: String,
+    is_dir: bool,
+    access: State<'_, crate::access::AccessControl>,
+) -> Result<String, String> {
+    validate_entry_name(&name)?;
+    let target = Path::new(&dir).join(name.trim());
+    let target_str = target.to_string_lossy().to_string();
+    // 親（=dir）がワークスペース配下かを検証する（新規パスは親 canonicalize で封じ込め＝#46）。
+    access.verify_write(&target_str)?;
+    if target.exists() {
+        return Err(format!(
+            "同名の{}が既に存在します",
+            if is_dir { "フォルダ" } else { "ファイル" }
+        ));
+    }
+    if is_dir {
+        std::fs::create_dir(&target).map_err(|e| format!("フォルダの作成に失敗しました: {e}"))?;
+    } else {
+        // 空ファイルを作成（既存は上書きしない＝create_new で競合を弾く）。
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .map_err(|e| format!("ファイルの作成に失敗しました: {e}"))?;
+    }
+    Ok(target_str)
+}
+
+/// ツリーから削除する（要件11「Delete＝ごみ箱へ移動」・design G）。
+///
+/// **完全削除ではなくごみ箱へ移動**し、復元可能性を残す（最上位原則「データを失わない」）。
+/// AccessControl::verify_write で対象がワークスペース配下かを検証してから OS のごみ箱へ送る。
+/// 開いているファイルを削除した場合のタブ追従（「削除済み」表示）は watcher の removed イベントが担う。
+#[tauri::command]
+pub fn delete_entry(
+    path: String,
+    access: State<'_, crate::access::AccessControl>,
+) -> Result<(), String> {
+    // verify_write は親を canonicalize して封じ込め判定する（既存ファイル/フォルダの親＝配下確認・#46）。
+    access.verify_write(&path)?;
+    if !Path::new(&path).exists() {
+        return Err("対象が存在しません".to_string());
+    }
+    move_to_recycle_bin(&path)
+}
+
+/// パスを OS のごみ箱へ移動する（Windows: SHFileOperationW + FOF_ALLOWUNDO）。
+///
+/// 完全削除を避けて復元可能性を残す（要件11・最上位原則）。確認 UI は frontend 側で出すため
+/// OS の確認/進捗 UI は抑止する（FOF_NOCONFIRMATION/FOF_SILENT/FOF_NOERRORUI）。
+#[cfg(windows)]
+fn move_to_recycle_bin(path: &str) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::{
+        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
+        FOF_WANTNUKEWARNING, FO_DELETE, SHFILEOPSTRUCTW,
+    };
+    // pFrom は二重 NUL 終端の UTF-16（ファイルリストの終端としてもう1つ NUL を足す）。
+    let mut from: Vec<u16> = path.encode_utf16().collect();
+    from.push(0);
+    from.push(0);
+    // SAFETY: `from` は呼び出し中ずっと生存し二重 NUL 終端。`op` は zeroed 後に必要フィールドのみ設定する。
+    let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
+    op.wFunc = FO_DELETE as u32;
+    op.pFrom = from.as_ptr();
+    // FOF_WANTNUKEWARNING を立て、**ごみ箱へ入れられない対象**（ごみ箱を持たないネットワーク/リムーバブル
+    // ドライブ・容量超過等で FOF_ALLOWUNDO が完全削除へフォールバックするケース）では OS 警告を出す（指摘3）。
+    // これが無いと FOF_NOCONFIRMATION により無確認の完全削除に化け、フロントの「ごみ箱へ移動＝復元可能」の
+    // 約束が破れる（最上位原則「データを失わない」）。通常のごみ箱移動では FOF_NOCONFIRMATION が効き無確認のまま。
+    op.fFlags =
+        (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING | FOF_SILENT | FOF_NOERRORUI) as u16;
+    let rc = unsafe { SHFileOperationW(&mut op) };
+    if rc != 0 {
+        return Err(format!("ごみ箱へ移動できませんでした（コード {rc}）"));
+    }
+    if op.fAnyOperationsAborted != 0 {
+        return Err("削除が中断されました".to_string());
+    }
+    Ok(())
+}
+
+/// 非 Windows ではごみ箱移動 API を持たない（pika は Windows 専用＝通常到達しない）。
+#[cfg(not(windows))]
+fn move_to_recycle_bin(_path: &str) -> Result<(), String> {
+    Err("この環境ではごみ箱への移動に対応していません".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_excluded_dir;
+    use super::validate_entry_name;
+
+    /// settings.toml の既定除外リスト（`.git` / `node_modules`）。
+    fn excluded() -> Vec<String> {
+        vec![".git".to_string(), "node_modules".to_string()]
+    }
+
+    #[test]
+    fn 既定の_git_ディレクトリは除外される() {
+        assert!(is_excluded_dir(".git", true, &excluded()));
+        assert!(is_excluded_dir("node_modules", true, &excluded()));
+    }
+
+    #[test]
+    fn 大文字小文字を無視して一致する() {
+        // Windows のパス大小無視に合わせ、.GIT も除外する。
+        assert!(is_excluded_dir(".GIT", true, &excluded()));
+        assert!(is_excluded_dir("Node_Modules", true, &excluded()));
+    }
+
+    #[test]
+    fn 同名のファイルは除外しない() {
+        // excluded_dirs はディレクトリ名の意味なので、同名ファイル（is_dir=false）は弾かない。
+        assert!(!is_excluded_dir("node_modules", false, &excluded()));
+        assert!(!is_excluded_dir(".git", false, &excluded()));
+    }
+
+    #[test]
+    fn 除外リストに無いディレクトリは残る() {
+        assert!(!is_excluded_dir("src", true, &excluded()));
+        assert!(!is_excluded_dir("docs", true, &excluded()));
+    }
+
+    #[test]
+    fn 通常のファイル名は許可される() {
+        assert!(validate_entry_name("memo.md").is_ok());
+        assert!(validate_entry_name("新しいフォルダ").is_ok());
+        assert!(validate_entry_name("  trimmed.txt  ").is_ok());
+    }
+
+    #[test]
+    fn 空やドットのみの名前は拒否される() {
+        assert!(validate_entry_name("").is_err());
+        assert!(validate_entry_name("   ").is_err());
+        assert!(validate_entry_name(".").is_err());
+        assert!(validate_entry_name("..").is_err());
+    }
+
+    #[test]
+    fn パス区切りや予約文字を含む名前は拒否される() {
+        // パス脱出（区切り文字/..）を名前に混ぜられない（封じ込めの一次防御）。
+        assert!(validate_entry_name("a/b.md").is_err());
+        assert!(validate_entry_name("a\\b.md").is_err());
+        assert!(validate_entry_name("..\\evil.md").is_err());
+        // Windows 予約文字。
+        assert!(validate_entry_name("a:b").is_err());
+        assert!(validate_entry_name("a*b").is_err());
+        assert!(validate_entry_name("a?b").is_err());
+        assert!(validate_entry_name("a\"b").is_err());
+        assert!(validate_entry_name("a<b").is_err());
+        assert!(validate_entry_name("a>b").is_err());
+        assert!(validate_entry_name("a|b").is_err());
+        // 制御文字。
+        assert!(validate_entry_name("a\u{0007}b").is_err());
+    }
+
+    #[test]
+    fn 空の除外リストでは何も除外しない() {
+        let empty: Vec<String> = Vec::new();
+        assert!(!is_excluded_dir(".git", true, &empty));
+        assert!(!is_excluded_dir("node_modules", true, &empty));
+    }
 }

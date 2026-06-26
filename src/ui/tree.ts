@@ -34,6 +34,10 @@ const treeState = {
   onOpen: (_entry: TreeEntry) => {},
   fetch: undefined as FetchChildren | undefined,
   unread: undefined as UnreadStore | undefined,
+  /** 右クリック（コンテキストメニュー）で新規作成/削除を出す（要件11・T5）。未指定なら何もしない。 */
+  onContextMenu: undefined as
+    | ((entry: TreeEntry, x: number, y: number) => void)
+    | undefined,
   /** 展開済みフォルダの正規化パス集合（再構築でも展開を保つ）。 */
   expanded: new Set<string>(),
   /** 取得済み子のキャッシュ（正規化パス→直下エントリ）。展開は同期的にここから組む。 */
@@ -55,11 +59,42 @@ export function renderTree(
   onOpen: (entry: TreeEntry) => void,
   fetchChildren?: FetchChildren,
   unread?: UnreadStore,
+  onContextMenu?: (entry: TreeEntry, x: number, y: number) => void,
 ): void {
   treeState.rootEntries = entries;
   treeState.onOpen = onOpen;
   treeState.fetch = fetchChildren;
   treeState.unread = unread;
+  treeState.onContextMenu = onContextMenu;
+  rebuild();
+}
+
+/**
+ * 指定フォルダの子を再取得してツリーへ反映する（新規作成/削除後の差分更新・T5）。
+ * - `opts.expand=true`: フォルダを展開状態にしてから子を読む（新規作成した中身を見せる）。
+ * - 展開済みフォルダ: 子を再取得してキャッシュ更新→再構築（追加/削除を反映）。
+ * - 折りたたみ中かつ expand 指定なし: 表示に影響しないのでキャッシュ無効化のみ（次回展開で再取得）。
+ * ルート直下の更新は本関数では扱わない（呼び出し側が listDir で treeEntries を取り直す）。
+ */
+export async function reloadTreeDir(
+  dirPath: string,
+  opts?: { expand?: boolean },
+): Promise<void> {
+  if (!treeState.fetch) return;
+  const key = normPath(dirPath);
+  if (opts?.expand) treeState.expanded.add(key);
+  if (!treeState.expanded.has(key)) {
+    // 折りたたみ中＝見た目に出ないのでキャッシュを捨てるだけ（次回展開で新内容を取り直す）。
+    treeState.childCache.delete(key);
+    return;
+  }
+  try {
+    const children = await treeState.fetch(dirPath);
+    treeState.childCache.set(key, children);
+  } catch {
+    return; // 取得失敗は固めない（その行はそのまま）。
+  }
+  treeState.focusAfterRender = dirPath;
   rebuild();
 }
 
@@ -71,6 +106,23 @@ export function resetTreeExpansion(): void {
   treeState.expanded.clear();
   treeState.childCache.clear();
   treeState.focusAfterRender = undefined;
+}
+
+/**
+ * 指定パス（フォルダ）とその配下の expanded/childCache エントリを掃除する（削除時・T5・指摘8）。
+ * これをしないと、展開済みフォルダを削除→同じ親に同名フォルダを作り直したときに、旧 expanded が
+ * 残って「最初から展開済み」かつ旧子（削除済みフォルダの中身）が幽霊表示される。
+ * `path` 自身と `path + "/"` プレフィクスを持つ全キー（子孫）を expanded/childCache から消す。
+ */
+export function pruneTreeDir(path: string): void {
+  const key = normPath(path);
+  const prefix = `${key}/`;
+  for (const k of Array.from(treeState.expanded)) {
+    if (k === key || k.startsWith(prefix)) treeState.expanded.delete(k);
+  }
+  for (const k of Array.from(treeState.childCache.keys())) {
+    if (k === key || k.startsWith(prefix)) treeState.childCache.delete(k);
+  }
 }
 
 /**
@@ -184,6 +236,16 @@ function makeItem(entry: TreeEntry, depth: number): HTMLLIElement {
   li.addEventListener("focus", () => selectItem(li));
   // キーボード操作（要件11.4/11.5: マウスなしで中心フロー完走＋WAI-ARIA tree の展開/折りたたみ）。
   li.addEventListener("keydown", (e) => onItemKeydown(e, li, entry));
+  // 右クリック＝コンテキストメニュー（新規ファイル/新規フォルダ/削除＝要件11・T5）。
+  // 既定のブラウザメニューは出さず（preventDefault）、対象行を選択してから呼び出し側へ座標を渡す。
+  li.addEventListener("contextmenu", (e) => {
+    if (!treeState.onContextMenu) return;
+    e.preventDefault();
+    e.stopPropagation();
+    selectItem(li);
+    li.focus();
+    treeState.onContextMenu(entry, e.clientX, e.clientY);
+  });
   return li;
 }
 

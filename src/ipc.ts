@@ -454,10 +454,16 @@ export interface SearchOptions {
   regex: boolean;
 }
 
-/** 検索 1 ヒット（バイトオフセット半開区間・要件5.4）。 */
+/** 検索 1 ヒット（要件5.4・src-tauri document::MatchDto と対応）。 */
 export interface SearchMatch {
+  /** バイトオフセット半開区間の開始（replace_one の from 起点に使う＝backend はバイトで位置を扱う）。 */
   start: number;
+  /** バイトオフセット半開区間の終了。 */
   end: number;
+  /** UTF-16 コードユニット単位の開始（CM6 はこの座標系でデコレーション/選択を扱う）。 */
+  utf16_start: number;
+  /** UTF-16 コードユニット単位の終了。 */
+  utf16_end: number;
 }
 
 /** 検索結果（src-tauri document::SearchResultDto と対応・要件5.4）。 */
@@ -507,6 +513,74 @@ export function replaceInText(
   });
 }
 
+/** 1 件置換の結果（src-tauri document::ReplaceOneResultDto と対応・要件5.4）。 */
+export interface ReplaceOneResult {
+  /** 置換後の全文（replaced=false なら入力 text と同一＝不変）。 */
+  text: string;
+  /** 1 件置換できたか（from バイト以降にヒットが無ければ false）。 */
+  replaced: boolean;
+  /** 置換した区間の開始バイト（replaced=false のとき値は意味を持たない）。 */
+  start: number;
+  /** 置換した区間の終了バイト（replaced=false のとき値は意味を持たない）。 */
+  end: number;
+  /** 新テキスト上の「次の検索開始バイト」（置換テキスト末尾＝連続置換の起点）。 */
+  next: number;
+}
+
+/**
+ * `from` バイト位置以降の **1 件のみ** 置換する（要件5.4「置換（1件）」）。
+ * 現在ヒットを置換 → 再検索し next 以降の次ヒットへ進む流れに使う。replaced=false（以降に無し）なら
+ * text は不変で、呼び出し側が先頭ラップ等を判断する。キャプチャ参照は backend が展開済み。
+ */
+export function replaceOne(
+  text: string,
+  query: string,
+  replacement: string,
+  options: SearchOptions,
+  from: number,
+): Promise<ReplaceOneResult> {
+  return invoke<ReplaceOneResult>("replace_one", {
+    text,
+    query,
+    replacement,
+    options,
+    from,
+  });
+}
+
+// ── U3: 画像簡易ビュー（要件12.2）──────────────────────────────────────────
+
+/**
+ * `image_info` command の戻り（src-tauri asset::ImageInfoDto と round-trip・serde internally tagged・kebab-case）。
+ * - `"image"`: 画像として簡易ビューで描ける（寸法/ファイル上限内・既知画像マジック）。
+ * - `"too-large"`: 寸法上限超 or 寸法不明 or ファイル上限超（「既定アプリで開く」へ誘導）。
+ * - `"unsupported"`: 既知画像として解釈できない（非対応バイナリ＝「既定アプリで開く」へ誘導）。
+ */
+export type ImageInfo =
+  | { kind: "image"; width: number; height: number; mime: string }
+  | { kind: "too-large"; pixels: number }
+  | { kind: "unsupported" };
+
+/**
+ * 画像/非対応バイナリ/巨大画像の判定を取得する（要件12.2・U3）。
+ * backend は AccessControl::verify_read で封じ込め検証し、機密/上限超は表示させない（fail-closed）。
+ * 画像バイト自体はこの戻りには乗らず assetUrl の custom protocol が別配信する。
+ */
+export function imageInfo(path: string): Promise<ImageInfo> {
+  return invoke<ImageInfo>("image_info", { path });
+}
+
+/**
+ * 画像バイトを配信する custom protocol の実体 URL（要件12.2・U3）。
+ * `pika-asset://` は WebView2 上では `http://pika-asset.localhost/<percent-encoded 絶対パス>` として現れる。
+ * backend は先頭 `/` を除去し percent-decode してから verify_read で封じ込め検証し、暴走ガード
+ * （寸法/ファイル上限・機密拒否）を通したバイトのみを配信する。`encodeURIComponent` で `:` や `\\` を
+ * 確実にエンコードし、絶対パス（C:\... 等）をそのまま安全にクエリパスへ載せる。
+ */
+export function assetUrl(path: string): string {
+  return `http://pika-asset.localhost/${encodeURIComponent(path)}`;
+}
+
 /**
  * 診断ログフォルダの絶対パスを取得する（要件12.3「メニューからログフォルダを開ける」）。
  * バックエンドがフォルダ（<データルート>/logs/）を作成してからパスを返す。
@@ -524,6 +598,23 @@ export function logFolderPath(): Promise<string> {
  */
 export function openInDefaultApp(path: string): Promise<void> {
   return invoke<void>("open_in_default_app", { path });
+}
+
+/**
+ * ツリーから新規ファイル/フォルダを作成する（要件11・design G 右クリックメニュー）。
+ * `dir` 直下に `name` を作り、作成した絶対パスを返す。backend が**ワークスペース配下**かを再検証し、
+ * 任意パスへの作成は拒否する（fail-closed）。同名が既にあれば reject（既存を上書きしない）。
+ */
+export function createEntry(dir: string, name: string, isDir: boolean): Promise<string> {
+  return invoke<string>("create_entry", { dir, name, isDir });
+}
+
+/**
+ * ツリーから削除する（要件11「Delete＝ごみ箱へ移動」）。**完全削除ではなく OS のごみ箱へ移動**して
+ * 復元可能性を残す。backend がワークスペース配下かを再検証してからごみ箱へ送る（fail-closed）。
+ */
+export function deleteEntry(path: string): Promise<void> {
+  return invoke<void>("delete_entry", { path });
 }
 
 /**
@@ -545,8 +636,11 @@ export type DefaultModeSetting = "source" | "preview";
 /**
  * settings.toml の有効設定（src-tauri settings_service::SettingsDto と対応・要件10.3/10.4）。
  *
- * 無効値は backend（pika-core::settings）が既定へフォールバック済み。個別設定値の UI 適用は**段階的**
- * （本バッチは機構の貫通＝取得・再読込通知・破損/不完全保存の警告まで。適用は後続バッチ）。
+ * 無効値は backend（pika-core::settings）が既定へフォールバック済み。個別設定値の UI 適用状況:
+ * - **U2a で適用済み（frontend 可視分）**: theme / wrap_default / tab_width / default_mode。
+ *   起動時＋ライブ（settings-changed）で即反映する（default_mode のみ起動時の初回既定として適用）。
+ * - **U2b で適用予定（backend 消費分）**: excluded_dirs / huge_file_threshold_bytes /
+ *   sensitive_patterns / allow_remote_resources / feature_* / full_hash_on_startup。
  */
 export interface Settings {
   excluded_dirs: string[];
@@ -586,7 +680,8 @@ export function onSettingsWarning(
 
 /**
  * 設定の再読み込み（settings.toml の有効な編集保存を検知）の購読（要件10.3 再起動なし反映）。
- * ペイロードは更新後の有効設定。個別設定の即時適用は**段階的**（本バッチは反映の貫通＝通知まで）。
+ * ペイロードは更新後の有効設定。frontend 可視分（theme/wrap_default/tab_width）は U2a で即時適用する
+ * （default_mode は初回既定の意味なのでライブでは適用しない）。backend 消費分の適用は U2b。
  */
 export function onSettingsChanged(
   handler: (settings: Settings) => void,

@@ -320,6 +320,78 @@ pub fn replace_all(
     })
 }
 
+/// 単一ヒット置換の結果（要件5.4「1件ずつ置換」・U5）。
+///
+/// `replace_all` は全置換のみで「現在ヒットだけ置換して次へ」の口が無い。キャプチャ参照展開
+/// （`$1`/`${name}`）を Rust（cargo test 済み経路）に閉じるため、コアに単一ヒット置換を新設する
+/// （フロントでキャプチャ展開を実装しない＝未テストの変換を TS に置かない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceOne {
+    /// 対象 1 件を置換した**全文**（フロントはこれを CM6 へ単一トランザクションで反映する）。
+    pub text: String,
+    /// 置換した**元テキスト**上のマッチ開始バイト（含む）。
+    pub start: usize,
+    /// 置換した**元テキスト**上のマッチ終了バイト（含まない）。
+    pub end: usize,
+    /// **新テキスト**上で次の検索を始めるバイト位置（＝`start` + 展開後置換文字列の byte 長）。
+    pub next: usize,
+}
+
+/// 単一ヒットだけを置換する（要件5.4「1件ずつ置換」・U5）。
+///
+/// `from` バイト位置以降の**最初の 1 件**を置換し、置換後の全文と置換範囲、次検索開始位置を返す。
+/// キャプチャ参照（`$1`/`${name}`）は [`replace_all`] と同じ `Captures::expand` で展開する。
+///
+/// - `query` 空 or `from > haystack.len()` → `Ok(None)`（置換対象なし）。
+/// - `from` 以降にマッチが無ければ `Ok(None)`。
+/// - `BacktrackLimitExceeded`（ReDoS 上限超過）→ [`SearchError::Backtrack`]、その他コンパイル/実行
+///   エラー → [`SearchError::InvalidPattern`]（[`replace_all`] と同型のエラー処理）。
+///
+/// `cancel` は src-tauri の世代キャンセル（前の検索/置換を打ち切る）と整合させるため受け取るが、
+/// 単一ヒット置換は 1 件で完結するため検査点は持たない（協調キャンセルは全走査系で意味を持つ）。
+pub fn replace_one(
+    haystack: &str,
+    query: &str,
+    replacement: &str,
+    opts: SearchOptions,
+    from: usize,
+    cancel: &Cancel,
+) -> Result<Option<ReplaceOne>, SearchError> {
+    let _ = cancel; // 単一ヒットは検査点を持たない（シグネチャの一貫性のため受け取る）。
+    if query.is_empty() || from > haystack.len() {
+        return Ok(None);
+    }
+    let re = compile(query, opts)?;
+    let caps = match re.captures_from_pos(haystack, from) {
+        Ok(Some(caps)) => caps,
+        Ok(None) => return Ok(None),
+        Err(fancy_regex::Error::RuntimeError(
+            fancy_regex::RuntimeError::BacktrackLimitExceeded,
+        )) => {
+            return Err(SearchError::Backtrack);
+        }
+        Err(e) => return Err(SearchError::InvalidPattern(e.to_string())),
+    };
+    let whole = caps
+        .get(0)
+        .expect("captures は必ず全体マッチ(group 0)を持つ");
+    let (start, end) = (whole.start(), whole.end());
+    let mut expanded = String::new();
+    caps.expand(replacement, &mut expanded);
+    // 元テキストの前後を保ったまま、マッチ範囲だけを展開後文字列で差し替える（内容を失わない）。
+    let mut text = String::with_capacity(haystack.len() - (end - start) + expanded.len());
+    text.push_str(&haystack[..start]);
+    text.push_str(&expanded);
+    text.push_str(&haystack[end..]);
+    let next = start + expanded.len();
+    Ok(Some(ReplaceOne {
+        text,
+        start,
+        end,
+        next,
+    }))
+}
+
 /// `pos` 以降で次の char 境界を返す（空マッチで前進するため）。
 fn next_char_boundary(s: &str, pos: usize) -> usize {
     if pos >= s.len() {
@@ -520,5 +592,74 @@ mod tests {
         let handle = cancel.clone();
         handle.cancel();
         assert!(cancel.is_cancelled());
+    }
+
+    #[test]
+    fn 単一置換は最初の1件のみ置換する() {
+        // from=0 で先頭の "foo" 1 件だけ置換し、残りは不変。next は置換後の位置（"X" の直後）。
+        let r = replace_one("foo foo foo", "foo", "X", opts_regex(), 0, &Cancel::new())
+            .unwrap()
+            .expect("1件目がヒットする");
+        assert_eq!(r.text, "X foo foo");
+        assert_eq!((r.start, r.end), (0, 3)); // 元テキスト上の "foo" 範囲。
+        assert_eq!(r.next, 1); // 新テキスト上の "X"（1 byte）の直後。
+    }
+
+    #[test]
+    fn 単一置換はfromで2件目を置換できる() {
+        // 1 件目（byte 0..3）の後ろから探すと 2 件目の "foo"（byte 4..7）が置換される。
+        let r = replace_one("foo foo foo", "foo", "X", opts_regex(), 4, &Cancel::new())
+            .unwrap()
+            .expect("2件目がヒットする");
+        assert_eq!(r.text, "foo X foo");
+        assert_eq!((r.start, r.end), (4, 7));
+        assert_eq!(r.next, 5); // "foo X" の "X" 直後。
+    }
+
+    #[test]
+    fn 単一置換でキャプチャ参照を展開する() {
+        // 要件5.4「正規表現置換（キャプチャ参照）」を単一ヒットでも展開する（$1 等）。
+        let r = replace_one(
+            "alice@example bob@example",
+            r"(\w+)@",
+            "$1#",
+            opts_regex(),
+            0,
+            &Cancel::new(),
+        )
+        .unwrap()
+        .expect("1件目がヒットする");
+        // 1 件目 "alice@" のみ "alice#" に。2 件目 "bob@" は不変。
+        assert_eq!(r.text, "alice#example bob@example");
+        assert_eq!((r.start, r.end), (0, 6)); // "alice@" の範囲。
+        assert_eq!(r.next, 6); // "alice#"（6 byte）の直後。
+    }
+
+    #[test]
+    fn 単一置換は該当なしでnoneを返す() {
+        // from 以降にマッチが無ければ None（置換対象なし）。
+        let r = replace_one("foo foo", "foo", "X", opts_regex(), 7, &Cancel::new()).unwrap();
+        assert!(r.is_none());
+        // 範囲外 from も None（パニックしない）。
+        let r2 = replace_one("foo", "foo", "X", opts_regex(), 100, &Cancel::new()).unwrap();
+        assert!(r2.is_none());
+        // 空クエリも None。
+        let r3 = replace_one("foo", "", "X", opts_regex(), 0, &Cancel::new()).unwrap();
+        assert!(r3.is_none());
+    }
+
+    #[test]
+    fn 単一置換は大小無視オプションで1件置換する() {
+        // case_sensitive=false で先頭の "FOO" を 1 件だけ置換する。
+        let opts = SearchOptions {
+            case_sensitive: false,
+            ..opts_regex()
+        };
+        let r = replace_one("FOO foo Foo", "foo", "X", opts, 0, &Cancel::new())
+            .unwrap()
+            .expect("大小無視でヒットする");
+        assert_eq!(r.text, "X foo Foo");
+        assert_eq!((r.start, r.end), (0, 3));
+        assert_eq!(r.next, 1);
     }
 }

@@ -27,9 +27,13 @@ import {
   logFolderPath,
   openInDefaultApp,
   openLogFolder,
+  createEntry,
+  deleteEntry,
   getSettings,
   onSettingsWarning,
   onSettingsChanged,
+  imageInfo,
+  assetUrl,
   type TreeEntry,
   type Settings,
   type OpenRequestPayload,
@@ -37,20 +41,28 @@ import {
   type DocEncoding,
   type LineEnding,
   type PreviewRect,
+  type ImageInfo,
 } from "./ipc";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
 import { initTheme, applyTheme, currentTheme, type ThemeMode } from "./theme";
 import { initMenuBar, type MenuItemSpec, type MenuSpec } from "./ui/menu";
 import { initA11y, announce } from "./a11y";
 import { resolveShortcut, modsOf, normalizeKey, type Action, type Focus } from "./shortcuts";
-import { renderTree, resetTreeExpansion } from "./ui/tree";
+import { renderTree, resetTreeExpansion, reloadTreeDir, pruneTreeDir } from "./ui/tree";
 import { renderTabs, type TabModel } from "./ui/tabs";
 import { notify, notices } from "./ui/notifications";
 import { setStatus, renderStatus } from "./ui/status";
 import { UnreadStore } from "./ui/unread";
-import { isImageExt } from "./ui/image";
+import {
+  renderImageView,
+  renderOpenExternally,
+  classifyExtension,
+  type ImageFit,
+} from "./ui/image";
 import { degradeReasonsFromFlags, degradeMessage, emptyMessage } from "./ui/viewstate";
 import { createEditor, type EditorHandle } from "./editor";
+import { createSearchController, type SearchController } from "./search";
 import { renderDiff, type DiffHandle } from "./diff";
 import {
   buildPreview,
@@ -81,6 +93,11 @@ interface OpenTab extends TabModel {
    * （eval high: 削除済みタブの回復導線欠落＝旧 wx 版 F-017 と同質の行き止まり防止）。
    */
   deleted: boolean;
+  /**
+   * 非テキスト（画像/非対応バイナリ＝要件12.2・U3）か。true のとき CM6 を作らず image-host で表示する
+   * （画像は簡易ビュー、巨大画像/非対応は「既定アプリで開く」誘導）。モード/差分は無効・カーソルステータス無し。
+   */
+  nonText: boolean;
   /** 第2段階以降（編集不可・読み取り専用ビューア）か。開き直しメニューの無効化に使う（backend degrade.editing_off を保存）。 */
   editingOff: boolean;
   /**
@@ -144,11 +161,29 @@ const state = {
   // 既定 ON（ui-design §120 の折り返しトグル準拠）。短い行でも横スクロールバーが常時出る問題を
   // 防ぐため折り返しを既定にし、長い行を見たいときだけ表示メニューで OFF にする運用へ倒す。
   lineWrapping: true,
+  // タブの表示幅（settings.toml の tab_width・EditorState.tabSize へ流す）。アプリ全体で 1 つ。
+  // lineWrapping と同じく、タブ切替でエディタを作り直しても createEditor の初期値で引き継ぐ。
+  // 既定 4（settings 取得前/取得失敗時の素の値）。applySettings が getSettings/settings-changed で更新する。
+  tabWidth: 4,
   // settings.toml の有効設定（要件10.3/10.4）。起動時に getSettings で取得し、settings-changed で更新する。
-  // 個別設定の UI 適用（テーマ・折返し既定・タブ幅 等）は**段階的**（本バッチは保持と機構の貫通まで）。
-  // null の間は未取得（取得失敗時も含む）。値の適用は後続バッチで onSettingsChanged から行う（TODO: 段階的反映）。
+  // 可視4項目（theme/wrap_default/tab_width/default_mode）は applySettings が即適用する（U2a）。
+  // 残りの backend 消費分（excluded_dirs/huge_file_threshold/sensitive_patterns/allow_remote_resources/
+  // feature_*/full_hash_on_startup）の適用は U2b で別途。null の間は未取得（取得失敗時も含む）。
   settings: null as Settings | null,
 };
+
+/**
+ * 画像簡易ビューの表示倍率（要件12.2・U3）。アプリ全体で 1 つ。画像タブを開く/切替えるたびに "fit" へ
+ * リセットする（前画像で「等倍」にしていても新しい画像はウィンドウフィットで開く＝予期しない巨大表示を避ける）。
+ */
+let imageFit: ImageFit = "fit";
+
+/**
+ * 検索/置換バー（U4/U5・要件5.4）。main() で 1 度だけ生成し、open/close する。
+ * deps は getter 経由で常に最新の state.editor / 内容を取るので、タブ切替で editor を作り直しても
+ * 正しいエディタへハイライト/置換が向く。
+ */
+let searchController: SearchController | null = null;
 
 const workbench = () => document.getElementById("workbench") as HTMLElement;
 const treeHeadLabel = () => document.getElementById("tree-head-label") as HTMLElement;
@@ -158,6 +193,8 @@ const editorPane = () => document.getElementById("editor-pane") as HTMLElement;
 const editorHost = () => document.getElementById("editor-host") as HTMLElement;
 const diffHost = () => document.getElementById("diff-host") as HTMLElement;
 const previewHost = () => document.getElementById("preview-host") as HTMLElement;
+// 非テキスト（画像/非対応バイナリ）の簡易ビュー占有領域（要件12.2・U3）。CM6 を作らずここで表示する。
+const imageHost = () => document.getElementById("image-host") as HTMLElement;
 // タブバー右端 tab-tools（UIブラッシュアップ T6 差分 C4）。モード切替セグメント・差分トグル・確認ボタン。
 const modeButtons = () =>
   Array.from(
@@ -172,16 +209,36 @@ const tabsEl = () => document.getElementById("tabs") as HTMLElement;
 // 隠れた差分あり（未読）タブ数のバッジ（T10・差分 C5・ui-mock .hidden-unread）。
 const hiddenUnreadBadge = () => document.getElementById("hidden-unread") as HTMLButtonElement;
 
+/**
+ * アクティブタブで「確認済みにする」が**効果を持つ**か（指摘7・要件8.3）。
+ *
+ * 確認済み＝外部変更（未読 ±/◆）を再照合してベースラインへ取り込む操作。差分あり（unread の
+ * modified/created）でないファイルは確認するものが無く、押しても no-op なので始めから無効化する。
+ * 削除済み（ディスク実体なし・rollback 導線が別）・非テキスト（画像/バイナリ＝確認の概念なし）・
+ * 新規未保存（unread が付かない＝disk 実体なし）も対象外。
+ */
+function activeCanConfirm(): boolean {
+  if (!state.active) return false;
+  const tab = state.tabs.find((t) => t.path === state.active);
+  if (!tab || tab.deleted || tab.nonText) return false;
+  const kind = state.unread.get(state.active);
+  return kind === "modified" || kind === "created";
+}
+
 function refreshTabs(): void {
   renderTabs(state.tabs, state.active, activateTab, state.unread, closeTab);
-  const hasActive = !!state.active;
+  // アクティブタブが横スクロール域の外（新規に末尾へ追加された等）なら可視域へ寄せる（指摘2 補強）。
+  // min-width:0（#editor-pane）で overflow-x が正しく効くようになった上で、切替/追加時に確実に見せる。
+  scrollActiveTabIntoView();
   // tab-tools（モード切替セグメント/差分トグル）の表示状態・有効/無効を同期する。
   refreshViewTools();
   // 「確認済みにする」は tab-tools 右端に残るボタン（T6）。退避＋ベースライン更新を伴うため
   // in-flight 中（busy）は無効に保つ（内部 refreshTabs で再有効化して二重送信を許さない）。
   // 保存/すべて確認済み/巻き戻しはツールバー廃止（T8）でメニューへ移したため、活性はメニューを
   // 開いた時点で都度算出する（ui/menu.ts の build が hasActive/busy を反映）。ここでは扱わない。
-  confirmBtn().disabled = !hasActive || state.busy;
+  // 効果のないボタンは始めから無効化する（指摘7）: 差分あり（未読 modified/created）でないファイルは
+  // 確認するものが無い＝確認済みボタンを無効にする（新規未保存/削除済み/非テキストも対象外）。
+  confirmBtn().disabled = !activeCanConfirm() || state.busy;
   // タブ描画が変わると可視範囲も変わるので隠れ未読バッジを再計算する（更新タイミング(b)）。
   scheduleHiddenUnread();
 }
@@ -249,6 +306,26 @@ function updateHiddenUnread(): void {
   }
 }
 
+/**
+ * アクティブタブが横スクロール域の外なら可視域へ寄せる（指摘2 補強）。
+ * 末尾へ新規追加されたタブ/キーボード移動でアクティブが画面外になったとき、見切れたまま放置しない。
+ * 横方向のみを自前計算してずらす（タブ列は横スクロール専用・縦スクロールを誘発しない）。
+ */
+function scrollActiveTabIntoView(): void {
+  const container = tabsEl();
+  const active = container.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+  if (!active) return;
+  const left = active.offsetLeft;
+  const right = left + active.offsetWidth;
+  const viewLeft = container.scrollLeft;
+  const viewRight = viewLeft + container.clientWidth;
+  if (left < viewLeft) {
+    container.scrollLeft = Math.max(0, left - 12);
+  } else if (right > viewRight) {
+    container.scrollLeft = right - container.clientWidth + 12;
+  }
+}
+
 /** バッジクリックでスクロールする先（最初の隠れ未読タブ要素）。updateHiddenUnread が更新する。 */
 let hiddenUnreadTarget: HTMLElement | null = null;
 
@@ -277,23 +354,417 @@ function scrollToHiddenUnread(): void {
  */
 function refreshViewTools(): void {
   const hasActive = !!state.active;
+  // 非テキスト（画像/非対応バイナリ＝要件12.2・U3）にモード/差分は無いので無効化する。
+  const activeTab = state.tabs.find((t) => t.path === state.active);
+  const nonText = !!activeTab && activeTab.nonText && !activeTab.deleted;
   for (const btn of modeButtons()) {
     const on = btn.dataset.mode === state.viewMode;
     btn.classList.toggle("on", on);
     btn.setAttribute("aria-pressed", String(on));
-    btn.disabled = !hasActive;
+    btn.disabled = !hasActive || nonText;
   }
   const diffBtn = toggleDiffBtn();
-  diffBtn.disabled = !hasActive;
+  diffBtn.disabled = !hasActive || nonText;
   diffBtn.classList.toggle("on", state.diffOn);
   diffBtn.setAttribute("aria-pressed", String(state.diffOn));
-  // 「ブラウザで開く」はアクティブタブのファイルが対象。アクティブが無い間は無効にする（誤クリック防止）。
+  // 「ブラウザで開く」はアクティブタブのファイルが対象。画像も既定アプリで開けるので活性のまま。
+  // アクティブが無い間のみ無効にする（誤クリック防止）。
   openExternalBtn().disabled = !hasActive;
 }
 
 function refreshTree(): void {
   // 子フォルダの遅延展開は副作用なし列挙（listDir）で取得する（監視ルート付け替え/ベースライン再取得をしない）。
-  renderTree(state.treeEntries, (entry) => void openFile(entry), listDir, state.unread);
+  // 右クリックで新規ファイル/新規フォルダ/削除のコンテキストメニューを出す（要件11・T5）。
+  renderTree(
+    state.treeEntries,
+    (entry) => void openFile(entry),
+    listDir,
+    state.unread,
+    (entry, x, y) => showTreeContextMenu(entry, x, y),
+  );
+}
+
+// ── ツリーのコンテキストメニュー＋新規作成/削除（要件11・design G・T5）─────────────────────
+
+/** 現在開いている単一のコンテキストメニュー要素（多重表示を防ぐ）。 */
+let openContext: HTMLElement | null = null;
+
+/**
+ * 開いているモーダル数（promptText・指摘5）。>0 の間はグローバルショートカット（window keydown）を
+ * 無効化し、名前入力中の修飾キー操作（Ctrl+Shift+Enter＝確認済み / Ctrl+W＝タブを閉じる 等）が
+ * 背景タブへ貫通するのを防ぐ。
+ */
+let modalDepth = 0;
+
+/**
+ * ツリーから今しがた自分で作成したパス→登録時刻(ms)（指摘4）。watcher は workspace を再帰監視するため、
+ * pika 内で作った空ファイルにも created イベントを emit する。これを未読(◆ 新規)として扱うと「たった今
+ * 自分で作ったファイル」が未読・確認対象に見えてしまう。created イベント到着時にこの Map で**ワンショット
+ * 抑制**（非同期到着と競合しないよう到着時点で判定・消費）。キーは selfKey で正規化する。
+ *
+ * 値に登録時刻を持たせ TTL で stale エントリを掃除する（第2巡 回帰修正）。watcher が当該 created を
+ * 合体/取りこぼしで一度も emit しないと未消費エントリが恒久的に残り、後で外部ツールが同パスを再作成した
+ * ときその正当な外部 created を握りつぶす（過剰一致）＋ Set 無制限増加が起きるため。
+ */
+const selfCreatedPaths = new Map<string, number>();
+
+/** 自作成抑制エントリの寿命（ms）。これを過ぎた未消費分は次回 onExternalChange で破棄する。 */
+const SELF_CREATED_TTL_MS = 15000;
+
+/** パスを selfCreatedPaths のキーへ正規化する（区切り `\`→`/`・Windows の大小無視）。 */
+function selfKey(p: string): string {
+  return p.replace(/\\/g, "/").toLowerCase();
+}
+
+/** TTL を過ぎた未消費の自作成抑制エントリを破棄する（stale 過剰一致＋無制限増加の防止・第2巡）。 */
+function pruneSelfCreated(now: number): void {
+  for (const [k, t] of selfCreatedPaths) {
+    if (now - t > SELF_CREATED_TTL_MS) selfCreatedPaths.delete(k);
+  }
+}
+
+/** コンテキストメニューを閉じる（外側クリック/Esc/ウィンドウblur/アクション後）。 */
+function closeContextMenu(): void {
+  if (openContext) {
+    openContext.remove();
+    openContext = null;
+  }
+  document.removeEventListener("pointerdown", onContextOutside, true);
+  document.removeEventListener("keydown", onContextKey, true);
+  window.removeEventListener("blur", closeContextMenu);
+}
+
+function onContextOutside(e: Event): void {
+  if (openContext && !openContext.contains(e.target as Node)) closeContextMenu();
+}
+function onContextKey(e: KeyboardEvent): void {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeContextMenu();
+  }
+}
+
+/** コンテキストメニュー 1 項目（"sep" は区切り線）。 */
+type ContextItem = { label: string; danger?: boolean; run: () => void } | "sep";
+
+/** 指定座標へコンテキストメニューを開く（共通土台・menu-pop の見た目を流用）。 */
+function openContextMenu(items: ContextItem[], x: number, y: number): void {
+  closeContextMenu();
+  const menu = document.createElement("div");
+  menu.className = "menu-pop context-menu";
+  menu.setAttribute("role", "menu");
+  for (const item of items) {
+    if (item === "sep") {
+      const sep = document.createElement("div");
+      sep.className = "msep";
+      menu.appendChild(sep);
+      continue;
+    }
+    const row = document.createElement("div");
+    row.className = item.danger ? "mrow danger" : "mrow";
+    row.setAttribute("role", "menuitem");
+    row.tabIndex = -1;
+    const label = document.createElement("span");
+    label.className = "mlabel";
+    label.textContent = item.label;
+    row.appendChild(label);
+    row.addEventListener("click", () => {
+      closeContextMenu();
+      item.run();
+    });
+    menu.appendChild(row);
+  }
+  // 画面外へはみ出さないよう、仮表示で寸法を測ってから位置をクランプする。
+  menu.style.position = "fixed";
+  menu.style.visibility = "hidden";
+  menu.style.zIndex = "2000";
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4));
+  const top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.style.visibility = "visible";
+  openContext = menu;
+  // 外側クリック/Esc/blur で閉じる。トリガとなった contextmenu ジェスチャの後続イベントで
+  // 即閉じないよう、登録は次フレームへ遅延する（capture フェーズで先取り）。
+  setTimeout(() => {
+    document.addEventListener("pointerdown", onContextOutside, true);
+    document.addEventListener("keydown", onContextKey, true);
+    window.addEventListener("blur", closeContextMenu);
+  }, 0);
+}
+
+/**
+ * テーマ準拠の自前プロンプトモーダル（名前入力・T5）。
+ *
+ * window.prompt はこのコードベースでは dev フォールバックでのみ使われ、Tauri 本番 WebView での動作
+ * 実績が無い（無反応で新規作成が黙って失敗する事故を避ける）。window.confirm は本番実績があるので
+ * 削除確認はそちらを使い、テキスト入力だけ自前モーダルにする。Promise で OK=入力値 / Cancel=null を返す。
+ */
+function promptText(message: string, placeholder = ""): Promise<string | null> {
+  return new Promise((resolve) => {
+    // 閉じた後にフォーカスを戻す元要素を退避（右クリックしたツリー行など・指摘10 a11y）。
+    const prevFocus = document.activeElement as HTMLElement | null;
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    const box = document.createElement("div");
+    box.className = "modal-box";
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    const label = document.createElement("div");
+    label.className = "modal-label";
+    label.textContent = message;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "modal-input";
+    input.placeholder = placeholder;
+    const actions = document.createElement("div");
+    actions.className = "modal-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "modal-btn";
+    cancel.textContent = "キャンセル";
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = "modal-btn primary";
+    ok.textContent = "OK";
+    actions.append(cancel, ok);
+    box.append(label, input, actions);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    // モーダル表示中はグローバルショートカット（window keydown）を無効化する（指摘5: 名前入力中の
+    // Ctrl+Shift+Enter→確認済み や Ctrl+W→タブを閉じる が背景タブへ貫通するのを防ぐ）。
+    modalDepth += 1;
+    input.focus();
+    const close = (value: string | null): void => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey, true);
+      modalDepth = Math.max(0, modalDepth - 1);
+      // フォーカスを開く前の要素へ戻す（キーボード操作位置を見失わない・指摘10）。
+      prevFocus?.focus?.();
+      resolve(value);
+    };
+    // Tab フォーカスを box 内（input / キャンセル / OK）へ閉じ込める（指摘10 フォーカストラップ）。
+    const focusables: HTMLElement[] = [input, cancel, ok];
+    const onKey = (e: KeyboardEvent): void => {
+      // 処理可否に関わらず、モーダル中のキーは背景（window ハンドラ）へ伝播させない（指摘5）。
+      // ただし入力欄へは届かせる必要があるため capture では stopImmediatePropagation せず、
+      // ここで stopPropagation して bubble 経路の window ハンドラだけを止める。
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        close(null);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        close(input.value);
+      } else if (e.key === "Tab") {
+        // box 内の 3 要素を循環させる（外へ抜けない）。
+        e.preventDefault();
+        const active = document.activeElement as HTMLElement | null;
+        const idx = focusables.indexOf(active as HTMLElement);
+        const dir = e.shiftKey ? -1 : 1;
+        const next = focusables[(idx + dir + focusables.length) % focusables.length];
+        next?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    cancel.addEventListener("click", () => close(null));
+    ok.addEventListener("click", () => close(input.value));
+    // 背景（オーバーレイ自身）クリックでキャンセル（box 内クリックは透過しない）。
+    overlay.addEventListener("pointerdown", (e) => {
+      if (e.target === overlay) close(null);
+    });
+  });
+}
+
+/**
+ * テーマ準拠の自前確認モーダル（はい/いいえ・T5 削除確認）。Promise で OK=true / Cancel=false を返す。
+ *
+ * 実機検証で window.confirm がこの Tauri/WebView2 ビルドでは**ダイアログを出さず即 true を返す**ことが
+ * 判明したため（window.prompt と同根）、削除の確認をネイティブ confirm に頼らず自前モーダルにする
+ * （誤クリックでの即削除を防ぐ＝最上位原則「データを失わない」。ごみ箱移動で復元可能だが確認は出す）。
+ */
+function confirmModal(
+  message: string,
+  opts?: { okLabel?: string; danger?: boolean },
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const prevFocus = document.activeElement as HTMLElement | null;
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    const box = document.createElement("div");
+    box.className = "modal-box";
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    const label = document.createElement("div");
+    label.className = "modal-label";
+    // 複数行メッセージ（\n）は <br> で改行表示する。
+    message.split("\n").forEach((line, i) => {
+      if (i > 0) label.appendChild(document.createElement("br"));
+      label.appendChild(document.createTextNode(line));
+    });
+    const actions = document.createElement("div");
+    actions.className = "modal-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "modal-btn";
+    cancel.textContent = "キャンセル";
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = opts?.danger ? "modal-btn danger-btn" : "modal-btn primary";
+    ok.textContent = opts?.okLabel ?? "OK";
+    actions.append(cancel, ok);
+    box.append(label, actions);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    modalDepth += 1;
+    ok.focus();
+    const focusables: HTMLElement[] = [cancel, ok];
+    const close = (value: boolean): void => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey, true);
+      modalDepth = Math.max(0, modalDepth - 1);
+      prevFocus?.focus?.();
+      resolve(value);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        close(false);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        close(true);
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        const idx = focusables.indexOf(document.activeElement as HTMLElement);
+        const dir = e.shiftKey ? -1 : 1;
+        focusables[(idx + dir + focusables.length) % focusables.length]?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    cancel.addEventListener("click", () => close(false));
+    ok.addEventListener("click", () => close(true));
+    overlay.addEventListener("pointerdown", (e) => {
+      if (e.target === overlay) close(false);
+    });
+  });
+}
+
+/** ツリー項目の右クリックメニュー（ファイル/フォルダ＝要件11）。 */
+function showTreeContextMenu(entry: TreeEntry, x: number, y: number): void {
+  // 新規作成先: フォルダ上ならその中、ファイル上ならその親フォルダ。
+  const targetDir = entry.is_dir ? entry.path : parentDirOf(entry.path);
+  const expandAfter = entry.is_dir; // フォルダ内に作ったら展開して中身を見せる。
+  openContextMenu(
+    [
+      { label: "新規ファイル", run: () => void onCreateEntry(targetDir, false, expandAfter) },
+      { label: "新規フォルダ", run: () => void onCreateEntry(targetDir, true, expandAfter) },
+      "sep",
+      { label: "削除（ごみ箱へ）", danger: true, run: () => void onDeleteEntry(entry) },
+    ],
+    x,
+    y,
+  );
+}
+
+/** ツリーの空き領域（ルート）右クリックメニュー（新規作成のみ）。 */
+function showRootContextMenu(x: number, y: number): void {
+  if (!state.folder) return;
+  const dir = state.folder;
+  openContextMenu(
+    [
+      { label: "新規ファイル", run: () => void onCreateEntry(dir, false, false) },
+      { label: "新規フォルダ", run: () => void onCreateEntry(dir, true, false) },
+    ],
+    x,
+    y,
+  );
+}
+
+/** パスの親フォルダ（末尾区切り＋名前を落とす）。区切りが無ければ自身を返す。 */
+function parentDirOf(path: string): string {
+  const m = path.replace(/[\\/]+$/, "").replace(/[\\/][^\\/]+$/, "");
+  return m || path;
+}
+
+/** パス区切り（\ と /）・末尾区切り・大小を吸収して等価比較する。 */
+function samePath(a: string, b: string): boolean {
+  const norm = (p: string): string => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return norm(a) === norm(b);
+}
+
+/**
+ * 新規ファイル/フォルダを作成する（要件11）。名前を尋ね、backend で作成し、ツリーを更新する。
+ * ファイルは作成後に開く（中心体験へ即接続）。フォルダは作成先を展開して中身を見せる。
+ */
+async function onCreateEntry(dir: string, isDir: boolean, expandDir: boolean): Promise<void> {
+  const what = isDir ? "フォルダ" : "ファイル";
+  const name = await promptText(
+    `新規${what}の名前を入力してください`,
+    isDir ? "新しいフォルダ" : "新しいファイル.md",
+  );
+  if (name === null) return; // キャンセル。
+  const trimmed = name.trim();
+  if (!trimmed) {
+    notify("名前を入力してください", "warn");
+    return;
+  }
+  try {
+    const created = await createEntry(dir, trimmed, isDir);
+    // 自作成は watcher の created イベントを未読(◆)にしない（指摘4）。イベント到着時に消費する。
+    selfCreatedPaths.set(selfKey(created), Date.now());
+    await refreshTreeDir(dir, { expand: expandDir });
+    if (!isDir) {
+      // 作成した空ファイルを開く（テキスト/非テキスト判定は openFile が拡張子で行う）。
+      await openFile({ name: trimmed, path: created, is_dir: false });
+      // 作成直後にすぐ編集を始められるようエディタへフォーカスを移す（指摘9）。
+      // refreshTreeDir/openFile の途中でツリー行へフォーカスが移っているため明示的に取り戻す。
+      state.editor?.focusEditor();
+    }
+    notify(`${what}を作成しました: ${trimmed}`);
+  } catch (e) {
+    notify(`${what}の作成に失敗しました: ${String(e)}`, "error");
+  }
+}
+
+/** 削除（ごみ箱へ移動・要件11）。確認のうえ backend でごみ箱へ送り、ツリーを更新する。 */
+async function onDeleteEntry(entry: TreeEntry): Promise<void> {
+  const what = entry.is_dir ? "フォルダ" : "ファイル";
+  const ok = await confirmModal(
+    `${what}「${entry.name}」をごみ箱へ移動します。よろしいですか？\n` +
+      `（完全削除ではなく OS のごみ箱へ移動するので、必要なら復元できます）`,
+    { okLabel: "ごみ箱へ移動", danger: true },
+  );
+  if (!ok) return;
+  try {
+    await deleteEntry(entry.path);
+    // 削除したフォルダ自身とその配下の展開状態/子キャッシュを掃除する（同名再作成時の幽霊表示防止・指摘8）。
+    if (entry.is_dir) pruneTreeDir(entry.path);
+    await refreshTreeDir(parentDirOf(entry.path));
+    notify(`ごみ箱へ移動しました: ${entry.name}`);
+    // 開いているタブの追従（「削除済み」表示）は watcher の removed イベント（onExternalChange）が担う。
+  } catch (e) {
+    notify(`削除に失敗しました: ${String(e)}`, "error");
+  }
+}
+
+/** 作成/削除後にツリーの該当階層を更新する（ルートは listDir で取り直し、サブフォルダは reloadTreeDir）。 */
+async function refreshTreeDir(dir: string, opts?: { expand?: boolean }): Promise<void> {
+  if (state.folder && samePath(dir, state.folder)) {
+    try {
+      const entries = await listDir(state.folder);
+      state.treeEntries = entries;
+      refreshTree();
+    } catch {
+      // 取得失敗は固めない（現状維持）。
+    }
+    return;
+  }
+  await reloadTreeDir(dir, opts);
 }
 
 /**
@@ -339,6 +810,9 @@ function initWindowControls(): void {
     maxBtn.setAttribute("aria-label", maximized ? "元のサイズに戻す" : "最大化");
     maxBtn.setAttribute("title", maximized ? "元のサイズに戻す" : "最大化");
     maxBtn.classList.toggle("is-maximized", maximized);
+    // 最大化中は上端リサイズ縁（#resize-top）を CSS で消す（指摘8）。最大化したウィンドウは上辺リサイズが
+    // 無効なのに ns-resize カーソルが出て「大きさ調整できそう」に見える誤解を防ぐ（通常カーソルへ戻す）。
+    document.body.classList.toggle("window-maximized", maximized);
   };
   maxBtn.addEventListener("click", () => {
     void (async () => {
@@ -416,6 +890,9 @@ function setMutatingButtonsDisabled(disabled: boolean): void {
 }
 
 async function activateTab(path: string): Promise<void> {
+  // タブ切替はエディタを destroy→再生成するため、検索バーのハイライト（StateField）は破棄される。
+  // 古いエディタ向けの検索状態を残さないようバーを閉じる（U4・要件5.4）。
+  searchController?.close();
   // 切替前に現在タブの位置を退避しておく（後でこのタブへ戻ったとき位置を復元するため）。
   captureActivePosition();
   state.active = path;
@@ -425,6 +902,22 @@ async function activateTab(path: string): Promise<void> {
   // 外部リソース許可は **タブ切替で必ず既定オフに戻す**（要件6.2「既定は必ずオフに戻る」・永続しない）。
   // 「許可して再読込」はこのタブをアクティブに見ている間だけ有効で、切り替えると遮断へ戻る。
   if (tab) tab.allowExternal = undefined;
+  // 非テキスト（画像/非対応バイナリ＝要件12.2・U3）は CM6 を作らず image-host で表示する。
+  // 削除済みでない非テキストタブのみここで処理する（削除済みは下の deleted 分岐＝rollback 導線を優先）。
+  if (tab && tab.nonText && !tab.deleted) {
+    // 新しい画像はウィンドウフィットで開く（前画像の「等倍」を引きずらない）。
+    imageFit = "fit";
+    // CM6 を破棄して editor を null にする（captureActivePosition/refreshStatus/captureTabHash は
+    // !state.editor で早期 return するため、画像タブ中はこれらが安全に no-op になる）。
+    state.editor?.destroy();
+    state.editor = null;
+    refreshTabs();
+    await renderNonTextTab(tab);
+    // host 可視を正規化する（image-host のみ表示・preview 子WebView は隠す）。
+    applyOccupancy();
+    void persistAppState();
+    return;
+  }
   // 削除済みタブはディスクから読めない。退避/ベースラインは snapshot に残るので、
   // 直近内容を空にしてエディタを出し「確認済み時点に戻す（rollback）」導線を保つ（eval high）。
   // ただし削除済みタブを編集して別タブへ切り替えていた場合（dirty かつ draft あり）は、その未保存編集を
@@ -438,8 +931,11 @@ async function activateTab(path: string): Promise<void> {
       () => markDirty(path),
       () => refreshStatus(),
       state.lineWrapping,
+      state.tabWidth,
     );
     refreshTabs();
+    // 直前に画像タブを見ていた場合に image-host が残らないよう隠す（画像→削除済みタブ切替の正規化）。
+    imageHost().hidden = true;
     setStatus(`削除済み: ${path}（［確認済み時点に戻す］で退避から復元できます）`);
     return;
   }
@@ -472,7 +968,12 @@ async function activateTab(path: string): Promise<void> {
       () => markDirty(path),
       () => refreshStatus(),
       state.lineWrapping,
+      state.tabWidth,
     );
+    // host 可視を正規化する（画像タブ→テキストタブ切替で image-host が残らないよう必ず隠す＝U3）。
+    // applyOccupancy は hidden 切替＋bounds のみで preview ナビゲートはしないため、下の
+    // renderActiveDiff/renderActivePreview（実ナビゲート）の前に置いても順序を壊さない。
+    applyOccupancy();
     // 段階制で機能が縮退するとき（preview/diff/highlight 等の自動オフ）は理由を通知バー提示する（要件2.2）。
     notifyDegrade(path, doc.degrade);
     if (doc.decode_warning) {
@@ -499,6 +1000,53 @@ async function activateTab(path: string): Promise<void> {
     }
   } catch (e) {
     notify(`開けませんでした: ${String(e)}`, "error");
+  }
+}
+
+/**
+ * 非テキストタブ（画像/非対応バイナリ＝要件12.2・U3）を image-host へ描画する。
+ *
+ * backend の image_info で種別を確かめ、画像なら assetUrl の custom protocol 経由で <img> 表示
+ * （ウィンドウフィット/等倍トグル付き）、巨大画像/非対応/開けない（機密拒否等）は「既定アプリで開く」
+ * 誘導を出して行き止まりにしない（要件12 縮退時の next-action）。通知は出しすぎない（描画自体が状態提示）。
+ *
+ * 画像の内容ハッシュ baseline（復元時の別物検知）は MVP 外＝未対応。live 変更検知は watcher の
+ * パスイベント（fs-changed の未読）で満たされ、画像タブも特別な結線なしにそれへ乗る（要件12.2）。
+ */
+async function renderNonTextTab(tab: OpenTab): Promise<void> {
+  const host = imageHost();
+  host.replaceChildren();
+  host.hidden = false;
+  try {
+    const info: ImageInfo = await imageInfo(tab.path);
+    // await 中に別タブへ切り替わっていたら描画を破棄する（最新性チェック・後着結果で別タブを汚さない）。
+    if (state.active !== tab.path) return;
+    if (info.kind === "image") {
+      // fit/actual トグル付きで描画する。トグルは imageFit を更新して同じ画像を再描画する
+      // （コールバックを再生成するため draw を自己参照する）。
+      const draw = (): void =>
+        renderImageView(imageHost(), assetUrl(tab.path), imageFit, (f) => {
+          imageFit = f;
+          draw();
+        });
+      draw();
+    } else if (info.kind === "too-large") {
+      renderOpenExternally(
+        host,
+        "画像が大きすぎるため簡易ビューでは表示できません（既定のアプリで開いてください）",
+        () => void onOpenExternal(),
+      );
+    } else {
+      renderOpenExternally(
+        host,
+        "対応していない形式です（既定のアプリで開いてください）",
+        () => void onOpenExternal(),
+      );
+    }
+  } catch (e) {
+    // image_info が Err を返すケース（機密ファイル拒否・I/O 失敗等）。行き止まりにせず外部誘導を出す。
+    if (state.active !== tab.path) return;
+    renderOpenExternally(host, `開けませんでした: ${String(e)}`, () => void onOpenExternal());
   }
 }
 
@@ -576,15 +1124,15 @@ function markDirty(path: string): void {
 }
 
 async function openFile(entry: TreeEntry): Promise<void> {
-  // 非テキスト（画像）は簡易ビュー扱い（要件12.2）。寸法プリチェック（6000万px 超は外部誘導）は
-  // backend（custom protocol/command）が行う。ここでは種別判定で CM6 へテキスト全量ロードしない分岐を持つ
-  // （実描画・寸法プリチェックの実効は系統C＝acceptance TG5/TG6）。
-  if (isImageExt(entry.name)) {
-    notify(`画像ファイルです（簡易ビューで表示・編集はできません）: ${entry.name}`, "info");
-  }
+  // 非テキスト（画像/非対応バイナリ）は CM6 へテキスト全量ロードせず簡易ビュー扱いにする（要件12.2・U3）。
+  // 拡張子で種別判定し、image も unsupported も「非テキスト」＝nonText=true として CM6 を作らない
+  // （実画像配信・寸法プリチェックは backend の image_info / custom protocol が担う＝activateTab で結線）。
+  const kind = classifyExtension(entry.name);
   if (!state.tabs.some((t) => t.path === entry.path)) {
     state.tabs.push(newTab(entry.path, entry.name));
   }
+  const tab = state.tabs.find((t) => t.path === entry.path);
+  if (tab) tab.nonText = kind !== "text";
   await activateTab(entry.path);
   // 最近使ったファイルへ記録（要件10.2・ジャンプリスト反映は backend）。
   void noteRecent("file", entry.path).catch(() => undefined);
@@ -623,6 +1171,7 @@ function newTab(path: string, title: string): OpenTab {
     cursorColumn: 1,
     scrollTop: 1,
     deleted: false,
+    nonText: false,
     editingOff: false,
     // 既定は BOM なし UTF-8（新規ファイル/不明時）。既存ファイルは open 時に open_document の判定で上書きする。
     encoding: "utf-8",
@@ -633,20 +1182,51 @@ function newTab(path: string, title: string): OpenTab {
 }
 
 async function onOpenFolder(): Promise<void> {
-  // パス入力欄(#folder-path)はツールバー廃止（T8）で撤去したため window.prompt で受け取る
-  //（ネイティブ選択ダイアログは capability を増やすため別途・最薄方針を踏襲）。
+  // OS ネイティブ選択ダイアログでフォルダを選ぶ（要件3.2・dialog:allow-open）。
   // 現在フォルダを既定値として提示し、キャンセル（null）時は何もしない。
-  const dir = window.prompt(
-    "開くフォルダのパスを入力してください（例 C:\\work\\notes）",
-    state.folder ?? "",
-  );
-  if (dir === null) return; // キャンセル＝何もしない。
-  const trimmed = dir.trim();
+  // 返却パスは必ず switchFolder 経由で open_workspace に渡す（AccessControl で core 再検証）。
+  const picked = await pickNativePath({
+    directory: true,
+    defaultPath: state.folder ?? undefined,
+    // dev ブラウザ単体（Tauri 非依存・open 不在）では prompt にフォールバックする。
+    promptMessage: "開くフォルダのパスを入力してください（例 C:\\work\\notes）",
+  });
+  if (picked === null) return; // キャンセル＝何もしない。
+  const trimmed = picked.trim();
   if (!trimmed) {
     notify("フォルダのパスを入力してください", "warn");
     return;
   }
   await switchFolder(trimmed);
+}
+
+/**
+ * OS ネイティブ選択ダイアログでパスを選ぶ薄いラッパ（要件3.2/11.2）。
+ * dev ブラウザ単体（Tauri 非依存・dialog plugin の open が使えない環境）では従来 window.prompt に
+ * フォールバックして実機外でも壊さない（存在しない/失敗時はプロンプトへ退避）。
+ * 返り値: 選択パス（string）／キャンセル時は null。返却パスの FS 読取は呼び出し側が
+ * switchFolder / openPath（AccessControl 再検証経由）で行う＝ここでは直接 FS を触らない。
+ */
+async function pickNativePath(opts: {
+  directory: boolean;
+  defaultPath?: string;
+  promptMessage: string;
+}): Promise<string | null> {
+  try {
+    // ファイル選択は multiple:false で string|null、フォルダ選択は directory:true で string|null。
+    const result = await openNativeDialog({
+      directory: opts.directory,
+      multiple: false,
+      defaultPath: opts.defaultPath,
+    });
+    // 単一選択なので戻りは string | null（配列にはならない）。配列で来た場合も先頭を採る防御。
+    if (result === null) return null; // キャンセル。
+    return Array.isArray(result) ? (result[0] ?? null) : result;
+  } catch {
+    // dialog plugin 不在/失敗（dev ブラウザ単体等）。従来の手入力プロンプトへ退避する。
+    const p = window.prompt(opts.promptMessage, state.folder ?? "");
+    return p; // null=キャンセル、文字列=入力値（trim は呼び出し側）。
+  }
 }
 
 /**
@@ -706,6 +1286,8 @@ async function switchFolder(dir: string): Promise<void> {
   try {
     const entries = await openWorkspace(dir);
     if (switching) {
+      // フォルダ切替で前フォルダのエディタを畳むので検索バーを閉じる（古いハイライトを残さない）。
+      searchController?.close();
       // 切替時は前フォルダのタブ/未読/エディタを畳む（複数フォルダ同時オープンはしない＝要件14章）。
       state.editor?.destroy();
       state.editor = null;
@@ -847,6 +1429,7 @@ async function reopenActiveWithEncoding(enc: DocEncoding): Promise<void> {
       () => markDirty(path),
       () => refreshStatus(),
       state.lineWrapping,
+      state.tabWidth,
     );
     // 開いた内容のハッシュを基準に取り直し未読をクリアする（復元の別物判定の素・eval high）。
     void captureTabHash(path, doc.text);
@@ -958,7 +1541,29 @@ async function onToggleSplit(): Promise<void> {
 
 /** 3モード×差分トグルの直交占有を DOM へ適用する（要件6.1・ui-design 8章）。 */
 function applyOccupancy(): void {
+  // 非テキスト（画像/非対応バイナリ＝要件12.2・U3）が占有なら他の host を全て隠して image-host だけ出す。
+  // 画像にモード/差分/プレビューは無いので resolveOccupancy より前に分岐して image-host を専有させる。
+  const activeTab = state.tabs.find((t) => t.path === state.active);
+  if (activeTab && activeTab.nonText && !activeTab.deleted) {
+    editorHost().hidden = true;
+    diffHost().hidden = true;
+    previewHost().hidden = true;
+    imageHost().hidden = false;
+    editorPane().removeAttribute("data-split");
+    // 画像占有ではエディタが消えるので検索バーも閉じる（canSearch=false と整合・古いハイライト残さない）。
+    if (searchController?.isOpen()) searchController.close();
+    // プレビュー子WebView は OS 子ウィンドウで z-index 制御不可＝画像占有中は必ず隠す（手前に残らない）。
+    void hidePreview();
+    // editor 無しなので no-op（カーソル/行/文字を出さない）。状態提示は image-host の描画自体が担う。
+    refreshStatus();
+    return;
+  }
+  // 非画像占有（テキスト/差分/プレビュー）では image-host を必ず隠す（画像→テキスト切替の正規化）。
+  imageHost().hidden = true;
   const occ = resolveOccupancy(state.viewMode, state.diffOn);
+  // エディタが見えなくなる占有（差分ON/プレビューのみ）へ移ったら検索バーを閉じる（U4・要件5.4）。
+  // 差分ビュー内検索・プレビュー内検索は系統C 繰り越しなので、ここで自然に無効化する（canSearch と整合）。
+  if (!occ.showEditor && searchController?.isOpen()) searchController.close();
   editorHost().hidden = !occ.showEditor;
   diffHost().hidden = !occ.showDiff;
   previewHost().hidden = !occ.showPreview;
@@ -1049,7 +1654,7 @@ async function renderActivePreview(): Promise<void> {
     // 系統B（HTML）の危険検知を通知バー導線に出す（要件6.3）。has_meta_refresh も伝える。
     const hz = ready.hazards;
     if (hz.has_script) {
-      notify("JS を使うHTMLのため表示が崩れる可能性があります（既定のブラウザで開けます）", "warn");
+      notify("JS を使うHTMLのため表示が崩れる可能性があります（既定のアプリで開けます）", "warn");
     }
     if (hz.has_external_ref) {
       // 既に許可済み（このタブで「許可して再読込」した）なら通知を消し、未許可なら許可導線を出す。
@@ -1238,10 +1843,19 @@ async function onRollback(): Promise<void> {
 /** 外部変更（fs-changed）を未読ストアへ適用し、ツリー/タブを再描画する（要件4.2/7.2）。 */
 function onExternalChange(changes: import("./ipc").FsChange[]): void {
   if (changes.length === 0) return;
-  state.unread.apply(changes);
+  // ツリーから自分で作成したばかりのファイルの created は未読(◆)にしない（指摘4）。watcher は workspace を
+  // 再帰監視するため自作成にも created が飛ぶ。到着時点で selfCreatedPaths を消費して未読化を抑止する
+  //（非同期到着と競合しないワンショット）。modified/removed 等はそのまま反映する。
+  // 先に TTL を過ぎた未消費エントリを掃除し、stale エントリが後続の正当な外部 created を誤抑制しないようにする。
+  pruneSelfCreated(Date.now());
+  const effective = changes.filter(
+    (c) => !(c.kind === "created" && selfCreatedPaths.delete(selfKey(c.path))),
+  );
+  if (effective.length === 0) return;
+  state.unread.apply(effective);
   // 開いているクリーン（未保存変更なし）タブへの外部変更は自動リロード（要件7.2）。
   // 未保存変更があるタブは自動リロードせず通知のみ（衝突処理は sprint 3 で本実装）。
-  void autoReloadCleanTabs(changes);
+  void autoReloadCleanTabs(effective);
   refreshTree();
   refreshTabs();
   // 差分あり数が変わったので構造化ステータス（差分 N …）を更新する。表示専用ステータスとは別に
@@ -1263,6 +1877,10 @@ async function autoReloadCleanTabs(changes: import("./ipc").FsChange[]): Promise
   try {
     const content = await readFile(state.active);
     state.editor.reloadExternal(content);
+    // 検索バーを開いたまま外部リロードされた場合、件数/ハイライトを新内容へ追従させる
+    // （reloadExternal は decoration を map するだけで再検索しないため stale 化する）。
+    // 閉じている/空クエリなら refresh は no-op。
+    searchController?.refresh();
     // 反映後の内容を復元基準ハッシュとして更新（次回起動の別物判定の素・eval high）。
     void captureTabHash(state.active, content);
     // 自動リロードで現在タブを見たので未読は解除（外部変更を反映済み）。
@@ -1285,6 +1903,38 @@ async function onF5(): Promise<void> {
 }
 
 // ── 表示メニューの追加操作（折り返し/テーマ/ログフォルダ・UIブラッシュアップ T8）─────────────
+
+/**
+ * settings.toml の有効設定のうち**ユーザーが見て効く4項目**を即適用する（要件10.3/10.4 再起動なし反映・U2a）。
+ *
+ * 適用タイミングの違い（取り違え厳禁）:
+ * - 共通（起動時＋ライブ両方）: theme / wrap_default / tab_width。settings-changed のたびに反映する。
+ * - 起動時のみ（opts.initial===true）: default_mode。「初回既定」の意味であり、ライブで適用すると
+ *   現在開いているビューを強制切替してしまうため、settings-changed では viewMode を触らない。
+ *
+ * wrap_default/tab_width はアプリ全体の state（lineWrapping/tabWidth）へ代入し、既存エディタがあれば
+ * Compartment 差し替えで即反映する（内容/カーソル/スクロール/履歴は壊さない）。エディタを作り直しても
+ * createEditor の初期値で引き継ぐ。ユーザーが表示メニューで手動トグルした後に settings を編集した場合は
+ * settings 値で上書きされるが、設定編集はユーザーの明示的な意思表示なので許容する。
+ *
+ * 残りの backend 消費分（excluded_dirs/huge_file_threshold/sensitive_patterns/allow_remote_resources/
+ * feature_mermaid 等の feature_ 群/full_hash_on_startup）は本タスク（U2a）のスコープ外で、U2b で別途適用する。
+ */
+function applySettings(s: Settings, opts: { initial: boolean }): void {
+  // theme: ThemeSetting と ThemeMode は同型（"light"|"dark"|"system"）なので変換不要でそのまま渡せる。
+  applyTheme(s.theme);
+  // wrap_default: アプリ全体の折り返し設定へ反映し、開いているエディタがあれば即時切替する。
+  state.lineWrapping = s.wrap_default;
+  state.editor?.setLineWrapping(s.wrap_default);
+  // tab_width: タブの**表示幅**（EditorState.tabSize）にのみ使う。挿入文字はタブ文字のまま（要件5.2）。
+  state.tabWidth = s.tab_width;
+  state.editor?.setTabWidth(s.tab_width);
+  // default_mode: 起動時のみ初回既定として viewMode を確定する（既定 source を維持・要件6.1）。
+  // restoreOnStartup がタブを開く前に viewMode が確定している必要があるため、初期化時に適用する。
+  if (opts.initial) {
+    state.viewMode = s.default_mode === "preview" ? "preview" : "source";
+  }
+}
 
 /**
  * 行の折り返しトグル（表示メニュー・UIブラッシュアップ T8）。アプリ全体で 1 つの設定を反転し、
@@ -1323,8 +1973,9 @@ async function onOpenLogFolder(): Promise<void> {
 }
 
 /**
- * 「ブラウザで開く」（tab-tools・要件6.2/design G・UIブラッシュアップ T9）。
- * **現在アクティブなタブのファイル**を OS 既定アプリ（HTML なら既定ブラウザ等）で開く。
+ * 「既定のアプリで開く」（tab-tools・要件6.2/design G・UIブラッシュアップ T9）。
+ * **現在アクティブなタブのファイル**を OS 既定アプリ（HTML なら既定ブラウザ・画像なら画像ビューア等）で開く。
+ * 実態は「ブラウザ」ではなく拡張子の関連付けに従う「既定アプリ」起動なので UI/文言をそれに合わせる（指摘4）。
  * backend の自前 command（open_in_default_app）が絶対パス＋実在を再検証して起動する（fail-closed）。
  *
  * 新規（未保存で未作成）タブはディスクに実体が無く backend が拒否するため、保存を促して中断する
@@ -1642,6 +2293,7 @@ function openNewFileTab(path: string, name: string): void {
     () => markDirty(path),
     () => refreshStatus(),
     state.lineWrapping,
+    state.tabWidth,
   );
   void captureTabHash(path, "");
   refreshTabs();
@@ -1800,6 +2452,22 @@ function restoreTabPosition(path: string, line: number, column: number, scrollTo
  * いまフォーカスのあるペインを判定する（Ctrl+Enter 誤爆防止に使う＝要件11.2）。
  * 差分/プレビュー領域にフォーカスがあるときだけ Ctrl+Enter で「確認済み」を発火させる。
  */
+/**
+ * 検索/置換バーを使えるビューか（U4/U5・要件5.4）。
+ *
+ * 条件: アクティブな**テキスト**タブがエディタとして見えていること。
+ * - 画像/非対応バイナリ（nonText）・削除済み（deleted）・第2段階以降（editingOff）は CM6 が無い/編集不可。
+ * - 差分ビューは CM6 でないため **差分内検索は系統C 繰り越し**（diffOn で showEditor が落ちると false）。
+ *   プレビューのみは WebView2 の find に任せる想定で同じく系統C 繰り越し（要件5.4）。
+ * → ソース／分割（エディタが可視）のときだけ true。
+ */
+function canSearch(): boolean {
+  if (!state.active || !state.editor) return false;
+  const tab = state.tabs.find((t) => t.path === state.active);
+  if (!tab || tab.nonText || tab.deleted || tab.editingOff) return false;
+  return resolveOccupancy(state.viewMode, state.diffOn).showEditor;
+}
+
 function currentFocus(): Focus {
   const active = document.activeElement;
   if (!active) return "other";
@@ -1865,25 +2533,32 @@ function dispatchAction(action: Action): boolean {
       return true;
     case "find":
     case "replace": {
-      // 検索/置換バー UI はソース/分割向けに用意する（要件5.4）。検索バー実体は系統C（GUI 実機）。
-      // ここではキーが死蔵されないよう導線（通知）を出し、core 側 search_in_text/replace_in_text へ繋ぐ枠を持つ。
-      // 編集メニューの検索/置換もこの dispatchAction を呼ぶ（実バーは未実装＝案内に留める）。
-      const label = action === "find" ? "検索（Ctrl+F）" : "置換（Ctrl+H）";
-      notify(`${label}：検索バーは今後対応します`, "info");
+      // 検索/置換バーを開く（U4/U5・要件5.4）。差分ON/プレビュー/画像/第2段階では検索できない
+      //（canSearch=false なら開かず案内のみ）。編集メニューの検索/置換もこの dispatchAction を呼ぶ。
+      if (!canSearch()) {
+        notify("このビューでは検索できません（ソース/分割で使えます）", "info");
+        return true;
+      }
+      searchController?.open(action === "find" ? "find" : "replace");
       return true;
     }
   }
 }
 
 /**
- * ファイルを開く（Ctrl+O・要件11.2）。パス入力欄(#folder-path)はツールバー廃止（T8）で撤去したため
- * window.prompt で受け取る（ネイティブ選択ダイアログは capability を増やすため別途・最薄方針を踏襲）。
- * キャンセル（null）時は何もしない。存在しないパスは openPath が新規タブとして開く（要件3.2）。
+ * ファイルを開く（Ctrl+O・要件11.2）。OS ネイティブ選択ダイアログでファイルを選ぶ
+ * （dialog:allow-open・dev ブラウザ単体では window.prompt にフォールバック）。
+ * キャンセル（null）時は何もしない。返却パスは openPath 経由（read_file の AccessControl 再検証）で開く。
+ * 存在しないパスは openPath が新規タブとして開く（要件3.2）。
  */
 async function onOpenFile(): Promise<void> {
-  const p = window.prompt("開くファイルのパスを入力してください", state.folder ?? "");
-  if (p === null) return; // キャンセル＝何もしない。
-  const trimmed = p.trim();
+  const picked = await pickNativePath({
+    directory: false,
+    defaultPath: state.folder ?? undefined,
+    promptMessage: "開くファイルのパスを入力してください",
+  });
+  if (picked === null) return; // キャンセル＝何もしない。
+  const trimmed = picked.trim();
   if (!trimmed) {
     notify("開くファイルのパスを入力してください", "warn");
     return;
@@ -1904,6 +2579,8 @@ function onCloseActiveTab(): void {
 function closeTab(path: string): void {
   const tab = state.tabs.find((t) => t.path === path);
   if (!tab) return;
+  // タブを閉じるとエディタが作り直される/畳まれるので検索バーを閉じる（古いハイライトを残さない）。
+  searchController?.close();
   if (tab.dirty) {
     const name = tab.title;
     const ok = window.confirm(
@@ -1936,7 +2613,17 @@ function closeTab(path: string): void {
     state.active = null;
     state.editor?.destroy();
     // 空のエディタを残す（タブが無くてもキーボード操作の到達先を保つ）。
-    state.editor = createEditor(editorHost(), "", () => undefined, undefined, state.lineWrapping);
+    state.editor = createEditor(
+      editorHost(),
+      "",
+      () => undefined,
+      undefined,
+      state.lineWrapping,
+      state.tabWidth,
+    );
+    // 直前が画像タブだった場合に image-host が残らないよう host 可視を正規化する（画像→空状態の正規化・U3）。
+    // state.active=null なので applyOccupancy は image-host を隠し空エディタ（editor-host）を出す。
+    applyOccupancy();
     refreshTabs();
     setStatus(emptyMessage("no-folder"));
   }
@@ -1956,6 +2643,15 @@ async function main(): Promise<void> {
   // フレームレス化の自前ウィンドウ操作（最小化/最大化/閉じる・ui-design §7）。ドラッグ移動は
   // メニュー帯の data-tauri-drag-region（index.html）が担う。
   initWindowControls();
+  // 検索/置換バー（U4/U5・要件5.4）。deps は getter 経由で常に最新の state.editor / 内容を取る
+  //（タブ切替で editor を作り直しても正しいエディタへ向く）。バー実体は #editor-pane の右上へ重ねる。
+  searchController = createSearchController({
+    editorPane: editorPane(),
+    getEditor: () => state.editor,
+    getContent: () => state.editor?.getContent() ?? null,
+    canSearch,
+    notify,
+  });
   // tab-tools: モード切替セグメント（ソース/分割/プレビュー）。data-mode を読んで setViewMode へ流す。
   for (const btn of modeButtons()) {
     btn.addEventListener("click", () => {
@@ -1990,6 +2686,12 @@ async function main(): Promise<void> {
   // ツリー収納/引き出しトグル（B5・ui-design 7章）。ヘッダ右端「‹」で収納、レール「›」で引き出す。
   treeCollapseBtn().addEventListener("click", () => setTreeCollapsed(true));
   treeExpandBtn().addEventListener("click", () => setTreeCollapsed(false));
+  // ツリーの空き領域（行以外）を右クリックしたら、ルートへの新規作成メニューを出す（T5）。
+  // 行（treeitem）上の右クリックは tree.ts が stopPropagation で先に処理するためここへは来ない。
+  document.getElementById("tree-pane")?.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    showRootContextMenu(e.clientX, e.clientY);
+  });
   // ツリーヘッダ（B4）の初期表示（未オープン時は素の文言）。復元後に更新される。
   updateTreeHeader();
   // tab-tools セグメントの初期表示（既定モード=ソースに .on を付け、タブ未オープン時は無効化する）。
@@ -2000,6 +2702,9 @@ async function main(): Promise<void> {
   // （pika-core::shortcuts の写し）へ集約し、ここは結果（Action）を dispatchAction へ流すだけ。
   // F6/Shift+F6（ペイン間フォーカス循環）は a11y/index.ts が capture フェーズで先取りする。
   window.addEventListener("keydown", (e) => {
+    // モーダル（名前入力プロンプト）表示中はグローバルショートカットを無効化する（指摘5）。
+    // 名前入力中の Ctrl+Shift+Enter（確認済み）/ Ctrl+W（タブを閉じる）等が背景タブへ貫通しない。
+    if (modalDepth > 0) return;
     const action = resolveShortcut(normalizeKey(e), modsOf(e), currentFocus());
     if (action === null) return; // 未割当キーは CM6 等の既定処理へ委ねる。
     if (dispatchAction(action)) e.preventDefault();
@@ -2027,17 +2732,21 @@ async function main(): Promise<void> {
   // 設定（settings.toml）の警告/再読み込みの購読（要件10.3/10.4）。
   // 起動時破損・実行中の不完全保存・無効値の警告はすべて settings-warning で届く（backend が文言生成）。
   await onSettingsWarning((message) => notify(message, "warn"));
-  // settings.toml の有効な編集保存を検知したら再読み込み（要件10.3 再起動なし反映）。
-  // 個別設定の即時適用（テーマ・折返し既定・タブ幅 等）は**段階的**（TODO: 段階的反映）。
-  // 本バッチは反映の貫通＝最新設定を state に保持し、反映された旨を通知するところまで。
+  // settings.toml の有効な編集保存を検知したら再読み込みし、可視4項目を即適用する（要件10.3 再起動なし反映）。
+  // theme/wrap_default/tab_width はライブで反映する。default_mode は「初回既定」の意味なのでライブでは
+  // 適用しない（initial:false で applySettings へ伝える＝現在開いているビューを強制切替しない）。
   await onSettingsChanged((next) => {
     state.settings = next;
+    applySettings(next, { initial: false });
     notify("設定を再読み込みしました", "info");
   });
-  // 起動直後に現在の有効設定を取得して保持する（取得失敗は握りつぶす＝設定が無くても起動を妨げない）。
-  // 取得値の即適用は段階的（TODO: 段階的反映）。最低限、機構が通っていることを担保する。
+  // 起動直後に現在の有効設定を取得して保持し、可視4項目を初期適用する（取得失敗は握りつぶす＝設定が無くても起動を妨げない）。
+  // applySettings(initial:true) は theme/wrap_default/tab_width に加え default_mode で viewMode の初期値を確定する。
+  // restoreOnStartup（タブを開く）より前に走るので、復元前に viewMode が確定する。theme の確定もここで行い、
+  // initTheme の暫定 system からの切替を最初の重い描画より前に済ませて FOUC（ちらつき）を避ける。
   try {
     state.settings = await getSettings();
+    applySettings(state.settings, { initial: true });
   } catch {
     // 設定取得に失敗しても編集体験は継続（既定相当で動く）。
   }

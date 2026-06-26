@@ -61,3 +61,6 @@ output/
 
 # eval-loop 作業ディレクトリ（品質ループの状態・ターンログ）
 .mso/
+
+# Playwright MCP のスクショ等生成物（レビュー時ツール）
+.playwright-mcp/

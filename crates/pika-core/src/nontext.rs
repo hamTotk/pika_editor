@@ -48,6 +48,37 @@ pub fn classify_extension(ext_lowercase: &str) -> FileKind {
     }
 }
 
+/// **ファイル名**からファイル種別を分類する（要件12.2・拡張子なし/dotfile をテキストへ寄せる）。
+///
+/// [`classify_extension`] は拡張子のみを見るため、拡張子を持たない `Dockerfile`/`Makefile`/`LICENSE`/
+/// `README` や、先頭ドットの dotfile `.gitignore`/`.editorconfig`/`.env` を「不明拡張子」として
+/// 非対応バイナリへ倒し、テキストなのに CM6 で開けず「既定アプリで開く」しか出せなくなる（回帰）。
+/// 本関数は**ファイル名全体**を見て、これらを安全にテキストへ寄せる:
+/// 1. 名前にドットを含まない（拡張子なし＝`Dockerfile`/`Makefile`/`README`/`LICENSE`）→ [`FileKind::Text`]。
+/// 2. dotfile（先頭が `.` で、2文字目以降にドットを含まない＝`.gitignore`/`.editorconfig`/`.env`）
+///    → [`FileKind::Text`]。
+/// 3. それ以外は**最後のドット以降**を小文字化した拡張子を [`classify_extension`] へ委譲（既存挙動を維持）。
+///
+/// 取りこぼし（許容）: `.env.local` のような「先頭ドット＋途中にもドット」は dotfile 規則に当たらず、
+/// 最後のドット以降（`local`）が未知拡張子なので [`FileKind::UnsupportedBinary`] になる。
+/// 機密ファイル（`.env` 等）がテキスト分類になっても、ベースラインは HashOnly（差分非対象）・custom
+/// protocol 配信拒否のまま安全（種別はエディタ表示可否のみで、機密の取り扱いは別系統が担保する）。
+pub fn classify_file_name(name: &str) -> FileKind {
+    // 1. 拡張子なし（ドットを一切含まない）はテキストへ寄せる（Dockerfile/Makefile/README/LICENSE）。
+    if !name.contains('.') {
+        return FileKind::Text;
+    }
+    // 2. dotfile（先頭 `.` で、それ以降にドットが無い）はテキストへ寄せる（.gitignore/.editorconfig/.env）。
+    if let Some(rest) = name.strip_prefix('.') {
+        if !rest.contains('.') {
+            return FileKind::Text;
+        }
+    }
+    // 3. それ以外は最後のドット以降の拡張子（小文字化）で従来判定（classify_extension に委譲）。
+    let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
+    classify_extension(&ext)
+}
+
 /// 画像を開く際の判定（要件12.2 寸法プリチェック）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageOpenDecision {
@@ -190,6 +221,33 @@ mod tests {
             classify_extension("unknownext"),
             FileKind::UnsupportedBinary
         );
+    }
+
+    #[test]
+    fn ファイル名分類_拡張子なしとdotfileはテキストへ寄せる() {
+        // 拡張子なし（ドット無し）はテキスト（CM6 で開ける・回帰修正）。
+        for n in ["Dockerfile", "Makefile", "README", "LICENSE"] {
+            assert_eq!(classify_file_name(n), FileKind::Text, "name={n}");
+        }
+        // dotfile（先頭ドット＋以降ドット無し）はテキスト。
+        for n in [".gitignore", ".editorconfig", ".env"] {
+            assert_eq!(classify_file_name(n), FileKind::Text, "name={n}");
+        }
+    }
+
+    #[test]
+    fn ファイル名分類_拡張子ありは従来どおりclassify_extensionへ委譲する() {
+        // 画像拡張子（大文字も小文字化して判定）。
+        assert_eq!(classify_file_name("a.png"), FileKind::Image);
+        assert_eq!(classify_file_name("photo.JPG"), FileKind::Image);
+        // 既知テキスト拡張子。
+        assert_eq!(classify_file_name("notes.md"), FileKind::Text);
+        // 既知/未知バイナリは非対応バイナリへ倒す（安全側）。
+        assert_eq!(classify_file_name("a.exe"), FileKind::UnsupportedBinary);
+        assert_eq!(classify_file_name("a.zip"), FileKind::UnsupportedBinary);
+        // 取りこぼし（許容・コメント明記）: `.env.local` は dotfile 規則に当たらず、最後のドット
+        // 以降 `local` が未知拡張子なので UnsupportedBinary（dotfile としては取りこぼす）。
+        assert_eq!(classify_file_name(".env.local"), FileKind::UnsupportedBinary);
     }
 
     #[test]

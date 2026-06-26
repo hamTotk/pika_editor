@@ -13,9 +13,10 @@
 use include_dir::{include_dir, Dir};
 use pika_core::render::{
     check_image_bytes, check_svg_bytes, confine_under, join_under, prepare_html_preview,
-    prepare_markdown_preview, resolve_local_ref, rewrite_local_image_refs, wrap_preview_document,
-    ExternalResourceAllow, GuardDecision, LocalRefDecision, PreviewFlavor, PreviewResponse,
-    PreviewTheme, DEFAULT_IMAGE_MAX_PIXELS, DEFAULT_SVG_MAX_ELEMENTS, DEFAULT_SVG_MAX_PIXELS,
+    prepare_markdown_preview, resolve_local_ref, rewrite_local_image_refs,
+    wrap_preview_document_with, ExternalResourceAllow, GuardDecision, LocalRefDecision,
+    PreviewFeatures, PreviewFlavor, PreviewResponse, PreviewTheme, DEFAULT_IMAGE_MAX_PIXELS,
+    DEFAULT_SVG_MAX_ELEMENTS, DEFAULT_SVG_MAX_PIXELS,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -403,7 +404,20 @@ pub fn handle_preview_request(
         };
         // #19: 必要素材を clone 済み。ロックを解放してから応答組立（FS I/O は無いが一貫させる）。
         drop(inner);
-        return document_response(&doc);
+        // 設定の機能トグル（feature_mermaid/feature_math/feature_highlight）で Mermaid/KaTeX/highlight の
+        // 条件付き注入をさらにゲートする（U2b-3）。state 未登録時は全 ON（従来どおり＝壊さない）。
+        let features = app
+            .try_state::<std::sync::Arc<crate::settings_service::SettingsService>>()
+            .map(|s| {
+                let snap = s.snapshot();
+                PreviewFeatures {
+                    mermaid: snap.feature_mermaid,
+                    math: snap.feature_math,
+                    highlight: snap.feature_highlight,
+                }
+            })
+            .unwrap_or_else(PreviewFeatures::all);
+        return document_response(&doc, features);
     }
 
     // /assets/<相対パス> — exe 埋め込みの同梱ベンダーアセット（Mermaid/KaTeX/highlight・フォント・CSS）。
@@ -428,7 +442,13 @@ pub fn handle_preview_request(
         // #19: doc を clone 済み。ロックを解放してから canonicalize+read（FS I/O）を行う
         // （ロック保持のまま FS I/O すると他の preview 操作が詰まるため）。
         drop(inner);
-        return local_resource_response(&doc, reference);
+        // 機密判定の設定 sensitive_patterns（和集合・既定は外せない＝U2b-2）を state から取る。
+        // state 未登録時は空 patterns＝既定のみで安全側（機密判定を弱めない不変条件）。
+        let sensitive_patterns = app
+            .try_state::<std::sync::Arc<crate::settings_service::SettingsService>>()
+            .map(|s| s.snapshot().sensitive_patterns)
+            .unwrap_or_default();
+        return local_resource_response(&doc, reference, &sensitive_patterns);
     }
 
     error_response(StatusCode::NOT_FOUND, "不明な経路")
@@ -440,14 +460,16 @@ pub fn handle_preview_request(
 /// 別WebView へ配信する前に [`wrap_preview_document`]（pika-core・cargo test 済み）で
 /// 完全 HTML 文書（charset utf-8・最小 base CSS）にラップする。**body は一字一句改変しない**。
 /// CSP は引き続きレスポンスヘッダで強制し、文書内 `<meta>` には依存しない（design doc 6章）。
-fn document_response(doc: &PreparedDoc) -> Response<Vec<u8>> {
+fn document_response(doc: &PreparedDoc, features: PreviewFeatures) -> Response<Vec<u8>> {
     // テーマ配色を別WebView 文書へ降ろす（Stage ③・design doc 10章）。系統B では prepare_preview が
-    // theme=None にしてある（文書スタイル尊重）。色文字列の安全化検証は wrap_preview_document が担う。
-    let html = wrap_preview_document(
+    // theme=None にしてある（文書スタイル尊重）。色文字列の安全化検証は wrap_preview_document_with が担う。
+    // features（feature_mermaid/math/highlight）で Mermaid/KaTeX/highlight の条件付き注入をゲートする（U2b-3）。
+    let html = wrap_preview_document_with(
         &doc.response.body,
         &doc.response.nonce,
         doc.response.flavor,
         doc.theme.as_ref(),
+        features,
     );
     // CSP は pika-core が組んだ値（既定外部遮断・nonce・オプトイン緩和は img/font のみ）。
     Response::builder()
@@ -465,7 +487,15 @@ fn document_response(doc: &PreparedDoc) -> Response<Vec<u8>> {
 ///
 /// pika-core::render::path で `../`/絶対パス/機密ファイルを拒否し、canonicalize+prefix 検証で
 /// シンボリックリンク脱出を弾く。配信できない参照は 403/404 を返す（frontend がプレースホルダ表示）。
-fn local_resource_response(doc: &PreparedDoc, reference: &str) -> Response<Vec<u8>> {
+///
+/// `sensitive_patterns` は設定 `sensitive_patterns`（機密判定の和集合・既定は外せない＝U2b-2）。
+/// 解決後の実体名で `is_sensitive_with`（既定 ∪ 設定）を再判定し機密は 403（custom protocol からも
+/// 配信拒否＝要件9.1）。空 patterns でも既定機密は拒否される（is_sensitive_with が常に既定を内包）。
+fn local_resource_response(
+    doc: &PreparedDoc,
+    reference: &str,
+    sensitive_patterns: &[String],
+) -> Response<Vec<u8>> {
     let Some(base) = &doc.base_dir else {
         return error_response(StatusCode::NOT_FOUND, "基準ディレクトリ不明");
     };
@@ -490,7 +520,11 @@ fn local_resource_response(doc: &PreparedDoc, reference: &str) -> Response<Vec<u
     }
     // 多層防御: 非機密名のシンボリックリンクが基準内の機密ファイルを指すケースを、
     // 解決後の実体名でも機密判定して弾く（要件9.1「機密は custom protocol からも配信拒否」）。
-    if pika_core::snapshot::policy::is_sensitive(&resolved.to_string_lossy()) {
+    // 機密判定は既定 ∪ 設定 sensitive_patterns（既定は外せない＝U2b-2）。
+    if pika_core::snapshot::policy::is_sensitive_with(
+        &resolved.to_string_lossy(),
+        sensitive_patterns,
+    ) {
         return error_response(StatusCode::FORBIDDEN, "機密ファイルの配信拒否");
     }
 
@@ -550,7 +584,10 @@ fn guard_local_resource(content_type: &str, bytes: &[u8]) -> GuardDecision {
 }
 
 /// 拡張子から最小限の Content-Type を推定する（ローカル画像/CSS の配信用）。
-fn guess_content_type(path: &std::path::Path) -> &'static str {
+///
+/// `pub(crate)`: pika-asset:// の配信ヘルパ（[`crate::asset`]）も同じ Content-Type 推定を使い
+/// 重複実装を作らない（単一源・U3 画像簡易ビュー）。
+pub(crate) fn guess_content_type(path: &std::path::Path) -> &'static str {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -610,7 +647,10 @@ fn asset_response(reference: &str) -> Response<Vec<u8>> {
 }
 
 /// エラーレスポンス（本文を最小化し情報漏れを避ける）。
-fn error_response(status: StatusCode, _detail: &str) -> Response<Vec<u8>> {
+///
+/// `pub(crate)`: pika-asset:// のハンドラ（[`crate::asset`]）も同じ最小エラー応答を使い
+/// 重複実装を作らない（単一源・U3 画像簡易ビュー）。
+pub(crate) fn error_response(status: StatusCode, _detail: &str) -> Response<Vec<u8>> {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -909,7 +949,7 @@ mod tests {
             base_dir: None,
             theme: Some(theme_for_test(false)),
         };
-        let out = document_response(&doc);
+        let out = document_response(&doc, PreviewFeatures::all());
         assert_eq!(out.status(), StatusCode::OK);
         let html = String::from_utf8_lossy(out.body());
         assert!(
@@ -936,11 +976,47 @@ mod tests {
             base_dir: None,
             theme: Some(theme_for_test(true)),
         };
-        let out = document_response(&doc);
+        let out = document_response(&doc, PreviewFeatures::all());
         let html = String::from_utf8_lossy(out.body());
         assert!(
             !html.contains(":root{--pk"),
             "系統B に theme 変数定義が漏れた: {html}"
+        );
+    }
+
+    #[test]
+    fn document_response_は_feature_off_でアセット注入を抑止する() {
+        // U2b-3: PreparedDoc が Mermaid/数式/コードを含んでも、PreviewFeatures が OFF の機能は
+        // document_response→wrap_preview_document_with のゲートで注入されないことを配線レベルで観測する。
+        let resp = prepare_markdown_preview(
+            "```mermaid\ngraph TD;A-->B\n```\n\n$E=mc^2$\n\n```rust\nfn main(){}\n```",
+            &ExternalResourceAllow::blocked(),
+        );
+        let doc = PreparedDoc {
+            response: resp,
+            base_dir: None,
+            theme: None,
+        };
+        // 全 OFF: 検出があっても何も注入しない（生テキストのまま＝graceful degrade）。
+        let off = document_response(
+            &doc,
+            PreviewFeatures {
+                mermaid: false,
+                math: false,
+                highlight: false,
+            },
+        );
+        let html_off = String::from_utf8_lossy(off.body());
+        assert!(
+            !html_off.contains("/assets/"),
+            "feature 全 OFF なのにアセットが注入された: {html_off}"
+        );
+        // 全 ON（all）: 従来どおり注入される（ゲートの裏返しの回帰確認）。
+        let on = document_response(&doc, PreviewFeatures::all());
+        let html_on = String::from_utf8_lossy(on.body());
+        assert!(
+            html_on.contains("/assets/mermaid.min.js"),
+            "feature ON なのに Mermaid が無い: {html_on}"
         );
     }
 

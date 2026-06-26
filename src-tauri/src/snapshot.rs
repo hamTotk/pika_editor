@@ -14,7 +14,7 @@ use pika_core::review::{
     decide_confirm, decide_rollback, ConfirmDecision, DiffSnapshot, DiskState,
 };
 use pika_core::snapshot::{
-    baseline_policy, hash_normalized, BaselinePolicy, SnapshotStore, StashKind,
+    baseline_policy_with, hash_normalized, BaselinePolicy, SnapshotStore, StashKind,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -77,6 +77,13 @@ struct SnapshotInner {
     /// `None` の間は永続化しない（ワークスペース未設定／data_root 解決失敗時の後方互換＝#3）。
     /// `Some` のとき各 mutation で object/メタ/index.json を書き、起動時にロードする（再起動で揮発しない）。
     snap_dir: Option<PathBuf>,
+    /// 設定 `sensitive_patterns`（既定パターンに**足す**glob・和集合＝U2b-2）。
+    /// 既定（空＝`Vec::new()`）は既定パターンのみ。`open_workspace` が [`SnapshotService::set_sensitive_patterns`]
+    /// で settings から流し込む。ベースライン判定（baseline_policy_with）の機密和集合に使い、機密該当を
+    /// HashOnly（平文を残さない＝要件9.1）へ倒す。**既定機密は外せない**（is_sensitive_with が常に内包）。
+    /// 取得不能時は空のまま＝既定のみで安全側（機密判定を弱めない不変条件）。
+    /// mid-session のパターン変更による既存 baseline 貼り直しは MVP 外（open 時反映で可）。
+    sensitive_patterns: Vec<String>,
 }
 
 impl Default for SnapshotService {
@@ -147,6 +154,18 @@ impl SnapshotService {
         Ok(())
     }
 
+    /// 設定 `sensitive_patterns`（機密判定の和集合＝U2b-2）をベースライン判定へ流し込む。
+    ///
+    /// `open_workspace` が baseline ループ**前**に呼ぶ。以後 baseline_policy_with の機密判定が
+    /// 「既定 ∪ ここで渡した patterns」になり、設定該当ファイルも HashOnly（平文を残さない＝要件9.1）。
+    /// **既定機密は外せない**（is_sensitive_with が常に既定を内包）＝設定は足すだけ（減らせない不変条件）。
+    /// 毒化（ロック失敗）時は握り潰す（設定反映に失敗しても既定のみで安全側に倒れる＝弱めない）。
+    pub fn set_sensitive_patterns(&self, patterns: Vec<String>) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.sensitive_patterns = patterns;
+        }
+    }
+
     /// フォルダ初回オープン時にベースラインを取得する（全既読スタート＝要件8.1・index 永続化は遅延）。
     /// 内容保存方針（機密/10MB以上/画像＝ハッシュのみ）は pika-core::snapshot::policy で判定する。
     ///
@@ -166,16 +185,53 @@ impl SnapshotService {
         // index は永続化しない（ループ後に persist_index で1回まとめる）。
     }
 
-    /// フォルダ初回オープン時にハッシュのみベースラインを取得する（バイナリ等・#54・index 永続化は遅延）。
+    /// フォルダ初回オープン時に**ハッシュのみ**ベースラインを取得する（バイナリ等・#54・index 永続化は遅延）。
     ///
-    /// バイナリ（非UTF-8）は内容 object を持てない（差分/巻き戻し非対象）が、外部変更検知のため
-    /// バイト由来ハッシュをベースラインに据える（空文字ベースライン化＝全ファイル空ハッシュ衝突を避ける）。
-    /// [`Self::capture_baseline`] と同じく **非クロバー**（既存ベースラインがあれば触らない）で、
-    /// 内容 object は持たないため遅延するのは index.json のみ。ループ後に [`Self::persist_index`] を呼ぶ。
+    /// テキストでない（encoding::decode が strict 失敗し lossy へ倒れた＝had_decode_warning）ファイルは
+    /// 内容 object を持たない（差分/巻き戻し非対象）。外部変更検知用にバイト由来ハッシュをベースラインへ据える
+    /// （空文字を内容ベースライン化しない＝全ファイル空ハッシュ衝突を避ける・#54。ロッシーデコードした
+    /// バイナリ内容を data root へ保存しない＝データ最小化#20・肥大/folder-open コスト回避・第2巡 回帰修正）。
+    /// [`Self::capture_baseline`] と同じく **非クロバー**で、内容 object を持たないため遅延するのは index.json のみ。
     pub fn capture_baseline_hash_only(&self, path: &str, content_hash: &str) {
         let mut inner = self.inner.lock().expect("snapshot lock");
         capture_baseline_hash_only_locked(&mut inner, path, content_hash);
         // index は永続化しない（ループ後に persist_index で1回まとめる）。
+    }
+
+    /// 文書を**開いた時点**の内容を非クロバーでベースライン化する（要件8.1 全既読スタート・指摘6）。
+    ///
+    /// `open_workspace` の直下ループはルート直下ファイルしかベースラインを張らない。サブフォルダを
+    /// 遅延展開して開いたファイルはベースライン不在のままになり、`compute_file_diff` がそれを
+    /// `has_baseline_content:false` で返すため、フロントが誤って「差分非対象（10MB以上/画像/機密）」を
+    /// 全ファイルに表示していた。`open_document` から本メソッドを呼び、開いた瞬間の内容を直下ファイルと
+    /// 同じ「全既読スタート」へ揃える（編集前に張るので、以後の編集は差分として正しく現れる）。
+    ///
+    /// 非クロバー（既存ベースラインは触らない）かつ policy 準拠（機密/巨大/画像は `capture_baseline_locked`
+    /// が踏襲してハッシュのみ＝差分非対象のまま正しく扱う）。**新規に取得したときだけ** index を
+    /// 永続化する（毎オープンの per-file fsync を避ける＝固まらない）。取得済み path は早期 return で no-op。
+    pub fn ensure_baseline(&self, path: &str, content: &str, size: u64) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return; // ロック毒化は致命にしない（ベースライン未取得でも編集体験は継続）。
+        };
+        let key = normalize_path_key(path);
+        if inner.store.baseline(&key).is_some() {
+            return; // 直下ループ取得済み/前回オープン永続分＝非クロバー（no-op）。
+        }
+        // 機密/巨大/画像（policy=HashOnly）は内容を保存しない方針。open_workspace 経路
+        // （capture_baseline_for）が `capture_baseline(path, "", size)` と**空文字でハッシュ化**するのに対し、
+        // 旧実装はここで実内容 `content` を渡していたため、同一機密ファイルを「直下で開く」のと
+        // 「サブフォルダで開く」のとで baseline content_hash が食い違っていた（指摘3）。
+        // HashOnly のときは空文字でハッシュ化して両経路を一致させ、機密の平文をハッシュ入力にもしない
+        // （より安全側）。StoreContent のときだけ実内容で張る（capture_baseline_locked が policy を再判定）。
+        let content_for_baseline =
+            if baseline_policy_with(path, size, &inner.sensitive_patterns).stores_content() {
+                content
+            } else {
+                ""
+            };
+        capture_baseline_locked(&mut inner, path, content_for_baseline, size);
+        // 単発取得なので、ここで index を1回永続化する（新規サブフォルダファイルの初回オープン時のみ）。
+        persist_index_locked(&mut inner);
     }
 
     /// 索引（index.json）を1回だけ永続化する（バッチ capture のループ完了後に呼ぶ）。
@@ -223,7 +279,10 @@ impl SnapshotService {
             }
         }
         // 内容を保存できない方針（機密/10MB以上/画像）は退避対象 object を持てない（要件9.1/9.2）。
-        if !baseline_policy(path, disk_content.len() as u64).stores_content() {
+        // 機密判定は設定 sensitive_patterns 和集合（既定は外せない＝U2b-2）。
+        if !baseline_policy_with(path, disk_content.len() as u64, &inner.sensitive_patterns)
+            .stores_content()
+        {
             return Ok(false);
         }
 
@@ -271,7 +330,8 @@ fn capture_baseline_locked(inner: &mut SnapshotInner, path: &str, content: &str,
         return;
     }
     let hash = hash_normalized(content);
-    match baseline_policy(path, size) {
+    // 機密判定は設定 sensitive_patterns 和集合（既定は外せない＝U2b-2）。
+    match baseline_policy_with(path, size, &inner.sensitive_patterns) {
         BaselinePolicy::StoreContent => {
             let normalized = pika_core::diff::normalize_lf(content);
             inner.objects.insert(hash.clone(), normalized.clone());
@@ -358,14 +418,35 @@ pub fn compute_file_diff(
     let mut inner = snapshot.inner.lock().map_err(|_| "snapshot ロック失敗")?;
     let key = normalize_path_key(&path);
 
+    // ベースライン未取得（open_workspace の直下ループ外＝サブフォルダ等で開かれたファイル）。
+    // 通常は open_document の ensure_baseline で取得済みだが、経路漏れに備え compute 時にも全既読
+    // スタート（要件8.1）として現在内容をベースライン化する。これをしないと「ベースライン不在」を
+    // has_baseline_content:false で返し、フロントが誤って「差分非対象（10MB以上/画像/機密）」を
+    // 通常ファイルにも出していた（指摘6）。policy は capture が踏襲する（機密/巨大はハッシュのみのまま）。
+    if inner.store.baseline(&key).is_none() {
+        // policy 判定（機密/巨大/画像）は open 経路と同じ**ディスク実サイズ**を使う（指摘7）。current.len() は
+        // デコード後 UTF-8 のバイト長で、Shift_JIS 等ではディスク比で膨らみ 10MB 境界を誤判定しうる。
+        // FS 読みを避ける設計だが、ここは稀なフォールバックなので size 取得の1回 stat のみ許容する。
+        let disk_size = std::fs::metadata(&path)
+            .map(|m| m.len())
+            .unwrap_or(current.len() as u64);
+        capture_baseline_locked(&mut inner, &path, &current, disk_size);
+        persist_index_locked(&mut inner);
+    }
+
     let Some(baseline) = inner.store.baseline(&key).cloned() else {
-        // ベースライン未取得（新規＝全行追加）。
-        let diff = compute_diff("", &current);
-        return Ok(to_dto(diff, false));
+        // capture が失敗してもパニックさせない。全既読スタート相当（差分なし）として返す
+        // （誤った「差分非対象」は出さない＝指摘6）。
+        return Ok(FileDiffDto {
+            lines: Vec::new(),
+            change_count: 0,
+            has_baseline_content: true,
+        });
     };
 
     let Some(object_hash) = baseline.object_hash.clone() else {
-        // ハッシュのみ＝差分非対象（要件8.2/9.2）。
+        // ハッシュのみ＝**真に**差分非対象（機密/10MB以上/画像＝要件8.2/9.2）。これは正しい挙動
+        //（通常の小さなテキストはこの分岐に来ない＝上で内容ベースラインを張るため）。
         return Ok(FileDiffDto {
             lines: Vec::new(),
             change_count: 0,
@@ -422,7 +503,12 @@ pub fn confirm_file(
         mtime_ms: file_mtime_ms(&canon_str),
         content_hash: hash_normalized(&disk_content),
     };
-    let policy = baseline_policy(&canon_str, disk_content.len() as u64);
+    // 機密判定は設定 sensitive_patterns 和集合（既定は外せない＝U2b-2）。
+    let policy = baseline_policy_with(
+        &canon_str,
+        disk_content.len() as u64,
+        &inner.sensitive_patterns,
+    );
 
     match decide_confirm(&frozen, &disk, policy) {
         ConfirmDecision::AbortReDiff => Ok(false), // 中断＝未読維持・再差分を促す。
@@ -480,8 +566,13 @@ pub fn rollback_file(
     // 維持する（baseline との一致＝不変条件）。rollback は mtime を見ないので policy のみ canon 化。
     let disk_content =
         std::fs::read_to_string(&canon).map_err(|e| format!("ディスク再読みに失敗: {e}"))?;
-    let current_storable =
-        baseline_policy(&canon.to_string_lossy(), disk_content.len() as u64).stores_content();
+    // 機密判定は設定 sensitive_patterns 和集合（既定は外せない＝U2b-2）。
+    let current_storable = baseline_policy_with(
+        &canon.to_string_lossy(),
+        disk_content.len() as u64,
+        &inner.sensitive_patterns,
+    )
+    .stores_content();
 
     // pika-core の退避不能ガードで判定（要件7.3）。
     decide_rollback(baseline.has_content(), current_storable).map_err(|e| e.to_string())?;
@@ -576,7 +667,12 @@ pub fn confirm_all(
             mtime_ms: file_mtime_ms(&canon_str),
             content_hash: hash_normalized(&disk_content),
         };
-        let policy = baseline_policy(&canon_str, disk_content.len() as u64);
+        // 機密判定は設定 sensitive_patterns 和集合（既定は外せない＝U2b-2）。
+        let policy = baseline_policy_with(
+            &canon_str,
+            disk_content.len() as u64,
+            &inner.sensitive_patterns,
+        );
         let prev_baseline_object = inner
             .store
             .baseline(&key)
@@ -967,6 +1063,52 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&data_root);
+    }
+
+    #[test]
+    fn 機密ファイルは両経路でbaseline_content_hashが一致する() {
+        // 指摘3: 機密(HashOnly) は ensure_baseline（サブフォルダで開く経路）が実内容を渡し、
+        // open_workspace 経路（capture_baseline_for→capture_baseline 空文字）が空文字を渡すため、
+        // 同一機密ファイルで baseline content_hash が食い違っていた。ensure_baseline も HashOnly なら
+        // 空文字でハッシュ化して揃える（かつ機密の平文をハッシュ入力にしない）。
+        let env_path = "/ws/.env"; // 既定機密（is_sensitive）＝policy=HashOnly。
+        let key = normalize_path_key(env_path);
+
+        // open_workspace 経路（capture_baseline_for 相当）: 機密は空文字でハッシュのみ。
+        let s_open = SnapshotService::new();
+        s_open.capture_baseline(env_path, "", 42);
+        let open_hash = s_open.with_inner(|inner| {
+            inner
+                .store
+                .baseline(&key)
+                .expect("baseline（open 経路）")
+                .content_hash
+                .clone()
+        });
+
+        // ensure_baseline 経路: 実内容（平文の機密値）を渡しても HashOnly なので空文字でハッシュ化される。
+        let s_ensure = SnapshotService::new();
+        s_ensure.ensure_baseline(env_path, "SECRET=平文の機密値\n", 42);
+        let ensure_hash = s_ensure.with_inner(|inner| {
+            let b = inner.store.baseline(&key).expect("baseline（ensure 経路）");
+            // HashOnly なので内容 object を持たない（差分非対象）。
+            assert!(
+                b.object_hash.is_none(),
+                "機密ファイルは内容 object を持たない（HashOnly）"
+            );
+            b.content_hash.clone()
+        });
+
+        assert_eq!(
+            open_hash, ensure_hash,
+            "機密ファイルの baseline content_hash が両経路で一致しない（指摘3）"
+        );
+        // 空文字ハッシュであること（機密の平文をハッシュ入力にしない＝より安全側）。
+        assert_eq!(
+            ensure_hash,
+            hash_normalized(""),
+            "機密 baseline は空文字ハッシュであるべき（平文を入力にしない）"
+        );
     }
 
     #[test]
