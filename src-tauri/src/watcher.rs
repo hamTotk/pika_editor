@@ -30,8 +30,29 @@ use pika_core::watcher::overflow::{
     resync_against_baseline, BaselineEntry, FileFingerprint, ResyncOutcome,
 };
 
-/// 監視ルート直下の既定除外（要件4.1・7.1。監視対象外かつツリー非表示）。
-const EXCLUDED_DIRS: &[&str] = &[".git", "node_modules"];
+/// 監視の既定除外（要件4.1・7.1。設定 `excluded_dirs` 未指定/空のときのフォールバック）。
+///
+/// ツリー列挙（commands.rs `enumerate_dir`）と同じ既定（`.git`/`node_modules`）。設定で `dist`/`target`
+/// 等を足すと監視もそれに追従する（[`WatcherService::set_excluded_dirs`]）。設定が空のときは
+/// 「除外ゼロ」にせず本既定へ倒し、`.git` 等の大量ノイズが復活して未読が消せなくなるのを防ぐ。
+const DEFAULT_EXCLUDED_DIRS: &[&str] = &[".git", "node_modules"];
+
+/// 既定除外の所有 Vec（`set_excluded_dirs` のフォールバック・`new` の初期値に使う）。
+fn default_excluded_dirs() -> Vec<String> {
+    DEFAULT_EXCLUDED_DIRS.iter().map(|s| s.to_string()).collect()
+}
+
+/// 与えられた除外リストの実効値を決める（空なら既定へフォールバック）。
+///
+/// 純粋関数として切り出し、`AppHandle` を要する [`WatcherService::set_excluded_dirs`] に頼らず
+/// cargo test で「空→既定／指定→そのまま」を検証できるようにする。
+fn effective_excluded(dirs: Vec<String>) -> Vec<String> {
+    if dirs.is_empty() {
+        default_excluded_dirs()
+    } else {
+        dirs
+    }
+}
 
 /// 監視 drain の周期（デバウンス静穏期間を確実に拾える間隔）。
 const DRAIN_INTERVAL: Duration = Duration::from_millis(50);
@@ -106,6 +127,10 @@ struct WatcherInner {
     _watcher: Option<RecommendedWatcher>,
     /// ポーリングフォールバック中か（監視不能 FS。ステータス表示用）。
     polling: bool,
+    /// 監視/列挙の除外ディレクトリ（settings.toml `excluded_dirs`・既定 `.git`/`node_modules`）。
+    /// `open_workspace` が [`WatcherService::set_excluded_dirs`] で設定値を流し込む。常に実効値
+    /// （空指定でも既定へフォールバック済み）を保持し、`is_excluded`/`walk` がワーカースレッドから読む。
+    excluded_dirs: Vec<String>,
 }
 
 impl WatcherService {
@@ -119,7 +144,24 @@ impl WatcherService {
                 baseline: BTreeMap::new(),
                 _watcher: None,
                 polling: false,
+                excluded_dirs: default_excluded_dirs(),
             })),
+        }
+    }
+
+    /// 監視/列挙の除外ディレクトリを設定する（settings.toml `excluded_dirs` を watcher へ配線）。
+    ///
+    /// `open_workspace` が `watch_root` の**前**に呼び、ツリー列挙（`enumerate_dir`）と同じ除外を
+    /// 監視（baseline 列挙・notify イベント・ポーリング/F5/オーバーフロー再同期）にも効かせる。
+    /// これまで watcher は `.git`/`node_modules` をハードコードしており、ユーザーが `dist`/`target` を
+    /// 足すとツリーから消えるのに fs-changed が飛び続け未読が消せない不整合があった（指摘・解消）。
+    /// 空 or 未設定時は既定 `[".git","node_modules"]` へフォールバックする（除外ゼロでノイズ復活を防ぐ）。
+    /// 一致規則は `enumerate_dir` の `is_excluded_dir` と同じく大小無視（`is_excluded`）。
+    /// ロック毒化時は握り潰す（既定のまま安全側に倒れる＝設定反映失敗で監視を止めない）。
+    pub fn set_excluded_dirs(&self, dirs: Vec<String>) {
+        let effective = effective_excluded(dirs);
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.excluded_dirs = effective;
         }
     }
 
@@ -129,7 +171,10 @@ impl WatcherService {
     pub fn watch_root(&self, root: &Path) -> Result<(), String> {
         let mut inner = self.inner.lock().map_err(|_| "watcher 状態ロック失敗")?;
         inner.root = Some(root.to_path_buf());
-        inner.baseline = enumerate_baseline(root);
+        // 設定済み除外（set_excluded_dirs 済み）を baseline 列挙へ渡す。ロック保持中だが
+        // enumerate_baseline は再ロックしない（clone した値を渡す＝デッドロックを作らない）。
+        let excluded = inner.excluded_dirs.clone();
+        inner.baseline = enumerate_baseline(root, &excluded);
 
         let (tx, rx) = channel();
         let watch_result =
@@ -190,8 +235,9 @@ impl WatcherService {
         let Some(root) = inner.root.clone() else {
             return Ok(0);
         };
+        let excluded = inner.excluded_dirs.clone();
         let _ = self.app.emit("watch-mode", "再同期中...".to_string());
-        let current = enumerate_fingerprints(&root);
+        let current = enumerate_fingerprints(&root, &excluded);
         let outcome = resync_against_baseline(&inner.baseline, &current);
         let count = outcome.total();
         // #14: baseline を現状へ前進させる（前進させないと F5 が毎回同じ変更を再 emit する）。
@@ -260,18 +306,20 @@ impl WatcherService {
         let inner = Arc::clone(&self.inner);
         thread::spawn(move || loop {
             thread::sleep(POLL_INTERVAL);
-            // ルートが切替/停止されたら終了。
-            let still_root = inner
-                .lock()
-                .ok()
-                .and_then(|g| g.root.clone())
-                .map(|r| r == root)
-                .unwrap_or(false);
+            // ルートが切替/停止されたら終了。除外リストも同じロックで読む（enumerate はロック外なので
+            // ここで clone し、列挙時に再ロックしない＝デッドロックを作らない・設定変更にも追従する）。
+            let (still_root, excluded) = match inner.lock() {
+                Ok(g) => (
+                    g.root.as_ref().map(|r| r == &root).unwrap_or(false),
+                    g.excluded_dirs.clone(),
+                ),
+                Err(_) => (false, default_excluded_dirs()),
+            };
             if !still_root {
                 break;
             }
             // enumerate はロック外（重い I/O）。比較と baseline 前進は同一ロック内で行う（#14）。
-            let current = enumerate_fingerprints(&root);
+            let current = enumerate_fingerprints(&root, &excluded);
             let (count, dto) = match inner.lock() {
                 Ok(mut g) => {
                     let outcome = resync_against_baseline(&g.baseline, &current);
@@ -299,8 +347,14 @@ fn handle_notify_event(
     _app: &AppHandle,
 ) {
     let now = now_ms();
+    // 除外リストはワーカースレッドから Arc<Mutex> 経由で読む（set_excluded_dirs で更新されうる）。
+    // 1イベントの先頭で1回だけ短く読み、以降の自己保存抑制ロックとは入れ子にしない（デッドロック回避）。
+    let excluded = inner
+        .lock()
+        .map(|g| g.excluded_dirs.clone())
+        .unwrap_or_else(|_| default_excluded_dirs());
     for path in &event.paths {
-        if is_excluded(path) {
+        if is_excluded(path, &excluded) {
             continue;
         }
         let path_str = path.to_string_lossy().to_string();
@@ -448,11 +502,15 @@ fn advance_baseline(
 
 /// オーバーフロー検知時の全再列挙＋再同期（要件7.4・design doc 166行）。
 fn do_overflow_resync(inner: &Arc<Mutex<WatcherInner>>, app: &AppHandle) {
-    let root = inner.lock().ok().and_then(|g| g.root.clone());
+    // root と除外リストを同じ短いロックで読む（enumerate はロック外なので clone して渡す）。
+    let (root, excluded) = match inner.lock() {
+        Ok(g) => (g.root.clone(), g.excluded_dirs.clone()),
+        Err(_) => return,
+    };
     let Some(root) = root else { return };
     let _ = app.emit("watch-mode", "オーバーフロー再同期中...".to_string());
     // enumerate はロック外。比較と baseline 前進は再ロックして同一ロック内で行う（#14）。
-    let current = enumerate_fingerprints(&root);
+    let current = enumerate_fingerprints(&root, &excluded);
     let (count, dto) = match inner.lock() {
         Ok(mut g) => {
             let outcome = resync_against_baseline(&g.baseline, &current);
@@ -476,20 +534,23 @@ fn is_overflow_error(e: &notify::Error) -> bool {
         || matches!(&e.kind, notify::ErrorKind::Io(io) if io.raw_os_error() == Some(0x3FF))
 }
 
-/// パスが除外配下か（.git / node_modules を成分に含む）。要件4.1。
-fn is_excluded(path: &Path) -> bool {
+/// パスが除外配下か（`excluded` のいずれかを成分に含む・大小無視）。要件4.1/7.1。
+///
+/// 一致規則は `enumerate_dir` の `is_excluded_dir` と同じく `eq_ignore_ascii_case`（Windows のパス
+/// 大小無視に揃える）。「パス成分のいずれかが一致」の意味論（配下まるごと除外）は従来どおり維持する。
+fn is_excluded(path: &Path, excluded: &[String]) -> bool {
     path.components().any(|c| {
         c.as_os_str()
             .to_str()
-            .map(|s| EXCLUDED_DIRS.contains(&s))
+            .map(|s| excluded.iter().any(|e| e.eq_ignore_ascii_case(s)))
             .unwrap_or(false)
     })
 }
 
 /// 監視ルート直下を再帰列挙してベースライン台帳を作る（初回オープン＝全既読スタート。要件8.1）。
-fn enumerate_baseline(root: &Path) -> BTreeMap<String, BaselineEntry> {
+fn enumerate_baseline(root: &Path, excluded: &[String]) -> BTreeMap<String, BaselineEntry> {
     let mut map = BTreeMap::new();
-    for (path, fp) in walk(root) {
+    for (path, fp) in walk(root, excluded) {
         let hash = fp
             .content_hash
             .clone()
@@ -507,8 +568,8 @@ fn enumerate_baseline(root: &Path) -> BTreeMap<String, BaselineEntry> {
 }
 
 /// 再同期用に現状の fingerprint を列挙する（プレスクリーン後のハッシュは比較段で算出）。
-fn enumerate_fingerprints(root: &Path) -> BTreeMap<String, FileFingerprint> {
-    walk(root).into_iter().collect()
+fn enumerate_fingerprints(root: &Path, excluded: &[String]) -> BTreeMap<String, FileFingerprint> {
+    walk(root, excluded).into_iter().collect()
 }
 
 /// 再帰列挙の共通実装（除外を適用・ファイルのみ）。
@@ -519,7 +580,7 @@ fn enumerate_fingerprints(root: &Path) -> BTreeMap<String, FileFingerprint> {
 /// - **OneDrive プレースホルダ除外**: オンデマンド（未ダウンロード）ファイルは
 ///   ベースライン取得でダウンロードを誘発しないよう、reparse point 属性のファイルを
 ///   ベースライン対象から除外する（要件12.1。属性判定は `is_placeholder`）。
-fn walk(root: &Path) -> Vec<(String, FileFingerprint)> {
+fn walk(root: &Path, excluded: &[String]) -> Vec<(String, FileFingerprint)> {
     let mut out = Vec::new();
     let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut stack = vec![root.to_path_buf()];
@@ -534,7 +595,7 @@ fn walk(root: &Path) -> Vec<(String, FileFingerprint)> {
         };
         for ent in rd.flatten() {
             let p = ent.path();
-            if is_excluded(&p) {
+            if is_excluded(&p, excluded) {
                 continue;
             }
             match ent.file_type() {
@@ -675,4 +736,61 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dirs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn 実効除外_空は既定へフォールバックする() {
+        // 設定 excluded_dirs が空（未指定/全削除）でも除外ゼロにせず既定（.git/node_modules）へ倒す。
+        assert_eq!(effective_excluded(Vec::new()), default_excluded_dirs());
+        assert_eq!(
+            effective_excluded(Vec::new()),
+            dirs(&[".git", "node_modules"])
+        );
+    }
+
+    #[test]
+    fn 実効除外_指定があればそのまま使う() {
+        // ユーザーが dist/target を足したらそれをそのまま使う（既定は混ぜない＝設定で置換）。
+        assert_eq!(
+            effective_excluded(dirs(&["dist", "target"])),
+            dirs(&["dist", "target"])
+        );
+    }
+
+    #[test]
+    fn 除外判定_既定の隠しディレクトリを成分に含むと除外する() {
+        let ex = default_excluded_dirs();
+        assert!(is_excluded(Path::new("/ws/.git/HEAD"), &ex));
+        assert!(is_excluded(Path::new("/ws/node_modules/pkg/index.js"), &ex));
+        // 除外配下でない通常ファイルは除外しない。
+        assert!(!is_excluded(Path::new("/ws/src/main.ts"), &ex));
+    }
+
+    #[test]
+    fn 除外判定_設定で足したディレクトリも除外する() {
+        // 指摘の本丸: dist/target を設定で足すと監視/列挙からも消える（ツリーと一致＝未読が消せる）。
+        let ex = dirs(&["dist", "target"]);
+        assert!(is_excluded(Path::new("/ws/dist/bundle.js"), &ex));
+        assert!(is_excluded(Path::new("/ws/target/debug/app.exe"), &ex));
+        // 既定の .git は「設定で置換」されたので、この設定では除外されない（実効値＝指定そのまま）。
+        assert!(!is_excluded(Path::new("/ws/.git/HEAD"), &ex));
+    }
+
+    #[test]
+    fn 除外判定_大小無視で一致する() {
+        // enumerate_dir の is_excluded_dir と同じく eq_ignore_ascii_case（Windows のパス大小無視）。
+        let ex = dirs(&["Dist"]);
+        assert!(is_excluded(Path::new("/ws/dist/x"), &ex));
+        assert!(is_excluded(Path::new("/ws/DIST/x"), &ex));
+        let ex_git = default_excluded_dirs();
+        assert!(is_excluded(Path::new("/ws/.GIT/HEAD"), &ex_git));
+    }
 }

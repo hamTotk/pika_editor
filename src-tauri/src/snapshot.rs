@@ -217,7 +217,19 @@ impl SnapshotService {
         if inner.store.baseline(&key).is_some() {
             return; // 直下ループ取得済み/前回オープン永続分＝非クロバー（no-op）。
         }
-        capture_baseline_locked(&mut inner, path, content, size);
+        // 機密/巨大/画像（policy=HashOnly）は内容を保存しない方針。open_workspace 経路
+        // （capture_baseline_for）が `capture_baseline(path, "", size)` と**空文字でハッシュ化**するのに対し、
+        // 旧実装はここで実内容 `content` を渡していたため、同一機密ファイルを「直下で開く」のと
+        // 「サブフォルダで開く」のとで baseline content_hash が食い違っていた（指摘3）。
+        // HashOnly のときは空文字でハッシュ化して両経路を一致させ、機密の平文をハッシュ入力にもしない
+        // （より安全側）。StoreContent のときだけ実内容で張る（capture_baseline_locked が policy を再判定）。
+        let content_for_baseline =
+            if baseline_policy_with(path, size, &inner.sensitive_patterns).stores_content() {
+                content
+            } else {
+                ""
+            };
+        capture_baseline_locked(&mut inner, path, content_for_baseline, size);
         // 単発取得なので、ここで index を1回永続化する（新規サブフォルダファイルの初回オープン時のみ）。
         persist_index_locked(&mut inner);
     }
@@ -1051,6 +1063,52 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&data_root);
+    }
+
+    #[test]
+    fn 機密ファイルは両経路でbaseline_content_hashが一致する() {
+        // 指摘3: 機密(HashOnly) は ensure_baseline（サブフォルダで開く経路）が実内容を渡し、
+        // open_workspace 経路（capture_baseline_for→capture_baseline 空文字）が空文字を渡すため、
+        // 同一機密ファイルで baseline content_hash が食い違っていた。ensure_baseline も HashOnly なら
+        // 空文字でハッシュ化して揃える（かつ機密の平文をハッシュ入力にしない）。
+        let env_path = "/ws/.env"; // 既定機密（is_sensitive）＝policy=HashOnly。
+        let key = normalize_path_key(env_path);
+
+        // open_workspace 経路（capture_baseline_for 相当）: 機密は空文字でハッシュのみ。
+        let s_open = SnapshotService::new();
+        s_open.capture_baseline(env_path, "", 42);
+        let open_hash = s_open.with_inner(|inner| {
+            inner
+                .store
+                .baseline(&key)
+                .expect("baseline（open 経路）")
+                .content_hash
+                .clone()
+        });
+
+        // ensure_baseline 経路: 実内容（平文の機密値）を渡しても HashOnly なので空文字でハッシュ化される。
+        let s_ensure = SnapshotService::new();
+        s_ensure.ensure_baseline(env_path, "SECRET=平文の機密値\n", 42);
+        let ensure_hash = s_ensure.with_inner(|inner| {
+            let b = inner.store.baseline(&key).expect("baseline（ensure 経路）");
+            // HashOnly なので内容 object を持たない（差分非対象）。
+            assert!(
+                b.object_hash.is_none(),
+                "機密ファイルは内容 object を持たない（HashOnly）"
+            );
+            b.content_hash.clone()
+        });
+
+        assert_eq!(
+            open_hash, ensure_hash,
+            "機密ファイルの baseline content_hash が両経路で一致しない（指摘3）"
+        );
+        // 空文字ハッシュであること（機密の平文をハッシュ入力にしない＝より安全側）。
+        assert_eq!(
+            ensure_hash,
+            hash_normalized(""),
+            "機密 baseline は空文字ハッシュであるべき（平文を入力にしない）"
+        );
     }
 
     #[test]

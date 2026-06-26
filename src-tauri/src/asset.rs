@@ -43,6 +43,28 @@ pub const ASSET_SCHEME: &str = "pika-asset";
 /// [`image_info`] と [`serve_verified_image`] で同じ上限を使い、判定と配信の挙動を一致させる。
 pub const MAX_IMAGE_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// [`image_info`] の判定用に読むヘッダプレフィックス長（64 KiB）。
+///
+/// 寸法は [`image_dimensions`] がヘッダ先頭から読むため、PNG/GIF/BMP/ICO/WEBP/一般的な JPEG は
+/// 64 KiB のプレフィックス（先頭の寸法マーカーまで）で十分に寸法が得られる。判定（[`image_info`]）と
+/// 配信（[`serve_verified_image`]）が**それぞれ最大 64MiB をフルリード**して画像1枚で二重に全読みして
+/// いたのを、判定側は先頭プレフィックスのみに縮小する（指摘2・設計原則「軽い／固まらない」）。
+/// 極端に寸法マーカーが深い JPEG では寸法不明→[`ImageInfoDto::TooLarge`]/[`ImageInfoDto::Unsupported`]
+/// へ倒れるだけで安全側（誤って巨大画像を描画しない＝fail-closed）。
+const IMAGE_HEADER_PREFIX_BYTES: u64 = 64 * 1024;
+
+/// ファイル先頭の最大 `limit` バイトを読む（ヘッダ判定用・全読みを避ける＝固まらない）。
+///
+/// `File::open` + `Read::take(limit)` で上限付きに読み、巨大ファイルでも判定のために全バイトを
+/// メモリへ載せない。寸法読取りに足りるプレフィックスだけを返す（[`IMAGE_HEADER_PREFIX_BYTES`]）。
+fn read_prefix(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let mut buf = Vec::new();
+    file.take(limit).read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
 /// `image_info` command の戻り DTO（frontend と round-trip・serde）。
 ///
 /// `kind` タグで分岐する（serde の internally tagged enum・kebab-case）:
@@ -140,8 +162,10 @@ pub fn image_info(
         return Err("機密ファイルは表示できません".into());
     }
 
-    // (4) 読んで判定（寸法はヘッダから・フルデコードしない）。
-    let bytes = std::fs::read(&resolved).map_err(|e| format!("読み込みに失敗: {e}"))?;
+    // (4) ヘッダプレフィックスのみ読んで判定（寸法はヘッダ先頭から・フルデコードも全読みもしない＝指摘2）。
+    // 配信（serve_verified_image）は全バイトが要るので別途読むが、判定側はここで全読みしない。
+    let bytes = read_prefix(&resolved, IMAGE_HEADER_PREFIX_BYTES)
+        .map_err(|e| format!("読み込みに失敗: {e}"))?;
     Ok(image_info_for(&resolved, &bytes))
 }
 
@@ -280,6 +304,32 @@ mod tests {
         b.extend_from_slice(&h.to_be_bytes());
         b.extend_from_slice(&[8, 2, 0, 0, 0]); // bit depth 等（残り）
         b
+    }
+
+    #[test]
+    fn read_prefix_先頭プレフィックスでも正常pngはimageになる() {
+        // 寸法マーカーはヘッダ先頭にあるため、後続に大量バイトがあってもプレフィックス読みで Image 判定できる。
+        // 判定側がファイルを全読みしないこと（プレフィックス長以下しか読まない）も確認する（指摘2）。
+        let dir = temp_dir("prefix");
+        let mut body = png_header(640, 480);
+        body.extend(std::iter::repeat(0u8).take(200_000)); // プレフィックス超のダミー後続バイト。
+        let path = write_bytes(&dir, "wide.png", &body);
+        let prefix = read_prefix(&path, IMAGE_HEADER_PREFIX_BYTES).expect("プレフィックス読取");
+        assert!(
+            (prefix.len() as u64) <= IMAGE_HEADER_PREFIX_BYTES,
+            "プレフィックスが上限を超えて読まれている（全読みになっている）: {} bytes",
+            prefix.len()
+        );
+        assert_eq!(
+            image_info_for(&path, &prefix),
+            ImageInfoDto::Image {
+                width: 640,
+                height: 480,
+                mime: "image/png".to_string(),
+            },
+            "プレフィックス読みで正常 PNG が Image にならない"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

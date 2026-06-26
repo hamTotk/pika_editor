@@ -27,15 +27,22 @@ const TEXT_EXTS = [
 ];
 
 /**
- * 拡張子からファイル種別を分類する（要件12.2）。
- * **pika-core::nontext::classify_extension の写し。要 同期**（IMAGE_EXTS/TEXT_EXTS を Rust と一致させる）。
+ * ファイル名からファイル種別を分類する（要件12.2）。
+ * **pika-core::nontext::classify_file_name の写し。要 同期**（3ルールと IMAGE_EXTS/TEXT_EXTS を Rust と一致させる）。
  * image=画像簡易ビュー、text=CM6 でテキスト編集、unsupported=非対応バイナリ（既定アプリで開く誘導）。
- * 未知/その他拡張子は安全側で unsupported（巨大バイナリをテキスト全量ロードしない＝固まらない）。
+ * 1. 拡張子なし（ドットを含まない＝Dockerfile/Makefile/README/LICENSE）→ text（CM6 で開ける・回帰修正）。
+ * 2. dotfile（先頭 `.` で以降にドット無し＝.gitignore/.editorconfig/.env）→ text。
+ * 3. それ以外は最後のドット以降を小文字化した拡張子で判定（IMAGE_EXTS/TEXT_EXTS、未知は unsupported）。
+ * 取りこぼし（許容）: `.env.local` は dotfile 規則に当たらず拡張子 `local` が未知のため unsupported。
+ * 関数名は呼び出し互換のため classifyExtension のままだが、判定はファイル名全体を見る（上流 Rust が正典）。
  */
 export function classifyExtension(name: string): "text" | "image" | "unsupported" {
-  const dot = name.lastIndexOf(".");
-  if (dot < 0) return "unsupported";
-  const ext = name.slice(dot + 1).toLowerCase();
+  // 1. 拡張子なし（ドットを一切含まない）はテキストへ寄せる。
+  if (!name.includes(".")) return "text";
+  // 2. dotfile（先頭 `.` で、それ以降にドットが無い）はテキストへ寄せる。
+  if (name.startsWith(".") && !name.slice(1).includes(".")) return "text";
+  // 3. それ以外は最後のドット以降の拡張子（小文字化）で従来判定。
+  const ext = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
   if (IMAGE_EXTS.includes(ext)) return "image";
   if (TEXT_EXTS.includes(ext)) return "text";
   return "unsupported";
