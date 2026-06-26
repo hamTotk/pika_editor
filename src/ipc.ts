@@ -601,6 +601,23 @@ export function openInDefaultApp(path: string): Promise<void> {
 }
 
 /**
+ * ツリーから新規ファイル/フォルダを作成する（要件11・design G 右クリックメニュー）。
+ * `dir` 直下に `name` を作り、作成した絶対パスを返す。backend が**ワークスペース配下**かを再検証し、
+ * 任意パスへの作成は拒否する（fail-closed）。同名が既にあれば reject（既存を上書きしない）。
+ */
+export function createEntry(dir: string, name: string, isDir: boolean): Promise<string> {
+  return invoke<string>("create_entry", { dir, name, isDir });
+}
+
+/**
+ * ツリーから削除する（要件11「Delete＝ごみ箱へ移動」）。**完全削除ではなく OS のごみ箱へ移動**して
+ * 復元可能性を残す。backend がワークスペース配下かを再検証してからごみ箱へ送る（fail-closed）。
+ */
+export function deleteEntry(path: string): Promise<void> {
+  return invoke<void>("delete_entry", { path });
+}
+
+/**
  * 診断ログフォルダ（<データルート>/logs/）を OS（エクスプローラー）で開く（要件12.3・design G）。
  * パスは backend が確定・作成する（frontend からは受け取らない＝対象をログフォルダに固定）。
  */

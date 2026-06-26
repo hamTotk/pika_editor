@@ -27,6 +27,8 @@ import {
   logFolderPath,
   openInDefaultApp,
   openLogFolder,
+  createEntry,
+  deleteEntry,
   getSettings,
   onSettingsWarning,
   onSettingsChanged,
@@ -47,7 +49,7 @@ import { initTheme, applyTheme, currentTheme, type ThemeMode } from "./theme";
 import { initMenuBar, type MenuItemSpec, type MenuSpec } from "./ui/menu";
 import { initA11y, announce } from "./a11y";
 import { resolveShortcut, modsOf, normalizeKey, type Action, type Focus } from "./shortcuts";
-import { renderTree, resetTreeExpansion } from "./ui/tree";
+import { renderTree, resetTreeExpansion, reloadTreeDir, pruneTreeDir } from "./ui/tree";
 import { renderTabs, type TabModel } from "./ui/tabs";
 import { notify, notices } from "./ui/notifications";
 import { setStatus, renderStatus } from "./ui/status";
@@ -207,16 +209,36 @@ const tabsEl = () => document.getElementById("tabs") as HTMLElement;
 // 隠れた差分あり（未読）タブ数のバッジ（T10・差分 C5・ui-mock .hidden-unread）。
 const hiddenUnreadBadge = () => document.getElementById("hidden-unread") as HTMLButtonElement;
 
+/**
+ * アクティブタブで「確認済みにする」が**効果を持つ**か（指摘7・要件8.3）。
+ *
+ * 確認済み＝外部変更（未読 ±/◆）を再照合してベースラインへ取り込む操作。差分あり（unread の
+ * modified/created）でないファイルは確認するものが無く、押しても no-op なので始めから無効化する。
+ * 削除済み（ディスク実体なし・rollback 導線が別）・非テキスト（画像/バイナリ＝確認の概念なし）・
+ * 新規未保存（unread が付かない＝disk 実体なし）も対象外。
+ */
+function activeCanConfirm(): boolean {
+  if (!state.active) return false;
+  const tab = state.tabs.find((t) => t.path === state.active);
+  if (!tab || tab.deleted || tab.nonText) return false;
+  const kind = state.unread.get(state.active);
+  return kind === "modified" || kind === "created";
+}
+
 function refreshTabs(): void {
   renderTabs(state.tabs, state.active, activateTab, state.unread, closeTab);
-  const hasActive = !!state.active;
+  // アクティブタブが横スクロール域の外（新規に末尾へ追加された等）なら可視域へ寄せる（指摘2 補強）。
+  // min-width:0（#editor-pane）で overflow-x が正しく効くようになった上で、切替/追加時に確実に見せる。
+  scrollActiveTabIntoView();
   // tab-tools（モード切替セグメント/差分トグル）の表示状態・有効/無効を同期する。
   refreshViewTools();
   // 「確認済みにする」は tab-tools 右端に残るボタン（T6）。退避＋ベースライン更新を伴うため
   // in-flight 中（busy）は無効に保つ（内部 refreshTabs で再有効化して二重送信を許さない）。
   // 保存/すべて確認済み/巻き戻しはツールバー廃止（T8）でメニューへ移したため、活性はメニューを
   // 開いた時点で都度算出する（ui/menu.ts の build が hasActive/busy を反映）。ここでは扱わない。
-  confirmBtn().disabled = !hasActive || state.busy;
+  // 効果のないボタンは始めから無効化する（指摘7）: 差分あり（未読 modified/created）でないファイルは
+  // 確認するものが無い＝確認済みボタンを無効にする（新規未保存/削除済み/非テキストも対象外）。
+  confirmBtn().disabled = !activeCanConfirm() || state.busy;
   // タブ描画が変わると可視範囲も変わるので隠れ未読バッジを再計算する（更新タイミング(b)）。
   scheduleHiddenUnread();
 }
@@ -284,6 +306,26 @@ function updateHiddenUnread(): void {
   }
 }
 
+/**
+ * アクティブタブが横スクロール域の外なら可視域へ寄せる（指摘2 補強）。
+ * 末尾へ新規追加されたタブ/キーボード移動でアクティブが画面外になったとき、見切れたまま放置しない。
+ * 横方向のみを自前計算してずらす（タブ列は横スクロール専用・縦スクロールを誘発しない）。
+ */
+function scrollActiveTabIntoView(): void {
+  const container = tabsEl();
+  const active = container.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+  if (!active) return;
+  const left = active.offsetLeft;
+  const right = left + active.offsetWidth;
+  const viewLeft = container.scrollLeft;
+  const viewRight = viewLeft + container.clientWidth;
+  if (left < viewLeft) {
+    container.scrollLeft = Math.max(0, left - 12);
+  } else if (right > viewRight) {
+    container.scrollLeft = right - container.clientWidth + 12;
+  }
+}
+
 /** バッジクリックでスクロールする先（最初の隠れ未読タブ要素）。updateHiddenUnread が更新する。 */
 let hiddenUnreadTarget: HTMLElement | null = null;
 
@@ -332,7 +374,397 @@ function refreshViewTools(): void {
 
 function refreshTree(): void {
   // 子フォルダの遅延展開は副作用なし列挙（listDir）で取得する（監視ルート付け替え/ベースライン再取得をしない）。
-  renderTree(state.treeEntries, (entry) => void openFile(entry), listDir, state.unread);
+  // 右クリックで新規ファイル/新規フォルダ/削除のコンテキストメニューを出す（要件11・T5）。
+  renderTree(
+    state.treeEntries,
+    (entry) => void openFile(entry),
+    listDir,
+    state.unread,
+    (entry, x, y) => showTreeContextMenu(entry, x, y),
+  );
+}
+
+// ── ツリーのコンテキストメニュー＋新規作成/削除（要件11・design G・T5）─────────────────────
+
+/** 現在開いている単一のコンテキストメニュー要素（多重表示を防ぐ）。 */
+let openContext: HTMLElement | null = null;
+
+/**
+ * 開いているモーダル数（promptText・指摘5）。>0 の間はグローバルショートカット（window keydown）を
+ * 無効化し、名前入力中の修飾キー操作（Ctrl+Shift+Enter＝確認済み / Ctrl+W＝タブを閉じる 等）が
+ * 背景タブへ貫通するのを防ぐ。
+ */
+let modalDepth = 0;
+
+/**
+ * ツリーから今しがた自分で作成したパス→登録時刻(ms)（指摘4）。watcher は workspace を再帰監視するため、
+ * pika 内で作った空ファイルにも created イベントを emit する。これを未読(◆ 新規)として扱うと「たった今
+ * 自分で作ったファイル」が未読・確認対象に見えてしまう。created イベント到着時にこの Map で**ワンショット
+ * 抑制**（非同期到着と競合しないよう到着時点で判定・消費）。キーは selfKey で正規化する。
+ *
+ * 値に登録時刻を持たせ TTL で stale エントリを掃除する（第2巡 回帰修正）。watcher が当該 created を
+ * 合体/取りこぼしで一度も emit しないと未消費エントリが恒久的に残り、後で外部ツールが同パスを再作成した
+ * ときその正当な外部 created を握りつぶす（過剰一致）＋ Set 無制限増加が起きるため。
+ */
+const selfCreatedPaths = new Map<string, number>();
+
+/** 自作成抑制エントリの寿命（ms）。これを過ぎた未消費分は次回 onExternalChange で破棄する。 */
+const SELF_CREATED_TTL_MS = 15000;
+
+/** パスを selfCreatedPaths のキーへ正規化する（区切り `\`→`/`・Windows の大小無視）。 */
+function selfKey(p: string): string {
+  return p.replace(/\\/g, "/").toLowerCase();
+}
+
+/** TTL を過ぎた未消費の自作成抑制エントリを破棄する（stale 過剰一致＋無制限増加の防止・第2巡）。 */
+function pruneSelfCreated(now: number): void {
+  for (const [k, t] of selfCreatedPaths) {
+    if (now - t > SELF_CREATED_TTL_MS) selfCreatedPaths.delete(k);
+  }
+}
+
+/** コンテキストメニューを閉じる（外側クリック/Esc/ウィンドウblur/アクション後）。 */
+function closeContextMenu(): void {
+  if (openContext) {
+    openContext.remove();
+    openContext = null;
+  }
+  document.removeEventListener("pointerdown", onContextOutside, true);
+  document.removeEventListener("keydown", onContextKey, true);
+  window.removeEventListener("blur", closeContextMenu);
+}
+
+function onContextOutside(e: Event): void {
+  if (openContext && !openContext.contains(e.target as Node)) closeContextMenu();
+}
+function onContextKey(e: KeyboardEvent): void {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeContextMenu();
+  }
+}
+
+/** コンテキストメニュー 1 項目（"sep" は区切り線）。 */
+type ContextItem = { label: string; danger?: boolean; run: () => void } | "sep";
+
+/** 指定座標へコンテキストメニューを開く（共通土台・menu-pop の見た目を流用）。 */
+function openContextMenu(items: ContextItem[], x: number, y: number): void {
+  closeContextMenu();
+  const menu = document.createElement("div");
+  menu.className = "menu-pop context-menu";
+  menu.setAttribute("role", "menu");
+  for (const item of items) {
+    if (item === "sep") {
+      const sep = document.createElement("div");
+      sep.className = "msep";
+      menu.appendChild(sep);
+      continue;
+    }
+    const row = document.createElement("div");
+    row.className = item.danger ? "mrow danger" : "mrow";
+    row.setAttribute("role", "menuitem");
+    row.tabIndex = -1;
+    const label = document.createElement("span");
+    label.className = "mlabel";
+    label.textContent = item.label;
+    row.appendChild(label);
+    row.addEventListener("click", () => {
+      closeContextMenu();
+      item.run();
+    });
+    menu.appendChild(row);
+  }
+  // 画面外へはみ出さないよう、仮表示で寸法を測ってから位置をクランプする。
+  menu.style.position = "fixed";
+  menu.style.visibility = "hidden";
+  menu.style.zIndex = "2000";
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4));
+  const top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.style.visibility = "visible";
+  openContext = menu;
+  // 外側クリック/Esc/blur で閉じる。トリガとなった contextmenu ジェスチャの後続イベントで
+  // 即閉じないよう、登録は次フレームへ遅延する（capture フェーズで先取り）。
+  setTimeout(() => {
+    document.addEventListener("pointerdown", onContextOutside, true);
+    document.addEventListener("keydown", onContextKey, true);
+    window.addEventListener("blur", closeContextMenu);
+  }, 0);
+}
+
+/**
+ * テーマ準拠の自前プロンプトモーダル（名前入力・T5）。
+ *
+ * window.prompt はこのコードベースでは dev フォールバックでのみ使われ、Tauri 本番 WebView での動作
+ * 実績が無い（無反応で新規作成が黙って失敗する事故を避ける）。window.confirm は本番実績があるので
+ * 削除確認はそちらを使い、テキスト入力だけ自前モーダルにする。Promise で OK=入力値 / Cancel=null を返す。
+ */
+function promptText(message: string, placeholder = ""): Promise<string | null> {
+  return new Promise((resolve) => {
+    // 閉じた後にフォーカスを戻す元要素を退避（右クリックしたツリー行など・指摘10 a11y）。
+    const prevFocus = document.activeElement as HTMLElement | null;
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    const box = document.createElement("div");
+    box.className = "modal-box";
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    const label = document.createElement("div");
+    label.className = "modal-label";
+    label.textContent = message;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "modal-input";
+    input.placeholder = placeholder;
+    const actions = document.createElement("div");
+    actions.className = "modal-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "modal-btn";
+    cancel.textContent = "キャンセル";
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = "modal-btn primary";
+    ok.textContent = "OK";
+    actions.append(cancel, ok);
+    box.append(label, input, actions);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    // モーダル表示中はグローバルショートカット（window keydown）を無効化する（指摘5: 名前入力中の
+    // Ctrl+Shift+Enter→確認済み や Ctrl+W→タブを閉じる が背景タブへ貫通するのを防ぐ）。
+    modalDepth += 1;
+    input.focus();
+    const close = (value: string | null): void => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey, true);
+      modalDepth = Math.max(0, modalDepth - 1);
+      // フォーカスを開く前の要素へ戻す（キーボード操作位置を見失わない・指摘10）。
+      prevFocus?.focus?.();
+      resolve(value);
+    };
+    // Tab フォーカスを box 内（input / キャンセル / OK）へ閉じ込める（指摘10 フォーカストラップ）。
+    const focusables: HTMLElement[] = [input, cancel, ok];
+    const onKey = (e: KeyboardEvent): void => {
+      // 処理可否に関わらず、モーダル中のキーは背景（window ハンドラ）へ伝播させない（指摘5）。
+      // ただし入力欄へは届かせる必要があるため capture では stopImmediatePropagation せず、
+      // ここで stopPropagation して bubble 経路の window ハンドラだけを止める。
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        close(null);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        close(input.value);
+      } else if (e.key === "Tab") {
+        // box 内の 3 要素を循環させる（外へ抜けない）。
+        e.preventDefault();
+        const active = document.activeElement as HTMLElement | null;
+        const idx = focusables.indexOf(active as HTMLElement);
+        const dir = e.shiftKey ? -1 : 1;
+        const next = focusables[(idx + dir + focusables.length) % focusables.length];
+        next?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    cancel.addEventListener("click", () => close(null));
+    ok.addEventListener("click", () => close(input.value));
+    // 背景（オーバーレイ自身）クリックでキャンセル（box 内クリックは透過しない）。
+    overlay.addEventListener("pointerdown", (e) => {
+      if (e.target === overlay) close(null);
+    });
+  });
+}
+
+/**
+ * テーマ準拠の自前確認モーダル（はい/いいえ・T5 削除確認）。Promise で OK=true / Cancel=false を返す。
+ *
+ * 実機検証で window.confirm がこの Tauri/WebView2 ビルドでは**ダイアログを出さず即 true を返す**ことが
+ * 判明したため（window.prompt と同根）、削除の確認をネイティブ confirm に頼らず自前モーダルにする
+ * （誤クリックでの即削除を防ぐ＝最上位原則「データを失わない」。ごみ箱移動で復元可能だが確認は出す）。
+ */
+function confirmModal(
+  message: string,
+  opts?: { okLabel?: string; danger?: boolean },
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const prevFocus = document.activeElement as HTMLElement | null;
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    const box = document.createElement("div");
+    box.className = "modal-box";
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    const label = document.createElement("div");
+    label.className = "modal-label";
+    // 複数行メッセージ（\n）は <br> で改行表示する。
+    message.split("\n").forEach((line, i) => {
+      if (i > 0) label.appendChild(document.createElement("br"));
+      label.appendChild(document.createTextNode(line));
+    });
+    const actions = document.createElement("div");
+    actions.className = "modal-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "modal-btn";
+    cancel.textContent = "キャンセル";
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = opts?.danger ? "modal-btn danger-btn" : "modal-btn primary";
+    ok.textContent = opts?.okLabel ?? "OK";
+    actions.append(cancel, ok);
+    box.append(label, actions);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    modalDepth += 1;
+    ok.focus();
+    const focusables: HTMLElement[] = [cancel, ok];
+    const close = (value: boolean): void => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey, true);
+      modalDepth = Math.max(0, modalDepth - 1);
+      prevFocus?.focus?.();
+      resolve(value);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        close(false);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        close(true);
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        const idx = focusables.indexOf(document.activeElement as HTMLElement);
+        const dir = e.shiftKey ? -1 : 1;
+        focusables[(idx + dir + focusables.length) % focusables.length]?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    cancel.addEventListener("click", () => close(false));
+    ok.addEventListener("click", () => close(true));
+    overlay.addEventListener("pointerdown", (e) => {
+      if (e.target === overlay) close(false);
+    });
+  });
+}
+
+/** ツリー項目の右クリックメニュー（ファイル/フォルダ＝要件11）。 */
+function showTreeContextMenu(entry: TreeEntry, x: number, y: number): void {
+  // 新規作成先: フォルダ上ならその中、ファイル上ならその親フォルダ。
+  const targetDir = entry.is_dir ? entry.path : parentDirOf(entry.path);
+  const expandAfter = entry.is_dir; // フォルダ内に作ったら展開して中身を見せる。
+  openContextMenu(
+    [
+      { label: "新規ファイル", run: () => void onCreateEntry(targetDir, false, expandAfter) },
+      { label: "新規フォルダ", run: () => void onCreateEntry(targetDir, true, expandAfter) },
+      "sep",
+      { label: "削除（ごみ箱へ）", danger: true, run: () => void onDeleteEntry(entry) },
+    ],
+    x,
+    y,
+  );
+}
+
+/** ツリーの空き領域（ルート）右クリックメニュー（新規作成のみ）。 */
+function showRootContextMenu(x: number, y: number): void {
+  if (!state.folder) return;
+  const dir = state.folder;
+  openContextMenu(
+    [
+      { label: "新規ファイル", run: () => void onCreateEntry(dir, false, false) },
+      { label: "新規フォルダ", run: () => void onCreateEntry(dir, true, false) },
+    ],
+    x,
+    y,
+  );
+}
+
+/** パスの親フォルダ（末尾区切り＋名前を落とす）。区切りが無ければ自身を返す。 */
+function parentDirOf(path: string): string {
+  const m = path.replace(/[\\/]+$/, "").replace(/[\\/][^\\/]+$/, "");
+  return m || path;
+}
+
+/** パス区切り（\ と /）・末尾区切り・大小を吸収して等価比較する。 */
+function samePath(a: string, b: string): boolean {
+  const norm = (p: string): string => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return norm(a) === norm(b);
+}
+
+/**
+ * 新規ファイル/フォルダを作成する（要件11）。名前を尋ね、backend で作成し、ツリーを更新する。
+ * ファイルは作成後に開く（中心体験へ即接続）。フォルダは作成先を展開して中身を見せる。
+ */
+async function onCreateEntry(dir: string, isDir: boolean, expandDir: boolean): Promise<void> {
+  const what = isDir ? "フォルダ" : "ファイル";
+  const name = await promptText(
+    `新規${what}の名前を入力してください`,
+    isDir ? "新しいフォルダ" : "新しいファイル.md",
+  );
+  if (name === null) return; // キャンセル。
+  const trimmed = name.trim();
+  if (!trimmed) {
+    notify("名前を入力してください", "warn");
+    return;
+  }
+  try {
+    const created = await createEntry(dir, trimmed, isDir);
+    // 自作成は watcher の created イベントを未読(◆)にしない（指摘4）。イベント到着時に消費する。
+    selfCreatedPaths.set(selfKey(created), Date.now());
+    await refreshTreeDir(dir, { expand: expandDir });
+    if (!isDir) {
+      // 作成した空ファイルを開く（テキスト/非テキスト判定は openFile が拡張子で行う）。
+      await openFile({ name: trimmed, path: created, is_dir: false });
+      // 作成直後にすぐ編集を始められるようエディタへフォーカスを移す（指摘9）。
+      // refreshTreeDir/openFile の途中でツリー行へフォーカスが移っているため明示的に取り戻す。
+      state.editor?.focusEditor();
+    }
+    notify(`${what}を作成しました: ${trimmed}`);
+  } catch (e) {
+    notify(`${what}の作成に失敗しました: ${String(e)}`, "error");
+  }
+}
+
+/** 削除（ごみ箱へ移動・要件11）。確認のうえ backend でごみ箱へ送り、ツリーを更新する。 */
+async function onDeleteEntry(entry: TreeEntry): Promise<void> {
+  const what = entry.is_dir ? "フォルダ" : "ファイル";
+  const ok = await confirmModal(
+    `${what}「${entry.name}」をごみ箱へ移動します。よろしいですか？\n` +
+      `（完全削除ではなく OS のごみ箱へ移動するので、必要なら復元できます）`,
+    { okLabel: "ごみ箱へ移動", danger: true },
+  );
+  if (!ok) return;
+  try {
+    await deleteEntry(entry.path);
+    // 削除したフォルダ自身とその配下の展開状態/子キャッシュを掃除する（同名再作成時の幽霊表示防止・指摘8）。
+    if (entry.is_dir) pruneTreeDir(entry.path);
+    await refreshTreeDir(parentDirOf(entry.path));
+    notify(`ごみ箱へ移動しました: ${entry.name}`);
+    // 開いているタブの追従（「削除済み」表示）は watcher の removed イベント（onExternalChange）が担う。
+  } catch (e) {
+    notify(`削除に失敗しました: ${String(e)}`, "error");
+  }
+}
+
+/** 作成/削除後にツリーの該当階層を更新する（ルートは listDir で取り直し、サブフォルダは reloadTreeDir）。 */
+async function refreshTreeDir(dir: string, opts?: { expand?: boolean }): Promise<void> {
+  if (state.folder && samePath(dir, state.folder)) {
+    try {
+      const entries = await listDir(state.folder);
+      state.treeEntries = entries;
+      refreshTree();
+    } catch {
+      // 取得失敗は固めない（現状維持）。
+    }
+    return;
+  }
+  await reloadTreeDir(dir, opts);
 }
 
 /**
@@ -378,6 +810,9 @@ function initWindowControls(): void {
     maxBtn.setAttribute("aria-label", maximized ? "元のサイズに戻す" : "最大化");
     maxBtn.setAttribute("title", maximized ? "元のサイズに戻す" : "最大化");
     maxBtn.classList.toggle("is-maximized", maximized);
+    // 最大化中は上端リサイズ縁（#resize-top）を CSS で消す（指摘8）。最大化したウィンドウは上辺リサイズが
+    // 無効なのに ns-resize カーソルが出て「大きさ調整できそう」に見える誤解を防ぐ（通常カーソルへ戻す）。
+    document.body.classList.toggle("window-maximized", maximized);
   };
   maxBtn.addEventListener("click", () => {
     void (async () => {
@@ -1219,7 +1654,7 @@ async function renderActivePreview(): Promise<void> {
     // 系統B（HTML）の危険検知を通知バー導線に出す（要件6.3）。has_meta_refresh も伝える。
     const hz = ready.hazards;
     if (hz.has_script) {
-      notify("JS を使うHTMLのため表示が崩れる可能性があります（既定のブラウザで開けます）", "warn");
+      notify("JS を使うHTMLのため表示が崩れる可能性があります（既定のアプリで開けます）", "warn");
     }
     if (hz.has_external_ref) {
       // 既に許可済み（このタブで「許可して再読込」した）なら通知を消し、未許可なら許可導線を出す。
@@ -1408,10 +1843,19 @@ async function onRollback(): Promise<void> {
 /** 外部変更（fs-changed）を未読ストアへ適用し、ツリー/タブを再描画する（要件4.2/7.2）。 */
 function onExternalChange(changes: import("./ipc").FsChange[]): void {
   if (changes.length === 0) return;
-  state.unread.apply(changes);
+  // ツリーから自分で作成したばかりのファイルの created は未読(◆)にしない（指摘4）。watcher は workspace を
+  // 再帰監視するため自作成にも created が飛ぶ。到着時点で selfCreatedPaths を消費して未読化を抑止する
+  //（非同期到着と競合しないワンショット）。modified/removed 等はそのまま反映する。
+  // 先に TTL を過ぎた未消費エントリを掃除し、stale エントリが後続の正当な外部 created を誤抑制しないようにする。
+  pruneSelfCreated(Date.now());
+  const effective = changes.filter(
+    (c) => !(c.kind === "created" && selfCreatedPaths.delete(selfKey(c.path))),
+  );
+  if (effective.length === 0) return;
+  state.unread.apply(effective);
   // 開いているクリーン（未保存変更なし）タブへの外部変更は自動リロード（要件7.2）。
   // 未保存変更があるタブは自動リロードせず通知のみ（衝突処理は sprint 3 で本実装）。
-  void autoReloadCleanTabs(changes);
+  void autoReloadCleanTabs(effective);
   refreshTree();
   refreshTabs();
   // 差分あり数が変わったので構造化ステータス（差分 N …）を更新する。表示専用ステータスとは別に
@@ -1529,8 +1973,9 @@ async function onOpenLogFolder(): Promise<void> {
 }
 
 /**
- * 「ブラウザで開く」（tab-tools・要件6.2/design G・UIブラッシュアップ T9）。
- * **現在アクティブなタブのファイル**を OS 既定アプリ（HTML なら既定ブラウザ等）で開く。
+ * 「既定のアプリで開く」（tab-tools・要件6.2/design G・UIブラッシュアップ T9）。
+ * **現在アクティブなタブのファイル**を OS 既定アプリ（HTML なら既定ブラウザ・画像なら画像ビューア等）で開く。
+ * 実態は「ブラウザ」ではなく拡張子の関連付けに従う「既定アプリ」起動なので UI/文言をそれに合わせる（指摘4）。
  * backend の自前 command（open_in_default_app）が絶対パス＋実在を再検証して起動する（fail-closed）。
  *
  * 新規（未保存で未作成）タブはディスクに実体が無く backend が拒否するため、保存を促して中断する
@@ -2241,6 +2686,12 @@ async function main(): Promise<void> {
   // ツリー収納/引き出しトグル（B5・ui-design 7章）。ヘッダ右端「‹」で収納、レール「›」で引き出す。
   treeCollapseBtn().addEventListener("click", () => setTreeCollapsed(true));
   treeExpandBtn().addEventListener("click", () => setTreeCollapsed(false));
+  // ツリーの空き領域（行以外）を右クリックしたら、ルートへの新規作成メニューを出す（T5）。
+  // 行（treeitem）上の右クリックは tree.ts が stopPropagation で先に処理するためここへは来ない。
+  document.getElementById("tree-pane")?.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    showRootContextMenu(e.clientX, e.clientY);
+  });
   // ツリーヘッダ（B4）の初期表示（未オープン時は素の文言）。復元後に更新される。
   updateTreeHeader();
   // tab-tools セグメントの初期表示（既定モード=ソースに .on を付け、タブ未オープン時は無効化する）。
@@ -2251,6 +2702,9 @@ async function main(): Promise<void> {
   // （pika-core::shortcuts の写し）へ集約し、ここは結果（Action）を dispatchAction へ流すだけ。
   // F6/Shift+F6（ペイン間フォーカス循環）は a11y/index.ts が capture フェーズで先取りする。
   window.addEventListener("keydown", (e) => {
+    // モーダル（名前入力プロンプト）表示中はグローバルショートカットを無効化する（指摘5）。
+    // 名前入力中の Ctrl+Shift+Enter（確認済み）/ Ctrl+W（タブを閉じる）等が背景タブへ貫通しない。
+    if (modalDepth > 0) return;
     const action = resolveShortcut(normalizeKey(e), modsOf(e), currentFocus());
     if (action === null) return; // 未割当キーは CM6 等の既定処理へ委ねる。
     if (dispatchAction(action)) e.preventDefault();

@@ -70,6 +70,10 @@ export function initFocusCycling(): void {
     (e) => {
       if (e.key === "F6") {
         e.preventDefault();
+        // 自前モーダル（名前入力プロンプト等）の表示中はペイン循環を止める（第2巡 回帰修正）。
+        // capture フェーズで登録される本ハンドラは main.ts の modalDepth ガードの外なので、
+        // ここで .modal-overlay の存在を見てフォーカスを背景ペインへ逃がさない（フォーカストラップ維持）。
+        if (document.querySelector(".modal-overlay")) return;
         cyclePane(!e.shiftKey); // Shift+F6 は逆回り。
       }
     },

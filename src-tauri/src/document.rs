@@ -100,7 +100,12 @@ fn line_ending_dto(le: encoding::LineEnding) -> &'static str {
 pub fn open_document(
     path: String,
     access: State<'_, crate::access::AccessControl>,
+    snapshot: State<'_, crate::snapshot::SnapshotService>,
 ) -> Result<OpenedDocument, String> {
+    // canonicalize 前の元パス（フロントが渡したそのまま）を控える。スナップショット索引キーは
+    // normalize_path_key（`\`→`/` のみ・`\\?\` は吸収しない）で揃えるため、ベースラインは
+    // open_workspace の直下ループ／compute_file_diff と同じ**非 canonical パス**で張る必要がある（指摘6）。
+    let raw_path = path.clone();
     let canon = access.verify_read(&path)?;
     let path = canon.to_string_lossy().to_string();
     let size = std::fs::metadata(&path)
@@ -144,6 +149,12 @@ pub fn open_document(
     let decoded = encoding::decode(&bytes);
     // 段階制（サイズ）と行長ガード（内容）の両方を反映した縮退フラグ。
     let degrade = degrade_flags(size, &decoded.text);
+    // 全既読スタート（要件8.1・指摘6）: 開いた瞬間の内容を非クロバーでベースライン化する。
+    // open_workspace の直下ループはルート直下しか張らないため、サブフォルダを展開して開いたファイルは
+    // ベースライン不在になり compute_file_diff が誤って「差分非対象」を返していた。ここで開いた時点
+    // （編集前）の内容を直下ファイルと同じ全既読スタートへ揃える（以後の編集は差分として正しく出る）。
+    // 非クロバー＆policy 準拠（機密/巨大はハッシュのみ＝差分非対象のまま）。索引キー整合のため raw_path で張る。
+    snapshot.ensure_baseline(&raw_path, &decoded.text, size);
     Ok(OpenedDocument {
         stage: stage_to_dto(stage).into(),
         degrade: to_degrade_dto(degrade),

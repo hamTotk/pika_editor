@@ -185,16 +185,41 @@ impl SnapshotService {
         // index は永続化しない（ループ後に persist_index で1回まとめる）。
     }
 
-    /// フォルダ初回オープン時にハッシュのみベースラインを取得する（バイナリ等・#54・index 永続化は遅延）。
+    /// フォルダ初回オープン時に**ハッシュのみ**ベースラインを取得する（バイナリ等・#54・index 永続化は遅延）。
     ///
-    /// バイナリ（非UTF-8）は内容 object を持てない（差分/巻き戻し非対象）が、外部変更検知のため
-    /// バイト由来ハッシュをベースラインに据える（空文字ベースライン化＝全ファイル空ハッシュ衝突を避ける）。
-    /// [`Self::capture_baseline`] と同じく **非クロバー**（既存ベースラインがあれば触らない）で、
-    /// 内容 object は持たないため遅延するのは index.json のみ。ループ後に [`Self::persist_index`] を呼ぶ。
+    /// テキストでない（encoding::decode が strict 失敗し lossy へ倒れた＝had_decode_warning）ファイルは
+    /// 内容 object を持たない（差分/巻き戻し非対象）。外部変更検知用にバイト由来ハッシュをベースラインへ据える
+    /// （空文字を内容ベースライン化しない＝全ファイル空ハッシュ衝突を避ける・#54。ロッシーデコードした
+    /// バイナリ内容を data root へ保存しない＝データ最小化#20・肥大/folder-open コスト回避・第2巡 回帰修正）。
+    /// [`Self::capture_baseline`] と同じく **非クロバー**で、内容 object を持たないため遅延するのは index.json のみ。
     pub fn capture_baseline_hash_only(&self, path: &str, content_hash: &str) {
         let mut inner = self.inner.lock().expect("snapshot lock");
         capture_baseline_hash_only_locked(&mut inner, path, content_hash);
         // index は永続化しない（ループ後に persist_index で1回まとめる）。
+    }
+
+    /// 文書を**開いた時点**の内容を非クロバーでベースライン化する（要件8.1 全既読スタート・指摘6）。
+    ///
+    /// `open_workspace` の直下ループはルート直下ファイルしかベースラインを張らない。サブフォルダを
+    /// 遅延展開して開いたファイルはベースライン不在のままになり、`compute_file_diff` がそれを
+    /// `has_baseline_content:false` で返すため、フロントが誤って「差分非対象（10MB以上/画像/機密）」を
+    /// 全ファイルに表示していた。`open_document` から本メソッドを呼び、開いた瞬間の内容を直下ファイルと
+    /// 同じ「全既読スタート」へ揃える（編集前に張るので、以後の編集は差分として正しく現れる）。
+    ///
+    /// 非クロバー（既存ベースラインは触らない）かつ policy 準拠（機密/巨大/画像は `capture_baseline_locked`
+    /// が踏襲してハッシュのみ＝差分非対象のまま正しく扱う）。**新規に取得したときだけ** index を
+    /// 永続化する（毎オープンの per-file fsync を避ける＝固まらない）。取得済み path は早期 return で no-op。
+    pub fn ensure_baseline(&self, path: &str, content: &str, size: u64) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return; // ロック毒化は致命にしない（ベースライン未取得でも編集体験は継続）。
+        };
+        let key = normalize_path_key(path);
+        if inner.store.baseline(&key).is_some() {
+            return; // 直下ループ取得済み/前回オープン永続分＝非クロバー（no-op）。
+        }
+        capture_baseline_locked(&mut inner, path, content, size);
+        // 単発取得なので、ここで index を1回永続化する（新規サブフォルダファイルの初回オープン時のみ）。
+        persist_index_locked(&mut inner);
     }
 
     /// 索引（index.json）を1回だけ永続化する（バッチ capture のループ完了後に呼ぶ）。
@@ -381,14 +406,35 @@ pub fn compute_file_diff(
     let mut inner = snapshot.inner.lock().map_err(|_| "snapshot ロック失敗")?;
     let key = normalize_path_key(&path);
 
+    // ベースライン未取得（open_workspace の直下ループ外＝サブフォルダ等で開かれたファイル）。
+    // 通常は open_document の ensure_baseline で取得済みだが、経路漏れに備え compute 時にも全既読
+    // スタート（要件8.1）として現在内容をベースライン化する。これをしないと「ベースライン不在」を
+    // has_baseline_content:false で返し、フロントが誤って「差分非対象（10MB以上/画像/機密）」を
+    // 通常ファイルにも出していた（指摘6）。policy は capture が踏襲する（機密/巨大はハッシュのみのまま）。
+    if inner.store.baseline(&key).is_none() {
+        // policy 判定（機密/巨大/画像）は open 経路と同じ**ディスク実サイズ**を使う（指摘7）。current.len() は
+        // デコード後 UTF-8 のバイト長で、Shift_JIS 等ではディスク比で膨らみ 10MB 境界を誤判定しうる。
+        // FS 読みを避ける設計だが、ここは稀なフォールバックなので size 取得の1回 stat のみ許容する。
+        let disk_size = std::fs::metadata(&path)
+            .map(|m| m.len())
+            .unwrap_or(current.len() as u64);
+        capture_baseline_locked(&mut inner, &path, &current, disk_size);
+        persist_index_locked(&mut inner);
+    }
+
     let Some(baseline) = inner.store.baseline(&key).cloned() else {
-        // ベースライン未取得（新規＝全行追加）。
-        let diff = compute_diff("", &current);
-        return Ok(to_dto(diff, false));
+        // capture が失敗してもパニックさせない。全既読スタート相当（差分なし）として返す
+        // （誤った「差分非対象」は出さない＝指摘6）。
+        return Ok(FileDiffDto {
+            lines: Vec::new(),
+            change_count: 0,
+            has_baseline_content: true,
+        });
     };
 
     let Some(object_hash) = baseline.object_hash.clone() else {
-        // ハッシュのみ＝差分非対象（要件8.2/9.2）。
+        // ハッシュのみ＝**真に**差分非対象（機密/10MB以上/画像＝要件8.2/9.2）。これは正しい挙動
+        //（通常の小さなテキストはこの分岐に来ない＝上で内容ベースラインを張るため）。
         return Ok(FileDiffDto {
             lines: Vec::new(),
             change_count: 0,
