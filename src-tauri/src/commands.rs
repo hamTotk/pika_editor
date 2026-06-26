@@ -95,6 +95,11 @@ pub fn open_workspace(
     // 次回 open の再 capture（非クロバー）＋recover_from_meta で復元できる安全網は崩れない。
     snapshot.persist_index();
 
+    // 監視の除外をツリー列挙（enumerate_dir）と同じ excluded_dirs に揃える。
+    // watch_root が baseline 列挙で inner.excluded_dirs を読むため、**watch_root より前**に設定する
+    // （これまで watcher は .git/node_modules をハードコードし、dist/target を足すとツリーから消えるのに
+    // fs-changed が飛び続け未読が消せない不整合があった＝解消）。`excluded` はここ以降未使用なので move する。
+    watcher.set_excluded_dirs(excluded);
     // 監視を開始（ベースライン取得・外部変更の emit）。監視不能 FS はポーリングへ縮退する。
     watcher.watch_root(dir)?;
     Ok(entries)
