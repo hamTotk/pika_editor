@@ -99,13 +99,22 @@ body {
   gap: 0;
   margin: -4px -8px -4px 4px;
   flex: none;
+  /* 上端リサイズ縁(#resize-top・z-index:1000)より前面に置き、ウィンドウ右上隅の最上端3pxでも
+     閉じる/最大化ボタンがクリックを受けられるようにする（指摘11・Fitts の角クリック確保）。
+     リサイズ縁はボタン以外の上端で従来どおり機能する。 */
+  position: relative;
+  z-index: 1001;
 }
 
 .window-controls .wc-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
+  /* OS 標準キャプションボタン相当（46×全高）まで広げて当たり判定を確保する（フレームレス自前タイトルバー）。
+     幅 40px は実機で押しづらかった（指摘1）。高さは align-items:stretch（.window-controls）＋帯 padding の
+     相殺（margin:-4px …）で帯いっぱいに伸び、右上隅まで届く（Fitts の法則：角はクリックしやすい）。 */
+  width: 46px;
+  min-height: 30px;
   border: 0;
   background: transparent;
   color: var(--text-2);
@@ -150,6 +159,14 @@ body {
   height: 3px;
   cursor: ns-resize;
   z-index: 1000;
+}
+
+/* 最大化中は上端リサイズ縁を消す（指摘8）。最大化したウィンドウは上辺リサイズが無効なのに、
+   薄いストリップが ns-resize カーソルを出してしまい「大きさ調整できそう」に見える誤解を防ぐ。
+   main.ts(syncMaxLabel) が body へ window-maximized を付け外しする。display:none で
+   当たり判定もカーソルも消し、通常カーソルへ戻す（mousedown も最大化中は元々 no-op）。 */
+body.window-maximized #resize-top {
+  display: none;
 }
 
 /* ドロップダウンを載せる絶対配置レイヤ。#app（position:relative）の左上基準で .menu-pop を配置する。
@@ -236,6 +253,114 @@ body {
   height: 1px;
   background: var(--border-1);
   margin: 5px 8px;
+}
+
+/* 自前プロンプトモーダル（新規作成の名前入力＝T5）。window.prompt の本番動作が不確実なため
+   テーマ準拠の小さなモーダルで代替する。背景を薄く覆い、中央へ入力ボックスを出す。 */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.modal-box {
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  background: var(--bg-window);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-family: var(--font-ui);
+}
+
+.modal-label {
+  color: var(--text-1);
+  font-size: 13px;
+}
+
+.modal-input {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 9px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  color: var(--text-1);
+}
+
+.modal-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.modal-btn {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 5px 14px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-1);
+  cursor: pointer;
+}
+
+.modal-btn:hover {
+  background: var(--bg-hover);
+}
+
+.modal-btn.primary {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: var(--on-accent);
+}
+
+/* 破壊的操作（削除）の主ボタンは警告色塗り（色＋ラベル「ごみ箱へ移動」で二重に示す）。 */
+.modal-btn.danger-btn {
+  background: var(--alert);
+  border-color: var(--alert);
+  color: var(--on-accent);
+}
+
+.modal-btn:focus-visible {
+  outline: 2px solid var(--accent, Highlight);
+  outline-offset: 1px;
+}
+
+/* ツリーの右クリックメニュー（新規ファイル/新規フォルダ/削除＝T5）。menu-pop の見た目を流用しつつ、
+   項目数が少ないので幅を内容なりに詰める（280px 固定だと広すぎる）。position:fixed で座標配置する
+   （main.ts が getBoundingClientRect でクランプしてから left/top を設定）。 */
+.menu-pop.context-menu {
+  width: auto;
+  min-width: 188px;
+}
+
+/* 破壊的操作（削除）は警告色で弁別する（色＋ラベル「ごみ箱へ」の二重表示で色だけに依存しない）。 */
+.menu-pop .mrow.danger .mlabel {
+  color: var(--alert);
+}
+
+.menu-pop .mrow.danger:hover,
+.menu-pop .mrow.danger:focus-visible {
+  background: var(--alert);
+}
+
+.menu-pop .mrow.danger:hover .mlabel,
+.menu-pop .mrow.danger:focus-visible .mlabel {
+  color: var(--on-accent);
 }
 
 #workbench {
@@ -431,7 +556,14 @@ body {
      通知が無いときバンドは 0 高さで、#preview-host は従来どおりフル高さ（不変）。 */
   grid-template-rows: auto 1fr auto;
   min-height: 0;
+  /* グリッド項目（#workbench の 1fr トラック）の自動最小幅は min-content＝中身次第で 1fr を超えうる。
+     タブを多数開くと #editor-pane が 1fr トラックを超えて広がり、#tabbar→#tabs も一緒に伸びて
+     overflow-x:auto が効かず、タブが画面右へはみ出して横スクロールしても末尾に届かなくなる（指摘2）。
+     min-width:0 でトラック幅まで縮められるようにし、#tabs の横スクロールを正しく機能させる。 */
+  min-width: 0;
   background: var(--bg-raised);
+  /* 検索/置換バー（.search-bar）を右上へ position:absolute で重ねる土台（U4/U5・要件5.4）。 */
+  position: relative;
 }
 
 /* プレビュー＋差分の左右並置（ui-design 8章「左＝整形プレビュー／右＝テキスト差分」）。
@@ -464,13 +596,15 @@ body {
 #editor-pane[data-split="editor-preview"] #editor-host {
   grid-row: 2;
   grid-column: 1;
+  /* 中央の区切り線（指摘3）。プレビューは権限ゼロ別WebView が #preview-host の矩形（border-box）を
+     覆うため、preview-host 側に border-left を引いても WebView に隠れて見えない。境界を覆われない
+     エディタ（DOM）側の右端へ移すことで、分割時に中央の罫線が確実に見える（色非依存・要件11.5）。 */
+  border-right: 1px solid var(--border-1);
 }
 
 #editor-pane[data-split="editor-preview"] #preview-host {
   grid-row: 2;
   grid-column: 2;
-  /* プレビュー側は左に細い境界を引き、エディタとの区切りを明示（色非依存の罫線・要件11.5）。 */
-  border-left: 1px solid var(--border-1);
 }
 
 /* タブバー（C1 フラット化・ui-mock .tabbar・UIブラッシュアップ T6 差分 C4）。
@@ -1020,9 +1154,55 @@ body {
   text-align: center;
 }
 
+/* 非テキスト: 画像簡易ビューの占有領域（要件12.2・U3）。エディタ/差分/プレビューと同じ grid-row:2 を
+   占有する兄弟。CM6 を作らず <img>（または「既定アプリで開く」誘導）をここに出す。ツールバー＋画像の
+   縦並びにし、画像はスクロールで全体を見られるようにする（等倍時に領域を超えても見られる）。 */
+#image-host {
+  grid-row: 2;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-raised);
+  display: flex;
+  flex-direction: column;
+}
+
+#image-host[hidden] {
+  display: none;
+}
+
+/* 画像簡易ビュー上端のフィット切替バー（ウィンドウフィット/等倍＝要件12.2）。 */
+.image-toolbar {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-1);
+  background: var(--bg-sunken);
+}
+
+/* フィット切替ボタン（控えめ・テーマ追従＝色は直書きせずトークン変数）。 */
+.image-fit-btn {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-1);
+  cursor: pointer;
+}
+
+/* 現在のフィット値を accent 寄りの背景で示す（色記号だけに依存しないよう枠色も変える）。 */
+.image-fit-btn.on,
+.image-fit-btn[aria-pressed="true"] {
+  background: var(--bg-active);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* 非テキスト: 画像簡易ビュー（表示のみ・ウィンドウフィット/等倍＝要件12.2）。 */
 #preview-host .image-fit,
-#editor-host .image-fit {
+#editor-host .image-fit,
+#image-host .image-fit {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
@@ -1031,7 +1211,8 @@ body {
 }
 
 #preview-host .image-actual,
-#editor-host .image-actual {
+#editor-host .image-actual,
+#image-host .image-actual {
   display: block;
 }
 
@@ -1053,6 +1234,120 @@ body {
   background: var(--bg-raised);
   color: var(--text-1);
   cursor: pointer;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   検索/置換バー（U4/U5・要件5.4）。#editor-pane（position:relative）の右上へ重ねる
+   小さなフローティングバー。色はすべてトークン変数（ライト/ダーク追従＝直書き禁止）。
+   キー処理は search モジュールが担う（ここは見た目のみ）。 */
+.search-bar {
+  position: absolute;
+  top: 38px; /* タブバー(#tabbar min-height:35px)の直下へ落とす。 */
+  right: 12px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  font-family: var(--font-ui);
+}
+
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 置換行は replace モードでのみ表示（search モジュールが hidden を切り替える）。 */
+.search-replace-row[hidden] {
+  display: none;
+}
+
+.search-input {
+  font: inherit;
+  font-size: 12.5px;
+  width: 180px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  color: var(--text-1);
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* 件数表示（"3/27"・"0件"・"27+"）。狭めの固定幅で桁送りのちらつきを抑える。 */
+.search-count {
+  min-width: 48px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* 無効な正規表現のときだけ強調色に寄せる（accent でテーマ追従・色記号のみに依存しない文言も出す）。 */
+.search-count-error {
+  color: var(--accent);
+  min-width: auto;
+}
+
+.search-btn {
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 7px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.search-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-1);
+}
+
+.search-btn:focus-visible {
+  outline: 2px solid var(--accent, Highlight);
+  outline-offset: 1px;
+}
+
+/* 置換などテキストボタンは少し横を広げる。 */
+.search-text-btn {
+  padding: 3px 10px;
+  color: var(--text-1);
+}
+
+/* オプショントグル（Aa / \b / .*）。on は .image-fit-btn.on と同系（accent 寄り）。 */
+.search-toggle.on,
+.search-toggle[aria-pressed="true"] {
+  background: var(--bg-active);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   CM6 検索ハイライト（editor/index.ts の StateField が当てる class）。
+   色はトークン変数のみ＝ライト/ダーク追従（pikaHighlightStyle と同方針）。 */
+.cm-editor .cm-search-hit {
+  /* 全ヒットは薄い強調（地と差をつけつつ主張しすぎない）。 */
+  background: var(--bg-active);
+  border-radius: 2px;
+}
+
+.cm-editor .cm-search-hit-current {
+  /* 現在ヒットは枠色を accent にして 1 件だけ強める（背景色だけに依存しない＝弁別性）。 */
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+  background: var(--bg-hover);
 }
 
 /* ステータスは右下隅に貼り付く灰背景の帯（ui-design §9・ui-mock .status）。
@@ -1095,14 +1390,24 @@ body {
   #tabs [role="tab"],
   #tree [role="treeitem"],
   #notifications .notice,
-  .open-externally button {
+  .open-externally button,
+  .modal-box,
+  .modal-input,
+  .modal-btn {
     border-color: ButtonText;
     background: ButtonFace;
     color: ButtonText;
   }
-  /* ドロップダウンの選択行は OS のハイライト色で示す（色非依存の ✓ と併用）。 */
+  /* ドロップダウンの選択行・モーダルの主ボタン・破壊的操作(削除)の hover は OS ハイライト色で示す
+     （色非依存の ✓/ラベル文言と併用＝新規追加面も既存の明示降格方針へ揃える・指摘12）。 */
   .menu-pop .mrow:hover,
-  .menu-pop .mrow:focus-visible {
+  .menu-pop .mrow:focus-visible,
+  .menu-pop .mrow.danger:hover,
+  .menu-pop .mrow.danger:focus-visible,
+  .modal-btn.primary,
+  .modal-btn.danger-btn,
+  .modal-btn:hover,
+  .modal-btn:focus-visible {
     background: Highlight;
     color: HighlightText;
   }

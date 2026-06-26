@@ -272,7 +272,7 @@ CLI パース・役割決定の判断は系統A（core/ipc・controller/app_cont
 | TF3 | Reopen with Encoding | Shift_JIS と誤判定された UTF-8 を「エンコーディングを指定して開き直す」で正しく再表示できる（「表示」メニュー） | 要件5.2/5.6（T-009） | [x] 実機GUI（debug+Vite・PrintWindow検証）で確認。`pika-core::decode_with`＋`reopen_document_with_encoding`＋表示メニュー実結線。①BOMなし日本語UTF-16LE自動判定→UTF-8文字化け`B0D0F0H0J0…`＋警告トースト→「UTF-16 LE」で開き直し→`あいうえお/かきくけこ/さしすせそ`正表示＋成功トースト＋メニュー現在値UTF-16 LE更新（以後の保存が維持）。②dirty時は破棄確認ダイアログ（ファイル名+対象エンコ提示）→キャンセルで編集保持。③非互換指定(Shift_JIS→UTF-8)は失敗トースト＋内容無変更（データ喪失なし）。feat 1d72bb5・pika-core 401 PASS（decode_with 5件） |
 | TF4 | 保存中断フロー | Shift_JIS で表現できない文字（絵文字等）を入れて保存しようとすると保存が中断し［UTF-8で保存/該当文字を確認/キャンセル］が提示される（無確認の文字欠落なし） | 要件5.2/5.6（T-009） | [ ] 未実施（要実機。Unmappable 検出＋該当文字インデックスは cargo test 済み） |
 | TF5 | 正規表現検索/置換 | 後方参照・キャプチャ参照・Unicode 文字クラスで検索でき、キャプチャ参照で全置換できる | 要件5.4・design doc 15章-8（T-009） | [ ] 未実施（要実機。fancy-regex 全機能は cargo test 済み 17 件・第一候補で確定） |
-| TF6 | 第2段階 読み取り専用ビューア | 50MB 超は仮想化ウィンドウビューア（range 読取）で閲覧・検索でき、編集/保存/置換が無効化される（CM6 へ全量ロードしない） | 要件2.2 第2段階・design doc 8章（T-009） | [ ] 未実施（要実機。window_around/align_to_lines は cargo test 済み・read_range 配線済み） |
+| TF6 | 第2段階 読み取り専用ビューア | 50MB 超は仮想化ウィンドウビューア（range 読取）で閲覧でき（検索は MVP 外＝系統C 繰り越し・2026-06-25 改訂）、編集/保存/置換が無効化される（CM6 へ全量ロードしない） | 要件2.2 第2段階・design doc 8章（T-009） | [ ] 未実施（要実機。window_around/align_to_lines は cargo test 済み・read_range 配線済み） |
 | TF7 | キャンセル可能な検索/置換 | 巨大ファイル/長行での検索・全置換が UI をブロックせず、進捗表示＋キャンセルできる（別スレッド実行） | 要件5.4・design doc 3章（T-009） | [ ] 未実施（要実機。Cancel 協調キャンセル・ReDoS バックトラック上限は cargo test 済み） |
 
 ## TG. sprint 7 a11y 全Web再構築・エッジケース・配布（所見は acceptance-findings.md T-010）
