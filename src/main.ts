@@ -1166,6 +1166,8 @@ async function activateTab(path: string): Promise<void> {
       !tab.editingOff,
       // エディタ→プレビュー片方向スクロール同期（S4・要件6.1 改訂）。
       onEditorScroll,
+      // 言語選択（拡張子で markdown/HTML を切替・要件5.1）。
+      path,
     );
     refreshTabs();
     // 直前に画像タブを見ていた場合に image-host が残らないよう隠す（画像→削除済みタブ切替の正規化）。
@@ -1207,6 +1209,8 @@ async function activateTab(path: string): Promise<void> {
       !(doc.degrade.highlight_off || doc.degrade.editing_off),
       // エディタ→プレビュー片方向スクロール同期（S4・要件6.1 改訂）。
       onEditorScroll,
+      // 言語選択（拡張子で markdown/HTML を切替・要件5.1）。
+      path,
     );
     // host 可視を正規化する（画像タブ→テキストタブ切替で image-host が残らないよう必ず隠す＝U3）。
     // applyOccupancy は hidden 切替＋bounds のみで preview ナビゲートはしないため、下の
@@ -1671,6 +1675,8 @@ async function reopenActiveWithEncoding(enc: DocEncoding): Promise<void> {
       !(doc.degrade.highlight_off || doc.degrade.editing_off),
       // エディタ→プレビュー片方向スクロール同期（S4・要件6.1 改訂）。
       onEditorScroll,
+      // 言語選択（拡張子で markdown/HTML を切替・要件5.1）。
+      path,
     );
     // 開いた内容のハッシュを基準に取り直し未読をクリアする（復元の別物判定の素・eval high）。
     void captureTabHash(path, doc.text);
@@ -2627,6 +2633,8 @@ function openNewFileTab(path: string, name: string): void {
     true,
     // エディタ→プレビュー片方向スクロール同期（S4・要件6.1 改訂）。新規 .md でも split で同期する。
     onEditorScroll,
+    // 言語選択（拡張子で markdown/HTML を切替・要件5.1）。
+    path,
   );
   void captureTabHash(path, "");
   refreshTabs();
