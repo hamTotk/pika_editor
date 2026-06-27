@@ -2207,8 +2207,9 @@ function buildMenuSpecs(): MenuSpec[] {
         {
           kind: "item",
           label: "名前を付けて保存…",
-          // テキスト編集できるタブ（エディタ可視・非削除/非editingOff）のみ対象。canSearch と同条件。
-          disabled: !canSearch() || state.busy,
+          // 編集可能テキストタブなら**ペイン可視を問わず**対象（プレビューのみでもプレーン保存同様に効く・
+          // Codex P2 是正）。現在のエディタ内容を別パスへ書き出すだけで可視は不要なため canEditActiveText で判定。
+          disabled: !canEditActiveText() || state.busy,
           onSelect: () => void onSaveAs(),
         },
         { kind: "separator" },
@@ -2645,10 +2646,22 @@ function restoreTabPosition(path: string, line: number, column: number, scrollTo
  * → ソース／分割（エディタが可視）のときだけ true。
  */
 function canSearch(): boolean {
+  // canSearch はエディタが**可視**であることまで要求する（検索ハイライト/カーソル前提の編集系）。
+  return canEditActiveText() && resolveOccupancy(state.viewMode, state.diffOn).showEditor;
+}
+
+/**
+ * アクティブが編集可能なテキストタブか（CM6 エディタが生きている）。**ペイン可視は問わない**。
+ *
+ * canSearch との違いは末尾の `occupancy.showEditor` を見ない点だけ。「名前を付けて保存」のように
+ * 現在のエディタ内容を別パスへ書き出すだけで**ペイン可視を必要としない**操作のゲートに使う
+ * （プレーン保存と同様、プレビューのみモードでも効かせる＝Codex P2 の機能ギャップ是正）。
+ */
+function canEditActiveText(): boolean {
   if (!state.active || !state.editor) return false;
   const tab = state.tabs.find((t) => t.path === state.active);
   if (!tab || tab.nonText || tab.deleted || tab.editingOff) return false;
-  return resolveOccupancy(state.viewMode, state.diffOn).showEditor;
+  return true;
 }
 
 /**
