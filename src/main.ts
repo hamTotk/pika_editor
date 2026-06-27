@@ -232,7 +232,15 @@ function activeCanConfirm(): boolean {
 
 function refreshTabs(): void {
   // onClose は (path)=>void 型。closeTab は async（Promise を返す）なので void で包んで Promise を捨てる。
-  renderTabs(state.tabs, state.active, activateTab, state.unread, (p) => void closeTab(p));
+  renderTabs(
+    state.tabs,
+    state.active,
+    activateTab,
+    state.unread,
+    (p) => void closeTab(p),
+    (p, x, y) =>
+      openContextMenu([{ label: "パスをコピー", run: () => void copyPathToClipboard(p) }], x, y),
+  );
   // アクティブタブが横スクロール域の外（新規に末尾へ追加された等）なら可視域へ寄せる（指摘2 補強）。
   // min-width:0（#editor-pane）で overflow-x が正しく効くようになった上で、切替/追加時に確実に見せる。
   scrollActiveTabIntoView();
@@ -869,6 +877,42 @@ function showRootContextMenu(x: number, y: number): void {
     x,
     y,
   );
+}
+
+/** タブ右クリックの「パスをコピー」。フルパスをクリップボードへ書き、結果を通知する。 */
+async function copyPathToClipboard(path: string): Promise<void> {
+  const ok = await copyText(path);
+  notify(ok ? "パスをコピーしました" : "パスのコピーに失敗しました", ok ? "info" : "error");
+}
+
+/**
+ * テキストをクリップボードへコピーする。クリップボード専用プラグインは入れず（軽量優先）、
+ * まず navigator.clipboard.writeText（ユーザー操作＝右クリック起点なので WebView2 でも許可される）、
+ * 失敗時は一時 textarea + execCommand("copy") へフォールバックする。成否を boolean で返す。
+ */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // フォールバックへ。
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    ta.style.pointerEvents = "none";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
 }
 
 /** パスの親フォルダ（末尾区切り＋名前を落とす）。区切りが無ければ自身を返す。 */

@@ -353,6 +353,26 @@ body.window-maximized #resize-top {
   overflow-y: auto;
 }
 
+/* タブのフルパス ツールチップ（1 秒静止で表示・別フォルダ混在時の識別用）。
+   長いパスは折り返して全体を見せる（省略しない）。クリックは透過させる。 */
+.tab-path-tip {
+  position: fixed;
+  z-index: 2100;
+  display: none;
+  max-width: 60vw;
+  padding: 4px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-1);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-2);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  white-space: normal;
+  word-break: break-all;
+  pointer-events: none;
+}
+
 /* 破壊的操作（削除）は警告色で弁別する（色＋ラベル「ごみ箱へ」の二重表示で色だけに依存しない）。 */
 .menu-pop .mrow.danger .mlabel {
   color: var(--alert);

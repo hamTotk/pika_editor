@@ -23,8 +23,11 @@ export function renderTabs(
   onActivate: (path: string) => void,
   unread?: UnreadStore,
   onClose?: (path: string) => void,
+  onContextMenu?: (path: string, x: number, y: number) => void,
 ): void {
   const el = host();
+  // 再描画で旧ボタンが差し替わるため、保留中のツールチップ/タイマーをここで掃除する。
+  hideTabPathTip();
   el.replaceChildren();
   for (const tab of tabs) {
     const btn = document.createElement("button");
@@ -101,7 +104,80 @@ export function renderTabs(
       });
     }
     btn.addEventListener("keydown", (e) => onTabKeydown(e, btn, onActivate));
+
+    // マウスオーバーで 1 秒静止したらフルパスをツールチップ表示する（別フォルダのファイルが
+    // 混在しても識別できるように・要件155 の帰結）。mousemove のたびにタイマーを張り直すので
+    // 「静止」が条件＝動かしている間は出ない。mouseleave/押下/ホイールで消す。
+    btn.addEventListener("mouseenter", () => scheduleTabPathTip(btn, tab.path));
+    btn.addEventListener("mousemove", () => scheduleTabPathTip(btn, tab.path));
+    btn.addEventListener("mouseleave", () => hideTabPathTip());
+    btn.addEventListener("mousedown", () => hideTabPathTip());
+    btn.addEventListener("wheel", () => hideTabPathTip(), { passive: true });
+
+    // 右クリックで「パスをコピー」などのコンテキストメニューを出す（main 側の openContextMenu へ委譲）。
+    if (onContextMenu) {
+      btn.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        hideTabPathTip();
+        onContextMenu(tab.path, e.clientX, e.clientY);
+      });
+    }
+
     el.appendChild(btn);
+  }
+}
+
+// タブのフルパス表示ツールチップ（1 秒静止で表示）。要素は body 直下のシングルトンを使い回す。
+let tabTipTimer: number | undefined;
+let tabTipEl: HTMLElement | null = null;
+
+function ensureTabTipEl(): HTMLElement {
+  if (!tabTipEl) {
+    tabTipEl = document.createElement("div");
+    tabTipEl.className = "tab-path-tip";
+    tabTipEl.setAttribute("role", "tooltip");
+    tabTipEl.setAttribute("aria-hidden", "true");
+    document.body.appendChild(tabTipEl);
+  }
+  return tabTipEl;
+}
+
+/** ツールチップ表示を 1 秒後に予約する（既存タイマーは破棄＝mousemove で「静止」判定をやり直す）。 */
+function scheduleTabPathTip(btn: HTMLElement, path: string): void {
+  if (tabTipTimer !== undefined) clearTimeout(tabTipTimer);
+  tabTipTimer = window.setTimeout(() => {
+    tabTipTimer = undefined;
+    if (!btn.isConnected) return; // 再描画で外れたタブには出さない。
+    showTabPathTip(btn, path);
+  }, 1000);
+}
+
+/** タブの真下にフルパスのツールチップを表示する（画面外へはみ出さないようクランプ）。 */
+function showTabPathTip(btn: HTMLElement, path: string): void {
+  const tip = ensureTabTipEl();
+  tip.textContent = path;
+  tip.style.visibility = "hidden";
+  tip.style.display = "block";
+  const r = btn.getBoundingClientRect();
+  const tr = tip.getBoundingClientRect();
+  const left = Math.max(4, Math.min(r.left, window.innerWidth - tr.width - 4));
+  const top = Math.min(r.bottom + 4, window.innerHeight - tr.height - 4);
+  tip.style.left = `${left}px`;
+  tip.style.top = `${top}px`;
+  tip.style.visibility = "visible";
+  tip.setAttribute("aria-hidden", "false");
+}
+
+/** ツールチップを隠し、保留中の表示タイマーも破棄する。 */
+function hideTabPathTip(): void {
+  if (tabTipTimer !== undefined) {
+    clearTimeout(tabTipTimer);
+    tabTipTimer = undefined;
+  }
+  if (tabTipEl) {
+    tabTipEl.style.display = "none";
+    tabTipEl.setAttribute("aria-hidden", "true");
   }
 }
 
