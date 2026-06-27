@@ -553,6 +553,21 @@ pub fn allow_save_path(
     access.allow_save_target(&path)
 }
 
+/// アプリ内「ファイルを開く…」(dialog:allow-open) で選んだ**ワークスペース外**のファイルを
+/// 読み取り許可域へ登録する（要件3.2/9.1「フォルダを開いていてもフォルダ外ファイルをタブで開く」）。
+///
+/// 書込側 `allow_save_path` に対応する読込側の導線。これまで単一インスタンス転送（`single_instance`）と
+/// 状態復元（`restore_app_state`）は `allow_file` を呼んでいたが、アプリ内ダイアログ経路だけ登録が
+/// 抜けており、開いているフォルダ外のファイルを選ぶと `verify_read` が「許可されていないパスです」で
+/// 弾いていた（解消）。frontend 申告のパスを無条件に広く許可しない: `AccessControl::allow_file` は
+/// canonicalize した実体のみを許可集合へ積み（解決不能なら何もしない）、実際の読みは
+/// `open_document`/`read_file`/画像 custom protocol が `verify_read`（健全性検査＋root/allowed 封じ込め）で
+/// 再検証する（多層防御）。OS ダイアログ（dialog:allow-open）で選んだユーザー意図のあるパスが来る前提。
+#[tauri::command]
+pub fn allow_open_path(path: String, access: State<'_, crate::access::AccessControl>) {
+    access.allow_file(&path);
+}
+
 /// ツリーから削除する（要件11「Delete＝ごみ箱へ移動」・design G）。
 ///
 /// **完全削除ではなくごみ箱へ移動**し、復元可能性を残す（最上位原則「データを失わない」）。
