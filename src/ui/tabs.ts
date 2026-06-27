@@ -86,6 +86,20 @@ export function renderTabs(
     // 状態（未保存/差分あり/削除済み）を aria-label にテキスト化して読み上げ到達を確実にする（要件11.5）。
     btn.setAttribute("aria-label", tabAriaLabel(title, tab.dirty ?? false, badge));
     btn.addEventListener("click", () => onActivate(tab.path));
+    // 中クリック（マウス中ボタン）でタブを閉じる（要件5.3）。既存の閉じる経路（onClose）を再利用し、
+    // 未保存確認などの挙動を × クリックと揃える。中ボタンの既定（オートスクロール）は抑止する。
+    if (onClose) {
+      btn.addEventListener("auxclick", (e) => {
+        if (e.button === 1) {
+          e.preventDefault();
+          onClose(tab.path);
+        }
+      });
+      // 一部環境で中ボタン押下が auxclick より先にオートスクロールを起こすのを防ぐ（押下時点で抑止）。
+      btn.addEventListener("mousedown", (e) => {
+        if (e.button === 1) e.preventDefault();
+      });
+    }
     btn.addEventListener("keydown", (e) => onTabKeydown(e, btn, onActivate));
     el.appendChild(btn);
   }

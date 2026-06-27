@@ -537,6 +537,20 @@ pub fn create_entry(
     Ok(target_str)
 }
 
+/// 名前を付けて保存（save-as）の保存先を書込許可する（要件5.5）。
+///
+/// frontend は `dialog:allow-save`（OS 保存ダイアログ）で保存先を選び、このコマンドで許可域へ登録してから
+/// 既存 `save_document` を呼ぶ。ダイアログを経たユーザー意図のあるパスのみがここへ来る前提で、選択先
+/// （ワークスペース外でもよい）を `AccessControl::allow_save_target` で登録する。実書込は save_document が
+/// `verify_write`（親 canonicalize 封じ込め）を通して行う＝任意パスの素通しにはしない（多層防御）。
+#[tauri::command]
+pub fn allow_save_path(
+    path: String,
+    access: State<'_, crate::access::AccessControl>,
+) -> Result<(), String> {
+    access.allow_save_target(&path)
+}
+
 /// ツリーから削除する（要件11「Delete＝ごみ箱へ移動」・design G）。
 ///
 /// **完全削除ではなくごみ箱へ移動**し、復元可能性を残す（最上位原則「データを失わない」）。
