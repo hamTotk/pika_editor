@@ -401,6 +401,15 @@ export function allowSavePath(path: string): Promise<void> {
 }
 
 /**
+ * 「ファイルを開く…」(dialog:allow-open) で選んだ**ワークスペース外**のファイルを読み取り許可域へ登録する。
+ * allowSavePath の読込版（要件3.2/9.1「フォルダを開いていてもフォルダ外ファイルをタブで開く」）。
+ * 実読込は openDocument/readFile/画像 protocol の verify_read が封じ込めを再検証する（任意パスの素通しにはしない）。
+ */
+export function allowOpenPath(path: string): Promise<void> {
+  return invoke<void>("allow_open_path", { path });
+}
+
+/**
  * 指定エンコーディングで開き直す（要件5.6 Reopen）。自動判定の誤り/曖昧をユーザー選択で上書きする。
  * 戻りは open_document と同形（OpenedDocument）。妥当でなければ reject（呼び出し側がトースト通知）。
  */

@@ -31,6 +31,7 @@ import {
   createEntry,
   deleteEntry,
   allowSavePath,
+  allowOpenPath,
   getSettings,
   onSettingsWarning,
   onSettingsChanged,
@@ -2544,6 +2545,15 @@ async function openPath(path: string): Promise<void> {
   if (kind === "missing") {
     openNewFileTab(path, name);
     return;
+  }
+  // ワークスペース外のファイルも開けるよう、読み取り許可域へ登録してから開く（要件3.2/9.1）。
+  // ツリー経由の openFile は root 配下なので verify_read で既に通るが、ダイアログ/転送経由の
+  // openPath は root 外を指しうるため allow_open_path で個別許可する（書込側 allowSavePath の対称）。
+  // Tauri 不在（dev ブラウザ単体）等の失敗は握りつぶし、従来の read 経路に委ねる。
+  try {
+    await allowOpenPath(path);
+  } catch {
+    /* dev ブラウザ単体等で allow_open_path 不在 → read 側の再検証に委ねる。 */
   }
   await openFile({ name, path, is_dir: false });
 }

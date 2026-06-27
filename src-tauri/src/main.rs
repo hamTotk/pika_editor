@@ -74,6 +74,7 @@ fn run() {
         commands::create_entry,
         commands::delete_entry,
         commands::allow_save_path,
+        commands::allow_open_path,
         snapshot::compute_file_diff,
         snapshot::confirm_file,
         snapshot::confirm_all,
