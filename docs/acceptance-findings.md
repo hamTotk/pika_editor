@@ -1256,3 +1256,24 @@
 - **暴走ガード**: 巨大画像/SVG は `pika-core::render::guard`＋`preview.rs::guard_local_resource` で実装済み・cargo test 済み。
   巨大フィクスチャは workspace 書込禁止のため実機トリガせず（cargo test で担保）。
 - **状態**: Stage ④ 完了（4ゲート緑＝pika-core 338/pika-app 16・実機で通知可視化＋外部 opt-in＋リセットを確認）。
+
+## T-017 フォルダを開く際のフリーズ／ワークスペース外ファイルのオープン（2026-06-28・系統C）
+
+- **フリーズ（解消・コミット dd7b5a6）**: `C:\dev` のような巨大ツリー（`target/` 配下が数万ファイル・excluded_dirs
+  既定は `.git`/`node_modules` のみ）を開くと UI が数十秒〜数分固まっていた。原因は `open_workspace`→`watch_root`→
+  `enumerate_baseline` が**全ツリーを再帰し全ファイルを read+ハッシュ化**しつつ Mutex ロック保持で同期実行していた点
+  （設計原則2「固まらない」違反）。修正＝baseline を mtime/size のみの台帳に変更（空 content_hash は drain_and_emit/
+  advance_baseline と同一扱い・resync は mtime/size プレスクリーンで短絡）し、構築をワーカースレッドへ逃がした。未構築中は
+  F5/ポーリング/オーバーフロー再同期を見送り created 洪水を防ぐ。**実機**: `C:\dev` が即ツリー描画（メモリ50MB＝全読み
+  込みなし）→ `pika_editor` をシェブロン展開で `target`/`dist` 含む子が瞬時表示（list_dir は1階層・非再帰）。
+- **ワークスペース外ファイルのオープン（解消・コミット 53f86c4・要件155）**: フォルダを開いた状態で Ctrl+O/メニューから
+  フォルダ外ファイルを選ぶと「開けませんでした: 許可されていないパスです」で弾かれていた。原因は in-app ダイアログ経路
+  （`onOpenFile`→`openPath`）が `allow_file` を呼ばず `verify_read` が封じ込めで拒否していた点（single_instance/restore は
+  allow_file 済みだったがダイアログ経路だけ欠落）。修正＝読込側コマンド `allow_open_path`（書込側 `allow_save_path` の対称）
+  を新設し `openPath` の既存ファイル分岐で登録。実読込は verify_read で再検証（多層防御は不変）。**実機**: 単一インスタンス
+  転送で `C:\dev\pika_editor\CLAUDE.md`（pika-accept 外）が新規タブで表示されることを確認。Ctrl+O ダイアログ経路の自動確認は
+  フルスクリーンのゲームがフォアグラウンドを掴み入力注入できず未自動化（同一 openPath コードのため手動確認推奨）。
+- **未修正の所見（見送り・別途）**: 起動中に2つ目の `pika.exe <ファイル>` を立てると、**2つ目（転送）プロセスが panic**
+  （`state() called before manage() for Arc<SettingsService>`・tauri 2.11.3 lib.rs:734）。転送自体は成功しファイルは開くが
+  転送プロセスはクラッシュする。single-instance/CLI 起動経路が SettingsService を `.manage()` する前に `state()` 参照して
+  いるのが原因と推定（初期化順）。今回のフリーズ/権限修正とは無関係の既存バグ。要対応（manage 後に state アクセスへ）。
