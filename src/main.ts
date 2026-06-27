@@ -24,11 +24,13 @@ import {
   showPreview,
   hidePreview,
   setPreviewBounds,
+  syncPreviewScroll,
   logFolderPath,
   openInDefaultApp,
   openLogFolder,
   createEntry,
   deleteEntry,
+  allowSavePath,
   getSettings,
   onSettingsWarning,
   onSettingsChanged,
@@ -44,7 +46,7 @@ import {
   type ImageInfo,
 } from "./ipc";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
+import { open as openNativeDialog, save as saveNativeDialog } from "@tauri-apps/plugin-dialog";
 import { initTheme, applyTheme, currentTheme, type ThemeMode } from "./theme";
 import { initMenuBar, type MenuItemSpec, type MenuSpec } from "./ui/menu";
 import { initA11y, announce } from "./a11y";
@@ -204,6 +206,8 @@ const toggleDiffBtn = () => document.getElementById("toggle-diff") as HTMLButton
 const confirmBtn = () => document.getElementById("confirm-file") as HTMLButtonElement;
 // 「ブラウザで開く」（tab-tools・UIブラッシュアップ T9）。アクティブタブのファイルを OS 既定アプリで開く。
 const openExternalBtn = () => document.getElementById("open-external") as HTMLButtonElement;
+// 全タブ一覧ドロップダウンのトリガ（tab-tools・要件5.3）。クリックで開いている全タブを状態マーク付きで列挙する。
+const tabListBtn = () => document.getElementById("tab-list") as HTMLButtonElement;
 // タブ列（横スクロールするコンテナ）。隠れ未読バッジ（T10）の可視判定に scrollLeft/clientWidth を読む。
 const tabsEl = () => document.getElementById("tabs") as HTMLElement;
 // 隠れた差分あり（未読）タブ数のバッジ（T10・差分 C5・ui-mock .hidden-unread）。
@@ -370,6 +374,35 @@ function refreshViewTools(): void {
   // 「ブラウザで開く」はアクティブタブのファイルが対象。画像も既定アプリで開けるので活性のまま。
   // アクティブが無い間のみ無効にする（誤クリック防止）。
   openExternalBtn().disabled = !hasActive;
+  // 全タブ一覧ドロップダウンはタブが 1 枚以上あるとき有効（無いと出すものが無い）。
+  tabListBtn().disabled = state.tabs.length === 0;
+}
+
+/**
+ * 全タブ一覧ドロップダウンを開く（要件5.3「開いているタブを一覧から選ぶ」）。
+ *
+ * 各項目に状態マーク（差分あり ±／新規 ◆／削除済み／未保存 ●）とアクティブ印（✓）を付け、選択で
+ * そのタブへ切り替える（activateTab）。キーボード操作（↑/↓/Enter）対応で開く（openContextMenu の
+ * focusFirst）。タブ列が横スクロールで隠れていても全タブへ到達できる導線になる。
+ */
+function showAllTabsMenu(anchor: HTMLElement): void {
+  if (state.tabs.length === 0) return;
+  const items: ContextItem[] = state.tabs.map((t) => {
+    const marks: string[] = [];
+    const kind = state.unread.get(t.path);
+    if (kind === "removed") marks.push("削除済み");
+    else if (kind === "created") marks.push("◆");
+    else if (kind === "modified") marks.push("±");
+    if (t.dirty) marks.push("●");
+    const prefix = marks.length > 0 ? `${marks.join(" ")} ` : "";
+    return {
+      label: `${prefix}${t.title}`,
+      checked: t.path === state.active, // アクティブタブに ✓。
+      run: () => void activateTab(t.path),
+    };
+  });
+  const rect = anchor.getBoundingClientRect();
+  openContextMenu(items, rect.left, rect.bottom, { focusFirst: true });
 }
 
 function refreshTree(): void {
@@ -445,11 +478,26 @@ function onContextKey(e: KeyboardEvent): void {
 }
 
 /** コンテキストメニュー 1 項目（"sep" は区切り線）。 */
-type ContextItem = { label: string; danger?: boolean; run: () => void } | "sep";
+type ContextItem =
+  | { label: string; danger?: boolean; checked?: boolean; run: () => void }
+  | "sep";
 
-/** 指定座標へコンテキストメニューを開く（共通土台・menu-pop の見た目を流用）。 */
-function openContextMenu(items: ContextItem[], x: number, y: number): void {
+/**
+ * 指定座標へコンテキストメニューを開く（共通土台・menu-pop の見た目を流用）。
+ *
+ * `opts.focusFirst=true` のとき、項目をフォーカス可能（tabIndex=0）にし先頭へフォーカスを当て、
+ * ↑/↓/Home/End で項目移動・Enter/Space で実行できるようにする（全タブ一覧ドロップダウンなど
+ * キーボード起動するメニュー向け・要件11.5）。既定（右クリックメニュー）は従来どおりフォーカスを
+ * 動かさず click のみで使う（既存挙動を変えない）。
+ */
+function openContextMenu(
+  items: ContextItem[],
+  x: number,
+  y: number,
+  opts?: { focusFirst?: boolean },
+): void {
   closeContextMenu();
+  const focusable = opts?.focusFirst ?? false;
   const menu = document.createElement("div");
   menu.className = "menu-pop context-menu";
   menu.setAttribute("role", "menu");
@@ -457,13 +505,19 @@ function openContextMenu(items: ContextItem[], x: number, y: number): void {
     if (item === "sep") {
       const sep = document.createElement("div");
       sep.className = "msep";
+      sep.setAttribute("role", "separator");
       menu.appendChild(sep);
       continue;
     }
     const row = document.createElement("div");
     row.className = item.danger ? "mrow danger" : "mrow";
     row.setAttribute("role", "menuitem");
-    row.tabIndex = -1;
+    // キーボード起動メニューは矢印移動の対象にするためフォーカス可能にする。右クリックは従来どおり -1。
+    row.tabIndex = focusable ? 0 : -1;
+    if (item.checked) {
+      row.classList.add("checked");
+      row.setAttribute("aria-checked", "true");
+    }
     const label = document.createElement("span");
     label.className = "mlabel";
     label.textContent = item.label;
@@ -472,6 +526,8 @@ function openContextMenu(items: ContextItem[], x: number, y: number): void {
       closeContextMenu();
       item.run();
     });
+    // 矢印/Home/End/Enter のキーボード操作（フォーカスされた項目でのみ発火＝右クリックには影響しない）。
+    row.addEventListener("keydown", (e) => onContextRowKey(e, menu));
     menu.appendChild(row);
   }
   // 画面外へはみ出さないよう、仮表示で寸法を測ってから位置をクランプする。
@@ -486,6 +542,10 @@ function openContextMenu(items: ContextItem[], x: number, y: number): void {
   menu.style.top = `${top}px`;
   menu.style.visibility = "visible";
   openContext = menu;
+  // キーボード起動メニューは開いたら先頭項目へフォーカスする（↑/↓ で移動できる起点を作る）。
+  if (focusable) {
+    menu.querySelector<HTMLElement>(".mrow")?.focus();
+  }
   // 外側クリック/Esc/blur で閉じる。トリガとなった contextmenu ジェスチャの後続イベントで
   // 即閉じないよう、登録は次フレームへ遅延する（capture フェーズで先取り）。
   setTimeout(() => {
@@ -493,6 +553,29 @@ function openContextMenu(items: ContextItem[], x: number, y: number): void {
     document.addEventListener("keydown", onContextKey, true);
     window.addEventListener("blur", closeContextMenu);
   }, 0);
+}
+
+/** コンテキストメニュー項目のキーボード操作（↑/↓/Home/End 移動・Enter/Space 実行）。 */
+function onContextRowKey(e: KeyboardEvent, menu: HTMLElement): void {
+  const rows = Array.from(menu.querySelectorAll<HTMLElement>(".mrow"));
+  const idx = rows.indexOf(e.currentTarget as HTMLElement);
+  if (idx < 0) return;
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    rows[(idx + 1) % rows.length]?.focus();
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    rows[(idx - 1 + rows.length) % rows.length]?.focus();
+  } else if (e.key === "Home") {
+    e.preventDefault();
+    rows[0]?.focus();
+  } else if (e.key === "End") {
+    e.preventDefault();
+    rows[rows.length - 1]?.focus();
+  } else if (e.key === "Enter" || e.key === " ") {
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).click();
+  }
 }
 
 /**
@@ -548,6 +631,9 @@ function promptText(message: string, placeholder = ""): Promise<string | null> {
     // Tab フォーカスを box 内（input / キャンセル / OK）へ閉じ込める（指摘10 フォーカストラップ）。
     const focusables: HTMLElement[] = [input, cancel, ok];
     const onKey = (e: KeyboardEvent): void => {
+      // IME（日本語入力）変換確定の Enter で入力を誤確定しないよう、合成中（isComposing）/合成キー
+      // （keyCode 229）は素通しして入力欄に委ねる（変換中の Enter は確定のためのもの＝モーダル確定ではない）。
+      if (e.isComposing || e.keyCode === 229) return;
       // 処理可否に関わらず、モーダル中のキーは背景（window ハンドラ）へ伝播させない（指摘5）。
       // ただし入力欄へは届かせる必要があるため capture では stopImmediatePropagation せず、
       // ここで stopPropagation して bubble 経路の window ハンドラだけを止める。
@@ -932,6 +1018,10 @@ async function activateTab(path: string): Promise<void> {
       () => refreshStatus(),
       state.lineWrapping,
       state.tabWidth,
+      // 削除済みタブの内容は draft/空＝小さいが、直近の段階制（editing_off）を踏襲して重い装飾の要否を決める。
+      !tab.editingOff,
+      // エディタ→プレビュー片方向スクロール同期（S4・要件6.1 改訂）。
+      onEditorScroll,
     );
     refreshTabs();
     // 直前に画像タブを見ていた場合に image-host が残らないよう隠す（画像→削除済みタブ切替の正規化）。
@@ -969,6 +1059,10 @@ async function activateTab(path: string): Promise<void> {
       () => refreshStatus(),
       state.lineWrapping,
       state.tabWidth,
+      // 巨大ファイル段階制（highlight_off/editing_off）が立つときは重い装飾を外す（heavyDecoCompartment）。
+      !(doc.degrade.highlight_off || doc.degrade.editing_off),
+      // エディタ→プレビュー片方向スクロール同期（S4・要件6.1 改訂）。
+      onEditorScroll,
     );
     // host 可視を正規化する（画像タブ→テキストタブ切替で image-host が残らないよう必ず隠す＝U3）。
     // applyOccupancy は hidden 切替＋bounds のみで preview ナビゲートはしないため、下の
@@ -1430,6 +1524,10 @@ async function reopenActiveWithEncoding(enc: DocEncoding): Promise<void> {
       () => refreshStatus(),
       state.lineWrapping,
       state.tabWidth,
+      // 開き直し後も段階制（highlight_off/editing_off）に従い重い装飾の要否を決める。
+      !(doc.degrade.highlight_off || doc.degrade.editing_off),
+      // エディタ→プレビュー片方向スクロール同期（S4・要件6.1 改訂）。
+      onEditorScroll,
     );
     // 開いた内容のハッシュを基準に取り直し未読をクリアする（復元の別物判定の素・eval high）。
     void captureTabHash(path, doc.text);
@@ -1561,9 +1659,14 @@ function applyOccupancy(): void {
   // 非画像占有（テキスト/差分/プレビュー）では image-host を必ず隠す（画像→テキスト切替の正規化）。
   imageHost().hidden = true;
   const occ = resolveOccupancy(state.viewMode, state.diffOn);
-  // エディタが見えなくなる占有（差分ON/プレビューのみ）へ移ったら検索バーを閉じる（U4・要件5.4）。
-  // 差分ビュー内検索・プレビュー内検索は系統C 繰り越しなので、ここで自然に無効化する（canSearch と整合）。
-  if (!occ.showEditor && searchController?.isOpen()) searchController.close();
+  // 検索バーが開いている間に占有が変わったとき（S5）:
+  // - エディタも差分も検索対象でない占有（プレビューのみ/画像）へ移ったら閉じる（プレビュー内検索は系統C）。
+  // - ソース⇄差分の切替や差分の再描画（外部変更で差分ハンドルが作り直される）では、ハイライト先を
+  //   現在の対象（CM6 or 差分DOM）へ貼り直す（refresh＝現クエリで再検索し新ハンドルへ再適用する）。
+  if (searchController?.isOpen()) {
+    if (!canSearchView()) searchController.close();
+    else searchController.refresh();
+  }
   editorHost().hidden = !occ.showEditor;
   diffHost().hidden = !occ.showDiff;
   previewHost().hidden = !occ.showPreview;
@@ -1607,6 +1710,48 @@ function syncPreviewBounds(): void {
   const rect = previewRect();
   if (rect.w <= 0 || rect.h <= 0) return;
   void setPreviewBounds(rect);
+}
+
+/**
+ * エディタ→プレビュー片方向スクロール同期を発火してよい状態か（S4・要件6.1 改訂）。
+ *
+ * 発火条件（プランの Acceptance）:
+ * - アクティブタブが **Markdown**（`.md`/`.markdown`）であること。HTML（`.html`/`.htm`）・SVG（`.svg`）は
+ *   `data-sourcepos` を持たず行マッピングできないため対象外（要件6.1・HTML/SVG は独立スクロール）。
+ * - プレビューが可視（split / preview の showPreview）であること。
+ * - **差分OFF**であること（差分ON時は左=レンダリング/右=テキスト差分で同期しない）。
+ */
+function isMarkdownPreviewActive(): boolean {
+  if (!state.active) return false;
+  if (state.diffOn) return false;
+  if (!resolveOccupancy(state.viewMode, state.diffOn).showPreview) return false;
+  const lower = state.active.toLowerCase();
+  return lower.endsWith(".md") || lower.endsWith(".markdown");
+}
+
+/** rAF スロットルの保留フラグ（毎スクロールで IPC を撃たない＝固まらない・S4 risk 緩和）。 */
+let scrollSyncPending = false;
+
+/**
+ * エディタのスクロールをプレビューへ片方向同期する（S4・要件6.1 改訂）。
+ *
+ * `.cm-scroller` の native scroll（createEditor の onScroll）から呼ばれる。毎フレームに 1 回へ rAF で
+ * スロットルし、Markdown プレビュー可視かつ差分OFF のときだけ最上部の表示行（getScrollTop）を
+ * `sync_preview_scroll` へ渡す（backend が別WebView の data-sourcepos ブロックへスクロール）。
+ * 逆方向（プレビュー→エディタ）は F-029 で持たない（片方向のみ）。
+ */
+function onEditorScroll(): void {
+  // 発火しない状態（非 Markdown/プレビュー非表示/差分ON）なら rAF も予約しない（無駄を作らない）。
+  if (!isMarkdownPreviewActive()) return;
+  if (scrollSyncPending) return;
+  scrollSyncPending = true;
+  requestAnimationFrame(() => {
+    scrollSyncPending = false;
+    // rAF の間にタブ/モード/差分が変わって対象外になっていたら撃たない（世代・表示モード変更ガード）。
+    if (!state.editor || !isMarkdownPreviewActive()) return;
+    const line = Math.max(1, Math.floor(state.editor.getScrollTop()));
+    void syncPreviewScroll(line);
+  });
 }
 
 /**
@@ -2056,6 +2201,13 @@ function buildMenuSpecs(): MenuSpec[] {
           disabled: !hasActive() || state.busy,
           onSelect: () => void onSave(),
         },
+        {
+          kind: "item",
+          label: "名前を付けて保存…",
+          // テキスト編集できるタブ（エディタ可視・非削除/非editingOff）のみ対象。canSearch と同条件。
+          disabled: !canSearch() || state.busy,
+          onSelect: () => void onSaveAs(),
+        },
         { kind: "separator" },
         { kind: "item", label: "ログフォルダを開く", onSelect: () => void onOpenLogFolder() },
       ],
@@ -2090,6 +2242,30 @@ function buildMenuSpecs(): MenuSpec[] {
           accel: "Ctrl+H",
           disabled: !hasActive(),
           onSelect: () => dispatchAction("replace"),
+        },
+        { kind: "separator" },
+        // 編集補助コマンド（要件5.1）。キーバインドが主経路で、メニューは発見性のための薄い再掲。
+        // canSearch()＝エディタが可視かつ編集可能（テキスト/非削除/非editingOff）と同条件で出す。
+        {
+          kind: "item",
+          label: "太字",
+          accel: "Ctrl+B",
+          disabled: !canSearch(),
+          onSelect: () => state.editor?.toggleBold(),
+        },
+        {
+          kind: "item",
+          label: "斜体",
+          accel: "Ctrl+I",
+          disabled: !canSearch(),
+          onSelect: () => state.editor?.toggleItalic(),
+        },
+        {
+          kind: "item",
+          label: "チェックボックス",
+          accel: "Ctrl+L",
+          disabled: !canSearch(),
+          onSelect: () => state.editor?.toggleCheckbox(),
         },
       ],
     },
@@ -2294,6 +2470,10 @@ function openNewFileTab(path: string, name: string): void {
     () => refreshStatus(),
     state.lineWrapping,
     state.tabWidth,
+    // 新規（空）ファイルは段階制対象でない＝重い装飾を有効にする。
+    true,
+    // エディタ→プレビュー片方向スクロール同期（S4・要件6.1 改訂）。新規 .md でも split で同期する。
+    onEditorScroll,
   );
   void captureTabHash(path, "");
   refreshTabs();
@@ -2453,12 +2633,12 @@ function restoreTabPosition(path: string, line: number, column: number, scrollTo
  * 差分/プレビュー領域にフォーカスがあるときだけ Ctrl+Enter で「確認済み」を発火させる。
  */
 /**
- * 検索/置換バーを使えるビューか（U4/U5・要件5.4）。
+ * **エディタ（テキスト）編集**ができるビューか（U4/U5・要件5.4/5.5/5.1）。
  *
- * 条件: アクティブな**テキスト**タブがエディタとして見えていること。
+ * 条件: アクティブな**テキスト**タブが CM6 エディタとして見えていること。
  * - 画像/非対応バイナリ（nonText）・削除済み（deleted）・第2段階以降（editingOff）は CM6 が無い/編集不可。
- * - 差分ビューは CM6 でないため **差分内検索は系統C 繰り越し**（diffOn で showEditor が落ちると false）。
- *   プレビューのみは WebView2 の find に任せる想定で同じく系統C 繰り越し（要件5.4）。
+ * - 差分ON（showEditor が落ちる）は false＝差分は読み取り専用。エディタ検索・置換・名前を付けて保存・
+ *   Ctrl+G 行へ移動・太字/斜体/チェックボックスなど **エディタを書き換える/カーソル前提**の操作はこれで判定する。
  * → ソース／分割（エディタが可視）のときだけ true。
  */
 function canSearch(): boolean {
@@ -2466,6 +2646,31 @@ function canSearch(): boolean {
   const tab = state.tabs.find((t) => t.path === state.active);
   if (!tab || tab.nonText || tab.deleted || tab.editingOff) return false;
   return resolveOccupancy(state.viewMode, state.diffOn).showEditor;
+}
+
+/**
+ * 差分ビュー内検索（S5・要件5.4 改訂）が有効か。
+ *
+ * 差分ON で差分面が可視（source/split/preview いずれの差分ONでも showDiff=true）かつ、表示中の差分に
+ * 検索対象テキスト（連結表示テキスト）があるとき true。差分非対象（ハッシュのみ）・変更なしは
+ * `DiffHandle.searchText()` が空を返すため false になる。差分は CM6 でないため独自 DOM へ別ハイライト
+ * 機構（diff/index.ts）で強調する（置換は読み取り専用なので不可）。
+ */
+function diffSearchActive(): boolean {
+  if (!state.diffOn || !state.diff) return false;
+  if (!resolveOccupancy(state.viewMode, state.diffOn).showDiff) return false;
+  const tab = state.tabs.find((t) => t.path === state.active);
+  if (!tab || tab.deleted) return false;
+  return state.diff.searchText().length > 0;
+}
+
+/**
+ * 検索バーを開ける（＝Ctrl+F が機能する）ビューか（S5）。
+ * エディタ検索（ソース/分割）に加え **差分ON** も許可する。置換・行へ移動・編集系は canSearch のまま。
+ * プレビューのみ（差分OFF）・画像・第2段階は引き続き不可（プレビュー内検索は系統C 繰り越し）。
+ */
+function canSearchView(): boolean {
+  return canSearch() || diffSearchActive();
 }
 
 function currentFocus(): Focus {
@@ -2531,15 +2736,40 @@ function dispatchAction(action: Action): boolean {
     case "resync":
       void onF5();
       return true;
-    case "find":
-    case "replace": {
-      // 検索/置換バーを開く（U4/U5・要件5.4）。差分ON/プレビュー/画像/第2段階では検索できない
-      //（canSearch=false なら開かず案内のみ）。編集メニューの検索/置換もこの dispatchAction を呼ぶ。
-      if (!canSearch()) {
-        notify("このビューでは検索できません（ソース/分割で使えます）", "info");
+    case "goto-line":
+      // 行へ移動（Ctrl+G・要件5.5）。canSearch ガード後に行番号入力モーダル→ジャンプ（onGotoLine 内）。
+      void onGotoLine();
+      return true;
+    case "next-tab":
+      // 次のタブへ（Ctrl+Tab・代替 Ctrl+PageDown・要件11.2）。1 枚以下なら何もしない（true で既定処理を抑止）。
+      activateAdjacentTab(1);
+      return true;
+    case "prev-tab":
+      // 前のタブへ（Ctrl+Shift+Tab・代替 Ctrl+PageUp・要件11.2）。
+      activateAdjacentTab(-1);
+      return true;
+    case "find": {
+      // 検索バーを開く（U4・要件5.4）。ソース/分割（エディタ）に加え **差分ON** でも開ける（S5）。
+      // プレビューのみ/画像/第2段階は不可（プレビュー内検索は系統C 繰り越し）。編集メニューの検索も同経路。
+      if (!canSearchView()) {
+        notify("このビューでは検索できません（ソース/分割/差分で使えます）", "info");
         return true;
       }
-      searchController?.open(action === "find" ? "find" : "replace");
+      searchController?.open("find");
+      return true;
+    }
+    case "replace": {
+      // 置換バーを開く（U5・要件5.4）。置換はエディタを書き換えるためソース/分割限定（差分は読み取り専用）。
+      if (!canSearch()) {
+        notify(
+          diffSearchActive()
+            ? "差分は読み取り専用です（置換はソース/分割で使えます）"
+            : "このビューでは置換できません（ソース/分割で使えます）",
+          "info",
+        );
+        return true;
+      }
+      searchController?.open("replace");
       return true;
     }
   }
@@ -2570,6 +2800,184 @@ async function onOpenFile(): Promise<void> {
 function onCloseActiveTab(): void {
   if (!state.active) return;
   closeTab(state.active);
+}
+
+/**
+ * 行へ移動（Ctrl+G・要件5.5）。対話的に行番号を入力して指定行へジャンプする。
+ *
+ * 検索/置換と同じ条件（canSearch＝ソース/分割でエディタが可視かつ編集可能）でのみ使える。画像/差分/
+ * プレビュー/第2段階では CM6 が無い/カーソルを持たないため案内のみ出す。入力モーダル（promptText）は
+ * IME 合成ガード済み。空/非数値/1未満はやんわり通知して何もしない。
+ */
+async function onGotoLine(): Promise<void> {
+  if (!canSearch()) {
+    notify("このビューでは行へ移動できません（ソース/分割で使えます）", "info");
+    return;
+  }
+  const input = await promptText("移動先の行番号", "例 42");
+  if (input === null) return; // キャンセル。
+  const n = parseInt(input.trim(), 10);
+  if (!Number.isFinite(n) || n < 1) {
+    notify("行番号を正しく入力してください（1 以上の整数）", "warn");
+    return;
+  }
+  // gotoPosition は行数超過を最終行へクランプする（要件3.1 と同じ挙動）。桁は行頭（1）。
+  state.editor?.gotoPosition(n, 1);
+}
+
+/**
+ * 隣のタブへアクティブを移す（Ctrl+Tab=+1 / Ctrl+Shift+Tab=-1・要件11.2）。
+ * 端は循環（先頭の前→末尾、末尾の次→先頭）。タブが 1 枚以下なら何もしない。
+ */
+function activateAdjacentTab(delta: number): void {
+  const len = state.tabs.length;
+  if (len <= 1) return;
+  const idx = state.tabs.findIndex((t) => t.path === state.active);
+  if (idx < 0) return;
+  const nextIdx = (idx + delta + len) % len;
+  void activateTab(state.tabs[nextIdx].path);
+}
+
+/**
+ * 名前を付けて保存（save-as・要件5.5）。OS 保存ダイアログ（dialog:allow-save）で保存先を選び、
+ * その保存先を許可域へ登録（allowSavePath）してから現在のエディタ内容を新パスへ書き出す。
+ *
+ * 順序（最上位原則「データを失わない」）: **保存が成功してからタブの path を差し替える**。途中で
+ * キャンセル/失敗したら現タブはそのまま（旧パスを指したまま・未保存編集も保持）。表現不能文字での
+ * 中断は onSave と同じく［UTF-8で保存／キャンセル］を提示する。
+ */
+async function onSaveAs(): Promise<void> {
+  if (!state.active || !state.editor) return;
+  const oldPath = state.active;
+  const tab = state.tabs.find((t) => t.path === oldPath);
+  if (!tab) return;
+  const content = state.editor.getContent();
+  // 保存先を選ぶ（dev ブラウザ単体では save() 不在のため prompt にフォールバック）。
+  let picked: string | null;
+  try {
+    picked = await saveNativeDialog({ defaultPath: oldPath });
+  } catch {
+    picked = window.prompt("名前を付けて保存（保存先のパス）", oldPath);
+  }
+  if (picked === null) return; // キャンセル＝何もしない。
+  const newPath = picked.trim();
+  if (!newPath) {
+    notify("保存先のパスを入力してください", "warn");
+    return;
+  }
+  await withBusy(async () => {
+    // 保存先を書込許可へ登録する（ワークスペース外でもユーザー意図ゲートを経たパスのみ許可・要件5.5）。
+    // 登録失敗（解決不能等）は握りつぶし、最終的な可否は saveDocument の verify_write に委ねる。
+    try {
+      await allowSavePath(newPath);
+    } catch {
+      // best-effort（後段 saveDocument が封じ込めで弾く）。
+    }
+    // 現エンコーディングを維持して新パスへ書く。表現不能文字は UTF-8 で再試行可（onSave と同じ作法）。
+    let encoding = tab.encoding;
+    let hasBom = tab.hasBom;
+    let forceUtf8 = false;
+    for (;;) {
+      let result;
+      try {
+        result = await saveDocument(
+          newPath,
+          content,
+          forceUtf8 ? "utf-8" : encoding,
+          forceUtf8 ? false : hasBom,
+          forceUtf8,
+        );
+      } catch (e) {
+        notify(`保存に失敗しました: ${String(e)}`, "error");
+        return;
+      }
+      if (result.status === "unmappable") {
+        const name = newPath.split(/[\\/]/).pop() ?? newPath;
+        const ok = window.confirm(
+          `「${name}」には現在のエンコーディングで保存できない文字が ${result.unmappable.length} 件あります。\n` +
+            `UTF-8（BOM なし）で保存しますか？［キャンセル］を選ぶと保存しません（変更は失われません）。`,
+        );
+        if (!ok) {
+          notify("保存を中止しました（表現不能文字のため・変更は保持しています）", "warn");
+          return;
+        }
+        forceUtf8 = true;
+        continue; // UTF-8 で再試行。
+      }
+      // 保存成功。UTF-8 強制を選んだら以後の元エンコーディングを UTF-8（BOM なし）へ確定する。
+      if (forceUtf8) {
+        encoding = "utf-8";
+        hasBom = false;
+      }
+      break;
+    }
+    // === 保存成功後: タブ path 差替＋未読の付け替え（正しい順序）===
+    applySaveAsResult(oldPath, newPath, content, encoding, hasBom);
+    // 新パスの全既読ベースラインを backend に確立する（save-as 先は open していないので基準が無い）。
+    // これを差分の貼り直しより先に await して「保存内容＝基準」を成立させ、差分トグル中でも壊れない。
+    // 失敗（権限/巨大等）は握りつぶす＝保存自体は成功しており UI を妨げない。
+    try {
+      await openDocument(newPath);
+    } catch {
+      // ベースライン確立に失敗しても保存は成立済み。差分は「基準なし」表示になるだけ。
+    }
+    // 差分/プレビュー表示中に save-as したら、新パス基準で貼り直す（旧パスの差分/プレビューを残さない）。
+    if (state.active === newPath) {
+      if (state.diffOn) await renderActiveDiff();
+      if (resolveOccupancy(state.viewMode, state.diffOn).showPreview) {
+        await renderActivePreview();
+      }
+    }
+  });
+}
+
+/**
+ * save-as 成功後の状態更新（タブ path 差替・未読/差分基準の付け替え・要件5.5）。
+ *
+ * - 旧パスを指していたタブを新パスへ付け替え（title/encoding/dirty/draft も更新）。
+ * - 既に新パスのタブが別に開いていたら重複を畳む（同一 path のタブを二重に持たない）。
+ * - 未読は旧/新パスとも消す（保存直後＝全既読）。新パスは backend に基準が無いので openDocument で
+ *   全既読ベースラインを確立し、差分トグル時に「保存内容＝基準」で正しく差分なしになるようにする。
+ */
+function applySaveAsResult(
+  oldPath: string,
+  newPath: string,
+  content: string,
+  encoding: DocEncoding,
+  hasBom: boolean,
+): void {
+  const tab = state.tabs.find((t) => t.path === oldPath);
+  if (!tab) return;
+  // 別タブが既に新パスを開いていたら畳む（同一 path の二重タブを作らない）。自タブ自身（oldPath===newPath
+  // の上書き save-as）は除外する。
+  if (newPath !== oldPath) {
+    const dup = state.tabs.find((t) => t !== tab && t.path === newPath);
+    if (dup) {
+      state.tabs = state.tabs.filter((t) => t !== dup);
+      state.unread.clearFile(newPath);
+    }
+  }
+  tab.path = newPath;
+  tab.title = newPath.split(/[\\/]/).pop() ?? newPath;
+  tab.dirty = false;
+  tab.draft = undefined;
+  tab.deleted = false; // 実体を書いたので削除済みフラグは解除。
+  tab.encoding = encoding;
+  tab.hasBom = hasBom;
+  // アクティブを新パスへ追従させる（保存したタブを見続ける）。
+  if (state.active === oldPath) {
+    state.active = newPath;
+    notices.setActiveTab(newPath);
+  }
+  // 未読を旧/新パスとも消す（保存直後＝全既読・別物判定の素は captureTabHash が詰める）。
+  state.unread.clearFile(oldPath);
+  state.unread.clearFile(newPath);
+  void captureTabHash(newPath, content);
+  refreshTabs();
+  refreshTree();
+  refreshStatus();
+  notify("名前を付けて保存しました");
+  void persistAppState();
 }
 
 /**
@@ -2620,6 +3028,10 @@ function closeTab(path: string): void {
       undefined,
       state.lineWrapping,
       state.tabWidth,
+      // 空エディタ（タブ無し）は段階制対象でない＝重い装飾を有効にする。
+      true,
+      // エディタ→プレビュー片方向スクロール同期（S4）。タブ無しなので実質発火しない（ガードで no-op）。
+      onEditorScroll,
     );
     // 直前が画像タブだった場合に image-host が残らないよう host 可視を正規化する（画像→空状態の正規化・U3）。
     // state.active=null なので applyOccupancy は image-host を隠し空エディタ（editor-host）を出す。
@@ -2648,9 +3060,20 @@ async function main(): Promise<void> {
   searchController = createSearchController({
     editorPane: editorPane(),
     getEditor: () => state.editor,
-    getContent: () => state.editor?.getContent() ?? null,
-    canSearch,
+    // 検索対象テキスト: 差分ビュー内検索（S5）が有効なら差分の連結表示テキスト、ほかはエディタ内容。
+    getContent: () =>
+      diffSearchActive()
+        ? (state.diff?.searchText() ?? null)
+        : (state.editor?.getContent() ?? null),
+    // バーを開ける条件は差分ON も含める（置換・行へ移動などエディタ前提の操作は canSearch のまま）。
+    canSearch: canSearchView,
     notify,
+    // ── 差分ビュー内検索（S5）。ハイライト/ジャンプ/クリアを現在の差分ハンドルへ委譲 ─────────────
+    isDiffSearch: diffSearchActive,
+    setDiffMatches: (matches, current) => state.diff?.setSearchMatches(matches, current),
+    jumpDiffMatch: (index) => state.diff?.jumpToHit(index),
+    clearDiffSearch: () => state.diff?.clearSearch(),
+    focusDiff: () => diffHost().focus(),
   });
   // tab-tools: モード切替セグメント（ソース/分割/プレビュー）。data-mode を読んで setViewMode へ流す。
   for (const btn of modeButtons()) {
@@ -2664,6 +3087,8 @@ async function main(): Promise<void> {
   confirmBtn().addEventListener("click", () => void onConfirm());
   // tab-tools: ブラウザで開く（T9）。アクティブタブのファイルを OS 既定アプリで開く。
   openExternalBtn().addEventListener("click", () => void onOpenExternal());
+  // tab-tools: 全タブ一覧ドロップダウン（要件5.3）。状態マーク付きで全タブを列挙し選択で切替える。
+  tabListBtn().addEventListener("click", () => showAllTabsMenu(tabListBtn()));
   // 隠れ未読バッジ（T10・差分 C5）。タブ列の横スクロールで可視範囲が変わるたびに再計算する
   // （更新タイミング(a)）。scroll は高頻度なので rAF デバウンスへ流す。passive で滑らかに。
   tabsEl().addEventListener("scroll", () => scheduleHiddenUnread(), { passive: true });
@@ -2702,6 +3127,9 @@ async function main(): Promise<void> {
   // （pika-core::shortcuts の写し）へ集約し、ここは結果（Action）を dispatchAction へ流すだけ。
   // F6/Shift+F6（ペイン間フォーカス循環）は a11y/index.ts が capture フェーズで先取りする。
   window.addEventListener("keydown", (e) => {
+    // IME（日本語入力）変換中のキーはショートカット判定に回さない（誤爆ガード）。変換確定の Enter や
+    // 変換候補操作中のキーで Action が暴発しないよう、合成中（isComposing）/合成キー（keyCode 229）は委譲する。
+    if (e.isComposing || e.keyCode === 229) return;
     // モーダル（名前入力プロンプト）表示中はグローバルショートカットを無効化する（指摘5）。
     // 名前入力中の Ctrl+Shift+Enter（確認済み）/ Ctrl+W（タブを閉じる）等が背景タブへ貫通しない。
     if (modalDepth > 0) return;

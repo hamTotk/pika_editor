@@ -93,6 +93,12 @@ pub enum Action {
     CloseTab,
     /// 全体再同期（F5）。
     Resync,
+    /// 行へ移動（Ctrl+G）。対話的に行番号を入力してジャンプする（要件5.5）。
+    GotoLine,
+    /// 次のタブへ（Ctrl+Tab・代替 Ctrl+PageDown〔WebView2 が Ctrl+Tab を飲む環境向け〕・要件11.2）。
+    NextTab,
+    /// 前のタブへ（Ctrl+Shift+Tab・代替 Ctrl+PageUp・要件11.2）。
+    PrevTab,
 }
 
 /// キー（修飾＋フォーカス）から発火する操作を解決する（要件11.2）。
@@ -122,6 +128,14 @@ pub fn resolve(key: &str, mods: Mods, focus: Focus) -> Option<Action> {
         ("h", true, _, _) => return Some(Action::Replace),
         ("s", true, _, _) => return Some(Action::Save),
         ("w", true, _, _) => return Some(Action::CloseTab),
+        // 行へ移動（Ctrl+G・要件5.5/11.2）。フロントは対話的に行番号を入力してジャンプする。
+        ("g", true, _, _) => return Some(Action::GotoLine),
+        // タブ切替（Ctrl+Tab / Ctrl+Shift+Tab・要件11.2）。Ctrl+Tab は WebView2 が飲む可能性があるため
+        // 代替に Ctrl+PageDown/Ctrl+PageUp も同じ Action へ割り当てる（系統C で Ctrl+Tab 到達性を確認）。
+        ("Tab", true, _, _) => return Some(Action::NextTab),
+        ("Tab", _, true, _) => return Some(Action::PrevTab),
+        ("PageDown", true, _, _) => return Some(Action::NextTab),
+        ("PageUp", true, _, _) => return Some(Action::PrevTab),
         _ => {}
     }
 
@@ -302,5 +316,78 @@ mod tests {
     fn 未割当キーは_none() {
         assert_eq!(resolve("z", Mods::ctrl(), Focus::Editor), None);
         assert_eq!(resolve("q", Mods::default(), Focus::Editor), None);
+    }
+
+    #[test]
+    fn ctrl_g_は行へ移動() {
+        // 要件5.5/11.2: Ctrl+G で対話的「行へ移動」。フォーカス非依存（フロントが canSearch でガード）。
+        assert_eq!(
+            resolve("g", Mods::ctrl(), Focus::Editor),
+            Some(Action::GotoLine)
+        );
+        // Ctrl+Shift+G・Ctrl+Alt+G は未割当（誤爆させない）。
+        assert_eq!(resolve("g", Mods::ctrl_shift(), Focus::Editor), None);
+        assert_eq!(resolve("g", Mods::ctrl_alt(), Focus::Editor), None);
+    }
+
+    #[test]
+    fn ctrl_tab_系はタブ切替で代替割当も効く() {
+        // 要件11.2: Ctrl+Tab=次タブ／Ctrl+Shift+Tab=前タブ。WebView2 が Ctrl+Tab を飲む環境向けに
+        // 代替 Ctrl+PageDown/Ctrl+PageUp も同じ Action を返す。
+        assert_eq!(
+            resolve("Tab", Mods::ctrl(), Focus::Editor),
+            Some(Action::NextTab)
+        );
+        assert_eq!(
+            resolve("Tab", Mods::ctrl_shift(), Focus::Editor),
+            Some(Action::PrevTab)
+        );
+        assert_eq!(
+            resolve("PageDown", Mods::ctrl(), Focus::Editor),
+            Some(Action::NextTab)
+        );
+        assert_eq!(
+            resolve("PageUp", Mods::ctrl(), Focus::Editor),
+            Some(Action::PrevTab)
+        );
+        // 修飾なしの Tab/PageDown/PageUp は CM6/既定処理へ委ねる（None）。
+        assert_eq!(resolve("Tab", Mods::default(), Focus::Editor), None);
+        assert_eq!(resolve("PageDown", Mods::default(), Focus::Editor), None);
+        assert_eq!(resolve("PageUp", Mods::default(), Focus::Editor), None);
+    }
+
+    #[test]
+    fn 既存割当はs3追加で不変_回帰() {
+        // S3 で Action を 3 つ足したが、既存キー割当は一切変わらないことを固定する（パリティ契約の回帰防止）。
+        assert_eq!(
+            resolve("o", Mods::ctrl(), Focus::Editor),
+            Some(Action::OpenFile)
+        );
+        assert_eq!(
+            resolve("e", Mods::ctrl(), Focus::Editor),
+            Some(Action::TogglePreview)
+        );
+        assert_eq!(
+            resolve("\\", Mods::ctrl(), Focus::Editor),
+            Some(Action::ToggleSplit)
+        );
+        assert_eq!(
+            resolve("d", Mods::ctrl_shift(), Focus::Editor),
+            Some(Action::ToggleDiff)
+        );
+        assert_eq!(
+            resolve("s", Mods::ctrl(), Focus::Editor),
+            Some(Action::Save)
+        );
+        assert_eq!(
+            resolve("w", Mods::ctrl(), Focus::Editor),
+            Some(Action::CloseTab)
+        );
+        // Ctrl+Enter の誤爆防止（フォーカス依存）も不変。
+        assert_eq!(resolve("Enter", Mods::ctrl(), Focus::Editor), None);
+        assert_eq!(
+            resolve("Enter", Mods::ctrl(), Focus::Diff),
+            Some(Action::ConfirmFile)
+        );
     }
 }

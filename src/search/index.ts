@@ -44,12 +44,29 @@ export interface SearchDeps {
   editorPane: HTMLElement;
   /** 現在のエディタ（タブ切替で作り直されるので毎回 getter で取る）。 */
   getEditor: () => EditorHandle | null;
-  /** 検索対象の現在テキスト（null=エディタ無し/対象外）。 */
+  /**
+   * 検索対象の現在テキスト（null=エディタ無し/対象外）。差分ビュー内検索（S5）が有効なときは
+   * 差分が表示するテキスト（連結表示テキスト）を返す（main が isDiffSearch と整合させて分岐する）。
+   */
   getContent: () => string | null;
-  /** このビューで検索できるか（差分ON/プレビュー/画像/第2段階は false）。 */
+  /**
+   * このビューで検索バーを使えるか（プレビューのみ/画像/第2段階は false）。
+   * S5 でソース/分割（エディタ）に加え **差分ON** も true になる（main の canSearchView）。
+   */
   canSearch: () => boolean;
   /** 件数/置換件数/無効正規表現などの通知（main の ui/notifications.notify を渡す）。 */
   notify?: (message: string, level: "info" | "warn" | "error") => void;
+  // ── 差分ビュー内検索（S5・要件5.4 改訂）。ハイライト先を CM6 でなく差分独自 DOM へ向ける ──────
+  /** いま差分ビュー内検索が有効か（true=差分DOMへハイライト・置換は無効）。 */
+  isDiffSearch?: () => boolean;
+  /** 差分DOM へ検索ヒットを適用する（matches=連結表示テキスト上のヒット・current=現在index）。 */
+  setDiffMatches?: (matches: SearchMatch[], current: number) => void;
+  /** 指定ヒットを現在ヒットにして差分DOM 上で中央へスクロールする（前後ジャンプ）。 */
+  jumpDiffMatch?: (index: number) => void;
+  /** 差分DOM の検索ハイライトを消す（バーを閉じた/クエリ空）。 */
+  clearDiffSearch?: () => void;
+  /** 差分面へフォーカスを戻す（差分検索を閉じたときの F8 連続操作用）。 */
+  focusDiff?: () => void;
 }
 
 /** 検索バーの状態。 */
@@ -199,7 +216,7 @@ export function createSearchController(deps: SearchDeps): SearchController {
       state.matches = [];
       state.current = -1;
       state.truncated = false;
-      deps.getEditor()?.clearSearch();
+      clearActiveHighlight();
       renderCount();
       return;
     }
@@ -233,14 +250,33 @@ export function createSearchController(deps: SearchDeps): SearchController {
       state.matches = [];
       state.current = -1;
       state.truncated = false;
-      deps.getEditor()?.clearSearch();
+      clearActiveHighlight();
       countLabel.textContent = "無効な正規表現";
       countLabel.classList.add("search-count-error");
     }
   }
 
-  /** 現在の matches/current をエディタへ反映する。scroll=true で現在ヒットを中央へ移動する。 */
+  /** いま有効なハイライト先（差分DOM or CM6 エディタ）のハイライトを消す。 */
+  function clearActiveHighlight(): void {
+    if (deps.isDiffSearch?.()) deps.clearDiffSearch?.();
+    else deps.getEditor()?.clearSearch();
+  }
+
+  /**
+   * 現在の matches/current をハイライト先へ反映する。scroll=true で現在ヒットを中央へ移動する。
+   * 差分ビュー内検索（S5）が有効なら CM6 でなく差分独自 DOM へ向ける（取り違え防止に状態で明示分岐）。
+   * 反対側に残った古いハイライトは都度消し、同時に 2 面が光らないようにする（ビュー切替後の refresh 対策）。
+   */
   function applyHighlight(scroll: boolean): void {
+    if (deps.isDiffSearch?.()) {
+      // 差分検索: エディタ側の古いハイライトを消してから差分DOM を強調する。
+      deps.getEditor()?.clearSearch();
+      deps.setDiffMatches?.(state.matches, state.current);
+      if (scroll && state.current >= 0) deps.jumpDiffMatch?.(state.current);
+      return;
+    }
+    // エディタ検索: 差分側の古いハイライトを消してから CM6 を強調する。
+    deps.clearDiffSearch?.();
     const editor = deps.getEditor();
     if (!editor) return;
     editor.setSearchMatches(
@@ -289,6 +325,8 @@ export function createSearchController(deps: SearchDeps): SearchController {
   // ── 置換（U5）────────────────────────────────────────────────────────────────
   /** 「すべて置換」: 全置換 → setContent（単一反映・dirty 化）→ 再検索 → 件数通知。 */
   async function doReplaceAll(): Promise<void> {
+    // 差分は読み取り専用＝置換不可（S5・UI でも置換行を隠すが防御で弾く）。
+    if (deps.isDiffSearch?.()) return;
     if (!deps.canSearch() || state.query === "") return;
     const content = deps.getContent();
     if (content === null) return;
@@ -317,6 +355,8 @@ export function createSearchController(deps: SearchDeps): SearchController {
 
   /** 「置換（1件）」: 現在ヒットの byte 位置を from に 1 件置換 → 再検索 → next 以降の次ヒットへ。 */
   async function doReplaceOne(): Promise<void> {
+    // 差分は読み取り専用＝置換不可（S5）。
+    if (deps.isDiffSearch?.()) return;
     if (!deps.canSearch() || state.query === "") return;
     const content = deps.getContent();
     if (content === null) return;
@@ -423,11 +463,15 @@ export function createSearchController(deps: SearchDeps): SearchController {
     }
   }
 
-  /** モード（find/replace）を切り替え、置換行の表示を同期する。 */
+  /**
+   * モード（find/replace）を切り替え、置換行の表示を同期する。
+   * 差分ビュー内検索（S5）では差分が読み取り専用のため replace を許さず find に倒す（置換行は隠す）。
+   */
   function setMode(mode: "find" | "replace"): void {
-    state.mode = mode;
-    replaceRow.hidden = mode !== "replace";
-    bar.classList.toggle("search-bar-replace", mode === "replace");
+    const effective = mode === "replace" && deps.isDiffSearch?.() ? "find" : mode;
+    state.mode = effective;
+    replaceRow.hidden = effective !== "replace";
+    bar.classList.toggle("search-bar-replace", effective === "replace");
   }
 
   // ── 公開 API ─────────────────────────────────────────────────────────────────
@@ -460,9 +504,12 @@ export function createSearchController(deps: SearchDeps): SearchController {
     searchGen++;
     state.open = false;
     bar.hidden = true;
+    // ハイライトは両面とも消す（差分⇄エディタの切替直後でも取り残さない）。
     deps.getEditor()?.clearSearch();
-    // Esc/閉じるでエディタへフォーカスを戻す（キーボード操作の連続性を保つ）。
-    deps.getEditor()?.focusEditor();
+    deps.clearDiffSearch?.();
+    // Esc/閉じるでフォーカスを対象面へ戻す（キーボード操作の連続性を保つ）。
+    if (deps.isDiffSearch?.()) deps.focusDiff?.();
+    else deps.getEditor()?.focusEditor();
   }
 
   function isOpen(): boolean {

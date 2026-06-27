@@ -78,6 +78,29 @@ impl AccessControl {
         }
     }
 
+    /// 名前を付けて保存（save-as）の保存先を書込許可する（要件5.5）。
+    ///
+    /// `dialog:allow-save`（OS 保存ダイアログ）を経た**ユーザー意図のあるパスのみ**がここへ来る前提で、
+    /// 選択先（ワークスペース外でもよい）を許可域へ登録する。新規ファイルは未存在でよいため**親ディレクトリ**
+    /// を canonicalize して `allowed_dirs` へ入れる（既存ファイルへの save-as なら自体も `allowed_files` へ）。
+    /// 実際の書込は既存 `save_document`（退避先行＋アトミック書込＋エンコーディング維持）が `verify_write`
+    /// を通して行う＝任意パスの素通しにはしない（多層防御）。
+    pub fn allow_save_target(&self, raw: &str) -> Result<(), String> {
+        verify_received_path(raw).map_err(|e| e.to_string())?;
+        let parent = Path::new(raw)
+            .parent()
+            .ok_or_else(|| "親ディレクトリが取れません".to_string())?;
+        let cparent =
+            std::fs::canonicalize(parent).map_err(|e| format!("親ディレクトリ解決に失敗: {e}"))?;
+        let mut inner = self.lock()?;
+        inner.allowed_dirs.insert(cparent);
+        // 既存ファイルへの上書き save-as なら、ファイル自体も個別許可する（リンク先取りこぼし防止）。
+        if let Ok(canon) = std::fs::canonicalize(raw) {
+            inner.allowed_files.insert(canon);
+        }
+        Ok(())
+    }
+
     /// 読み取り対象を検証し canonicalize 済み実体パスを返す（#5 封じ込め）。
     ///
     /// 1. `verify_received_path` で健全性検査（絶対パス/制御文字/ADS/相対）。
@@ -260,6 +283,27 @@ mod tests {
         assert!(
             ac.verify_write(&new_file).is_err(),
             "root 外への書込が許可された（封じ込め破れ）"
+        );
+    }
+
+    #[test]
+    fn allow_save_targetでワークスペース外の保存先が書込許可される() {
+        // 名前を付けて保存（要件5.5）: root 外でもユーザーが選んだ保存先は allow_save_target で通す。
+        let root = temp_dir("saveas-root");
+        let outside = temp_dir("saveas-out");
+        let ac = AccessControl::new();
+        ac.set_root(&root.to_string_lossy());
+        let dest = outside.join("export.md").to_string_lossy().to_string();
+        // 登録前は root 外なので拒否される。
+        assert!(
+            ac.verify_write(&dest).is_err(),
+            "登録前に root 外保存先が許可された（封じ込め破れ）"
+        );
+        // 保存ダイアログで選択した保存先を許可登録する（親ディレクトリを allowed_dirs へ）。
+        ac.allow_save_target(&dest).expect("保存先の許可登録");
+        assert!(
+            ac.verify_write(&dest).is_ok(),
+            "allow_save_target 後も保存先への書込が拒否された"
         );
     }
 

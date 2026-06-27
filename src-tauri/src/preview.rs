@@ -356,6 +356,62 @@ pub fn set_preview_bounds(
     Ok(())
 }
 
+/// エディタ→プレビューの**片方向**スクロール同期（要件6.1 改訂・S4・design doc 6章）。
+///
+/// メインWebView から `webview.eval` で別WebView（権限ゼロ）内の `data-sourcepos` ブロックへスクロール
+/// させる。`webview.eval`（WebView2 の ExecuteScript 注入）は page CSP の `script-src` 対象外なので、
+/// `script-src 'none'` の別WebView でも純 DOM 操作 JS を流せる（[`build_sync_scroll_js`] は `eval`/`Function`
+/// を使わない＝`unsafe-eval` 不要・CSP 無緩和）。逆方向（プレビュー→エディタ）は F-029（プレビュー
+/// 別WebView の IPC 全拒否）で技術的に持てない＝**片方向のみ**（要件6.1 を双方向→片方向へ改訂）。
+///
+/// セキュリティ境界（不変）: この command は invoke 経由なので `is_blocked_invoke_origin` の前段ガードに
+/// よりプレビュー別WebView からは呼べない（メインWebView 専用）。別WebView 未生成時（生成失敗/起動直後）は
+/// no-op で返す（クラッシュしない＝最上位原則「固まらない」）。HTML/SVG プレビューは `data-sourcepos` を
+/// 持たないため、流した JS は対象要素ゼロで自然に no-op になる（frontend 側でも markdown 時のみ呼ぶ）。
+///
+/// - `line`: 最上部の表示行番号（1 始まり・frontend の `editor.getScrollTop()`）。
+#[tauri::command]
+pub fn sync_preview_scroll(app: tauri::AppHandle, line: u32) -> Result<(), String> {
+    // 子WebView 未生成（生成失敗/起動直後/異常系）なら何もしない（編集体験を阻害しない）。
+    let Some(webview) = app.get_webview(PREVIEW_WEBVIEW_LABEL) else {
+        return Ok(());
+    };
+    let js = build_sync_scroll_js(line);
+    webview.eval(&js).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// `sync_preview_scroll` が別WebView へ流す純 DOM 操作 JS を組み立てる（要件6.1 改訂・S4）。
+///
+/// 動作: `[data-sourcepos]` を全列挙し、各要素の開始行（`"L:C-L:C"` の先頭 L）を読む。`line` 以下で
+/// 最大の開始行を持つ要素（無ければ最初の要素）を `scrollIntoView({block:'start'})` する。解析失敗・
+/// 要素不在は安全に無視する（try/catch で握り潰す＝別WebView 内で例外を投げない）。
+///
+/// 安全性: `line`（u32）は数字のみなので JS 文字列へ安全に埋め込める（外部入力由来の文字列を JS へ
+/// 連結しない＝注入面を作らない）。`eval`/`Function` を一切使わない純 DOM 操作のみ（CSP 無緩和）。
+fn build_sync_scroll_js(line: u32) -> String {
+    // u32 を直接埋め込む（数字のみ＝JS リテラルとして安全）。`{{`/`}}` は format! のエスケープ。
+    format!(
+        "(function(){{try{{\
+var t={line};\
+var els=document.querySelectorAll('[data-sourcepos]');\
+if(!els.length)return;\
+var best=null,bl=-1;\
+for(var i=0;i<els.length;i++){{\
+var sp=els[i].getAttribute('data-sourcepos');\
+if(!sp)continue;\
+var c=sp.indexOf(':');\
+if(c<0)continue;\
+var sl=parseInt(sp.slice(0,c),10);\
+if(isNaN(sl))continue;\
+if(sl<=t&&sl>bl){{bl=sl;best=els[i];}}\
+}}\
+if(!best)best=els[0];\
+if(best)best.scrollIntoView({{block:'start'}});\
+}}catch(e){{}}}})();"
+    )
+}
+
 /// 子WebView の位置・サイズを論理座標で適用する（show_preview/set_preview_bounds の共通処理）。
 ///
 /// サイズが 0 以下になり得る（領域未確定/縮退）ため最小 1px に丸める（WebView2 が 0 サイズを嫌うため）。
@@ -785,6 +841,38 @@ mod tests {
         // 想定外ラベルは拒否しない（プレビューのみを限定して塞ぐ＝過剰遮断で既存機能を壊さない）。
         assert!(!is_blocked_invoke_origin(""));
         assert!(!is_blocked_invoke_origin("other"));
+    }
+
+    #[test]
+    fn sync_scroll_js_は純dom操作で行番号を埋め込む() {
+        // S4・要件6.1 改訂: webview.eval に流す JS は data-sourcepos ブロックへスクロールする純 DOM 操作。
+        let js = build_sync_scroll_js(42);
+        // 行番号（u32・数字のみ）が JS リテラルへ安全に埋め込まれている。
+        assert!(js.contains("var t=42;"), "行番号が埋め込まれていない: {js}");
+        // data-sourcepos ブロックを列挙し scrollIntoView でスクロールする（行ベース近似）。
+        assert!(
+            js.contains("[data-sourcepos]"),
+            "data-sourcepos 列挙が無い: {js}"
+        );
+        assert!(js.contains("scrollIntoView"), "scrollIntoView が無い: {js}");
+        // 純 DOM 操作のみ＝eval/Function を一切使わない（unsafe-eval 不要・CSP 無緩和）。
+        assert!(!js.contains("eval("), "eval( を使っている: {js}");
+        assert!(!js.contains("Function("), "Function( を使っている: {js}");
+        // try/catch で別WebView 内に例外を漏らさない（解析失敗を安全に無視）。
+        assert!(js.contains("catch"), "例外ハンドリングが無い: {js}");
+    }
+
+    #[test]
+    fn sync_scroll_js_の行番号は数字のみで構造が不変() {
+        // 行が変わっても数字部分だけが変わり、純 DOM 操作の構造は不変であることを確認する。
+        assert!(build_sync_scroll_js(1).contains("var t=1;"));
+        assert!(build_sync_scroll_js(100000).contains("var t=100000;"));
+        // どの行でも eval/Function を使わない（注入面を作らない）。
+        for line in [0u32, 1, 7, 99999] {
+            let js = build_sync_scroll_js(line);
+            assert!(!js.contains("eval("));
+            assert!(!js.contains("Function("));
+        }
     }
 
     #[test]

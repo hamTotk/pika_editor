@@ -1083,6 +1083,23 @@ body.window-maximized #resize-top {
   box-shadow: inset 2px 0 0 0 var(--accent-strong);
 }
 
+/* 差分ビュー内検索のハイライト（S5・要件5.4 改訂）。
+   差分は読み取り専用で CM6 でないため、独自 DOM レンダラ（diff/index.ts）が当てる class。
+   差分の追加/削除背景・.diff-seg-changed（変更語）・CM6 の .cm-search-hit のいずれとも弁別できる
+   よう accent 系のはっきりした強調にする。`.diff-line` 接頭で `.diff-insert/.diff-delete .diff-seg-changed`
+   の変更語背景にも勝たせ、変更語に重なった検索ヒットでも背景が見える（下線/太字は変更語のまま残る）。 */
+.diff-line .diff-search-hit {
+  background: color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: 2px;
+}
+
+/* 現在ヒットは枠＋濃いめの塗りで 1 件だけ強める（背景色だけに依存しない＝弁別性）。 */
+.diff-line .diff-search-hit-current {
+  background: color-mix(in srgb, var(--accent) 60%, transparent);
+  outline: 1px solid var(--accent-strong);
+  outline-offset: -1px;
+}
+
 .diff-unavailable,
 .diff-empty {
   color: var(--text-3);
@@ -1348,6 +1365,34 @@ body.window-maximized #resize-top {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
   background: var(--bg-hover);
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   同一語ハイライト（highlightSelectionMatches＝heavyDecorations）。
+   @codemirror/search 既定の毒々しい緑 baseTheme を `.cm-editor` 接頭で上書きする。
+   Ctrl+F 検索の .cm-search-hit（中立な bg-active）とは **色相を変えて**弁別する＝
+   こちらは accent 寄りの淡いティント。両者が同時に出ても役割を取り違えない。 */
+.cm-editor .cm-selectionMatch {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-radius: 2px;
+}
+
+/* 行末の空白可視化（highlightTrailingWhitespace＝heavyDecorations）。
+   気づける程度の薄い警告色ティント（保存時に意図せず残った末尾空白を見せる・装飾のみ）。 */
+.cm-editor .cm-trailingSpace {
+  background: color-mix(in srgb, var(--alert) 16%, transparent);
+}
+
+/* 特殊文字の可視化（highlightSpecialChars の render が当てる class＝heavyDecorations）。
+   全角スペース→□、NBSP/ゼロ幅→· を **見た目だけ** 差し込む（ドキュメント文字は不変）。
+   淡色（text-faint）でテーマ追従。全角スペースは日本語字下げで頻出するため一段控えめにする。 */
+.cm-editor .cm-special-char {
+  color: var(--text-faint);
+}
+
+.cm-editor .cm-special-char.cm-special-fullwidth {
+  /* 全角スペースは頻出 → さらに薄くして本文の視認を邪魔しない（可視性は残す）。 */
+  opacity: 0.6;
 }
 
 /* ステータスは右下隅に貼り付く灰背景の帯（ui-design §9・ui-mock .status）。
