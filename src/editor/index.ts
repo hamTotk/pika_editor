@@ -30,7 +30,15 @@ import {
   indentWithTab,
   selectParentSyntax,
 } from "@codemirror/commands";
-import { markdown } from "@codemirror/lang-markdown";
+import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import { html, htmlLanguage } from "@codemirror/lang-html";
+import { cssLanguage } from "@codemirror/lang-css";
+import {
+  javascriptLanguage,
+  jsxLanguage,
+  typescriptLanguage,
+  tsxLanguage,
+} from "@codemirror/lang-javascript";
 import {
   HighlightStyle,
   syntaxHighlighting,
@@ -39,6 +47,7 @@ import {
   codeFolding,
   foldKeymap,
   foldService,
+  type Language,
 } from "@codemirror/language";
 // @codemirror/search からは selectNextOccurrence(Ctrl+D)/selectSelectionMatches(Ctrl+Shift+L)/
 // highlightSelectionMatches（同一語の薄い強調）だけを使う。searchKeymap / search パネル / search 拡張は
@@ -48,7 +57,7 @@ import {
   selectSelectionMatches,
   highlightSelectionMatches,
 } from "@codemirror/search";
-import { tags } from "@lezer/highlight";
+import { tags, styleTags, Tag } from "@lezer/highlight";
 
 /** 外部リロードのトランザクションに付ける注釈。これが付いた変更は dirty 化しない（要件7.2/5.1）。 */
 const ExternalReload = Annotation.define<boolean>();
@@ -140,28 +149,207 @@ export interface EditorHandle {
 }
 
 /**
- * 控えめな構文ハイライト（UIブラッシュアップ T7・差分 E2・ui-mock .tok-* / ui-design 1章モノトーン基調）。
- * 色は**直書きせず** class を割り当て、色値は src/styles/app.css 側でトークン変数（--text-1 等）で当てる。
+ * Markdown の装飾記号（`#` 見出し・`>` 引用・`-`/`*` 箇条書き・`*`/`_`/`**` 強調・背鈎 `` ` ``・
+ * リンク括弧 `[` `]` `(` `)` 等）に**色を付ける**ためのマーク専用タグ群（ユーザー要望）。
+ *
+ * @lezer/markdown は全マーク（HeaderMark/QuoteMark/ListMark/LinkMark/EmphasisMark/CodeMark）を一律
+ * `tags.processingInstruction` に割り当てており、タグだけでは「見出しの # 」と「強調の * 」を区別できない。
+ * そこで下の markdownMarkStyles（styleTags 拡張）でマーク種別ごとに専用タグへ付け替え、装飾対象
+ * （見出し/引用/箇条書き…）に揃えた色を当てられるようにする。
+ */
+const mdMarkTag = {
+  heading: Tag.define(),
+  emphasis: Tag.define(),
+  quote: Tag.define(),
+  list: Tag.define(),
+  link: Tag.define(),
+  code: Tag.define(),
+};
+
+/**
+ * マーク種別ごとに専用タグを付け直す Markdown パーサ拡張（既定の processingInstruction 一律割当を上書き）。
+ * markdown() の `extensions` へ渡す。NodeSet.extend は同種 prop を後勝ちで上書きするため、
+ * 基底の markdownHighlighting より後に適用されてマーク毎の色分けが効く。
+ */
+const markdownMarkStyles = {
+  props: [
+    styleTags({
+      HeaderMark: mdMarkTag.heading,
+      QuoteMark: mdMarkTag.quote,
+      ListMark: mdMarkTag.list,
+      LinkMark: mdMarkTag.link,
+      EmphasisMark: mdMarkTag.emphasis,
+      CodeMark: mdMarkTag.code,
+    }),
+  ],
+};
+
+/**
+ * 構文ハイライト（リッチ版・**ユーザー要望で従来のモノトーン基調から色数・粒度を強化**）。
+ * 色は**直書きせず** class を割り当て、色値は src/styles/app.css 側でトークン変数（--syntax-* 等）で当てる。
  * これにより html[data-theme] のライト/ダーク切替へ自動追従する（color 直書きだと追従できない）。
- * 構文色は彩度を落として主張させすぎない（差分や強調の色と競合させない）。
+ *
+ * 1 つの HighlightStyle を Markdown / HTML / 埋め込みコード（CSS・JS/TS）すべてに適用する
+ *（syntaxHighlighting は現在の言語が産むタグへ無関係に当たる）。Markdown の見出し/強調/リンク等の
+ * マークアップ系タグと、HTML/コードの tagName・attributeName・keyword・number 等を一通り網羅する。
+ * `tags.function(...)` 等の修飾子付きタグは未マッチ時に基底タグの装飾へフォールバックする。
  */
 const pikaHighlightStyle = HighlightStyle.define([
-  // 見出し（tok-h 相当）= 太字＋text-1。
-  { tag: tags.heading, class: "cm-tok-heading" },
-  // 太字/強調はマークアップに準じて装飾のみ（色は付けずモノトーン基調を保つ）。
+  // ── Markdown マークアップ ───────────────────────────────
+  // 見出しは色＋太字。h1〜h3 のみ僅かなサイズ差で階層を示す（h4 以降は本文サイズのまま色＋太字）。
+  { tag: tags.heading1, class: "cm-tok-heading cm-tok-h1" },
+  { tag: tags.heading2, class: "cm-tok-heading cm-tok-h2" },
+  { tag: tags.heading3, class: "cm-tok-heading cm-tok-h3" },
+  { tag: [tags.heading4, tags.heading5, tags.heading6, tags.heading], class: "cm-tok-heading" },
+  // 太字/斜体/取り消し線は装飾＋僅かな色付け。
   { tag: tags.strong, class: "cm-tok-strong" },
   { tag: tags.emphasis, class: "cm-tok-emphasis" },
-  // キーワード（tok-k 相当）= accent 系（トークンで light/dark を吸収）。
-  { tag: tags.keyword, class: "cm-tok-keyword" },
-  // 文字列（tok-s 相当）= 落ち着いた色（専用変数が無いので app.css で light/dark 個別指定）。
-  { tag: tags.string, class: "cm-tok-string" },
-  // コメント（tok-c 相当）= text-3・italic。行/ブロックコメントも同扱い。
-  { tag: [tags.comment, tags.lineComment, tags.blockComment], class: "cm-tok-comment" },
-  // インラインコード/等幅は等幅のまま（淡背景は付けすぎない）。
+  { tag: tags.strikethrough, class: "cm-tok-strike" },
+  // リンク/URL/リンクラベルは accent。
+  { tag: [tags.link, tags.url, tags.labelName], class: "cm-tok-link" },
+  // 引用（blockquote 本文）は落ち着いた色＋italic。
+  { tag: tags.quote, class: "cm-tok-quote" },
+  // 箇条書きマーカーは accent 系で僅かに立たせる。
+  { tag: tags.list, class: "cm-tok-list" },
+  // 水平線（`---`）。
+  { tag: tags.contentSeparator, class: "cm-tok-hr" },
+  // Markdown の装飾記号（マーク）に**色を付ける**（ユーザー要望）。種別ごとに装飾対象と揃えた色を当てる。
+  // 見出し `#` は見出し色、引用 `>` は引用色、箇条書き `-`/`*` は accent、強調 `*`/`_` は専用色、
+  // リンク括弧は accent、背鈎 `` ` `` はコード色。タグは markdownMarkStyles が付け直したもの。
+  { tag: mdMarkTag.heading, class: "cm-tok-heading-mark" },
+  { tag: mdMarkTag.quote, class: "cm-tok-quote-mark" },
+  { tag: mdMarkTag.list, class: "cm-tok-list" },
+  { tag: mdMarkTag.link, class: "cm-tok-link-mark" },
+  { tag: mdMarkTag.emphasis, class: "cm-tok-emphasis-mark" },
+  { tag: mdMarkTag.code, class: "cm-tok-code-mark" },
+  // 上で個別化しなかった残りのマークアップ（HardBreak 等の processingInstruction・meta）は淡色。
+  { tag: [tags.processingInstruction, tags.meta], class: "cm-tok-markup" },
+  // インラインコード/等幅（言語指定の無いフェンス含む）= 等幅＋淡背景。
   { tag: tags.monospace, class: "cm-tok-monospace" },
-  // リンク/URL は accent（控えめ）。
-  { tag: [tags.link, tags.url], class: "cm-tok-link" },
+  // エスケープ（`\*` 等）。
+  { tag: tags.escape, class: "cm-tok-escape" },
+
+  // ── コード共通（CSS・JS/TS・HTML 埋め込みスクリプト等） ──
+  { tag: [tags.comment, tags.lineComment, tags.blockComment], class: "cm-tok-comment" },
+  {
+    tag: [
+      tags.keyword,
+      tags.controlKeyword,
+      tags.operatorKeyword,
+      tags.definitionKeyword,
+      tags.moduleKeyword,
+      tags.modifier,
+      tags.self,
+    ],
+    class: "cm-tok-keyword",
+  },
+  { tag: tags.string, class: "cm-tok-string" },
+  { tag: tags.regexp, class: "cm-tok-regexp" },
+  { tag: [tags.number, tags.integer, tags.float], class: "cm-tok-number" },
+  // 真偽値・atom・null・定数は数値と同系色（リテラル一群）。
+  { tag: [tags.bool, tags.atom, tags.null, tags.constant(tags.variableName)], class: "cm-tok-bool" },
+  // 型名・クラス名・名前空間。
+  { tag: [tags.typeName, tags.className, tags.namespace], class: "cm-tok-type" },
+  // プロパティ名（CSS プロパティ・オブジェクトキー）。
+  { tag: tags.propertyName, class: "cm-tok-property" },
+  // 関数名（定義・呼び出し）。
+  { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], class: "cm-tok-function" },
+  // 通常の変数名は地色のまま（虹色になりすぎないよう中立に保つ）。
+  { tag: [tags.variableName, tags.definition(tags.variableName)], class: "cm-tok-variable" },
+
+  // ── HTML/XML ───────────────────────────────────────────
+  { tag: tags.tagName, class: "cm-tok-tag" },
+  { tag: tags.attributeName, class: "cm-tok-attribute" },
+  { tag: tags.attributeValue, class: "cm-tok-string" },
+  { tag: tags.angleBracket, class: "cm-tok-bracket" },
+
+  // ── 記号・演算子 ───────────────────────────────────────
+  {
+    tag: [
+      tags.punctuation,
+      tags.separator,
+      tags.bracket,
+      tags.squareBracket,
+      tags.paren,
+      tags.brace,
+      tags.derefOperator,
+    ],
+    class: "cm-tok-bracket",
+  },
+  {
+    tag: [
+      tags.operator,
+      tags.arithmeticOperator,
+      tags.logicOperator,
+      tags.compareOperator,
+      tags.bitwiseOperator,
+      tags.updateOperator,
+      tags.definitionOperator,
+      tags.typeOperator,
+      tags.controlOperator,
+    ],
+    class: "cm-tok-operator",
+  },
+  // 構文エラー（不正トークン）は危険色で気づかせる。
+  { tag: tags.invalid, class: "cm-tok-invalid" },
 ]);
+
+/**
+ * Markdown フェンスコード（```html / ```css / ```js …）の言語を解決する（codeLanguages・要件5.1）。
+ * 同梱済みの lang-html/css/javascript のみを対象にする（追加依存はしない）。info 文字列は言語名のみを見る。
+ * 該当なしは null（プレーン等幅のまま）。
+ */
+function fenceLanguage(info: string): Language | null {
+  const tag = info.trim().toLowerCase().split(/[\s,{]/)[0];
+  switch (tag) {
+    case "html":
+    case "htm":
+    case "xhtml":
+    case "xml":
+    case "svg":
+    case "vue":
+      return htmlLanguage;
+    case "css":
+    case "scss":
+    case "less":
+      return cssLanguage;
+    case "js":
+    case "javascript":
+    case "mjs":
+    case "cjs":
+    case "node":
+      return javascriptLanguage;
+    case "jsx":
+      return jsxLanguage;
+    case "ts":
+    case "typescript":
+      return typescriptLanguage;
+    case "tsx":
+      return tsxLanguage;
+    default:
+      return null;
+  }
+}
+
+/**
+ * ファイル種別に応じた言語拡張を選ぶ（要件5.1・md/HTML エディタ）。
+ * - `.html`/`.htm`/`.xhtml`/`.svg`/`.xml` → HTML 言語（タグ/属性＋埋め込み `<style>`/`<script>` も色付け）。
+ * - それ以外（既定）→ GitHub 風 Markdown（GFM: 取り消し線/表/タスクリスト）＋フェンスコードの言語色付け。
+ * filePath 不明（タブ無しの空エディタ等）は Markdown を既定にする。
+ */
+function languageForPath(filePath: string | null | undefined): Extension {
+  const lower = (filePath ?? "").toLowerCase();
+  // 要望は「構文ハイライト強化」のみ。html()/markdown() が既定で同梱する**編集補助**
+  //（autoCloseTags＝閉じタグ自動挿入・completeHTMLTags＝`<` 補完）は要件に無いので明示オフにする（足さない）。
+  if (/\.(html?|xhtml|svg|xml)$/.test(lower)) return html({ autoCloseTags: false });
+  // extensions=markdownMarkStyles で装飾記号（#/>/*/背鈎…）に種別ごとの色を付ける（ユーザー要望）。
+  return markdown({
+    base: markdownLanguage,
+    codeLanguages: fenceLanguage,
+    extensions: markdownMarkStyles,
+    completeHTMLTags: false,
+  });
+}
 
 /**
  * 検索ヒットのハイライトを差し替える StateEffect（U4・要件5.4）。
@@ -435,7 +623,7 @@ const baseExtensions: Extension[] = [
   lineNumbers(),
   highlightActiveLine(),
   history(),
-  markdown(),
+  // 言語（markdown/html）は createEditor がファイル種別に応じて差し込む（languageForPath）。
   // 検索ハイライト（自前 StateField・要件5.4・U4）。空集合で開始（バー未起動時は何も描かない）。
   searchHighlightField,
   // マルチカーソルを有効化する（CM6 標準）。allowMultipleSelections で複数選択を許可し、
@@ -491,6 +679,9 @@ const baseExtensions: Extension[] = [
  * @param onScroll エディタのスクロール変化通知（エディタ→プレビュー片方向スクロール同期・S4・要件6.1 改訂）。
  *   `.cm-scroller` の native scroll を passive で拾うだけで、ハンドラ側がスロットルと発火条件
  *   （Markdown プレビュー可視かつ差分OFF）を判断する（このモジュールは判断を持たない）。未指定なら配線しない。
+ * @param filePath 開いているファイルのパス（言語選択用・要件5.1）。拡張子で markdown / HTML を切替える
+ *   （languageForPath）。null/未指定（タブ無しの空エディタ等）は Markdown を既定にする。
+ *   言語はタブ単位で固定のため Compartment は使わず生成時に確定する（タブ切替＝エディタ再生成）。
  */
 export function createEditor(
   parent: HTMLElement,
@@ -501,6 +692,7 @@ export function createEditor(
   tabWidth = 4,
   heavy = true,
   onScroll?: () => void,
+  filePath: string | null = null,
 ): EditorHandle {
   parent.replaceChildren();
 
@@ -516,6 +708,9 @@ export function createEditor(
       doc: initialDoc,
       extensions: [
         ...baseExtensions,
+        // 言語（markdown/html）をファイル種別で差し込む。heavy=false（巨大ファイルの段階制・要件2.2）では
+        // 構文木の構築自体を省いてプレーン表示にする（重い HTML/markdown パースを回避＝固まらない）。
+        heavy ? languageForPath(filePath) : [],
         // 重い装飾束を Compartment 経由で初期化する（heavy=false で空＝長行/巨大ファイルで外す）。
         heavyDecoCompartment.of(heavy ? heavyDecorations : []),
         wrapCompartment.of(lineWrapping ? EditorView.lineWrapping : []),

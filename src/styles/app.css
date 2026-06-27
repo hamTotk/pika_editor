@@ -968,37 +968,135 @@ body.window-maximized #resize-top {
   font-family: var(--font-ui);
 }
 
-/* 控えめな構文ハイライト（UIブラッシュアップ T7・差分 E2・ui-mock .tok-* / ui-design 1章モノトーン基調）。
+/* 構文ハイライト（リッチ版・**ユーザー要望でモノトーン基調から色数・粒度を強化**）。
    CM6 の HighlightStyle が割り当てた class に、トークン変数で色を当てる（src/editor/index.ts の
    pikaHighlightStyle が class 指定。色は CM 側で直書きせずここで当てるため html[data-theme] の
-   ライト/ダーク切替へ自動追従する）。構文色は彩度を落として主張させすぎない（差分/強調の色と競合させない）。
-   string は tokens.css の --syntax-string（light/dark/system 各値）に委譲する（生16進を app.css に
-   直書きせず単一源へ集約・eval #34。値の出典は ui-mock の .tok-s）。 */
+   ライト/ダーク切替へ自動追従する）。配色は全て tokens.css の --syntax-*（light/dark/system 各値）へ
+   委譲し、生16進を app.css に直書きしない（単一源へ集約・eval #34）。 */
+
+/* ── Markdown マークアップ ─────────────────────────────── */
 .cm-tok-heading {
-  color: var(--text-1);
+  color: var(--syntax-heading);
   font-weight: 700;
 }
+/* 見出しレベル差は僅かなサイズで階層を示す（行の高さを大きく崩さない範囲）。 */
+.cm-tok-h1 {
+  font-size: 1.18em;
+}
+.cm-tok-h2 {
+  font-size: 1.1em;
+}
+.cm-tok-h3 {
+  font-size: 1.05em;
+}
 .cm-tok-strong {
+  color: var(--text-1);
   font-weight: 700;
 }
 .cm-tok-emphasis {
   font-style: italic;
 }
-.cm-tok-keyword {
-  color: var(--accent);
-}
-.cm-tok-comment {
+.cm-tok-strike {
   color: var(--text-3);
-  font-style: italic;
+  text-decoration: line-through;
 }
 .cm-tok-link {
   color: var(--accent);
+  text-decoration: underline;
 }
-/* インラインコード/等幅はモノトーン基調を保つため淡色のみ（背景は付けない）。 */
-.cm-tok-monospace {
+.cm-tok-quote {
+  color: var(--syntax-quote);
+  font-style: italic;
+}
+.cm-tok-list {
+  color: var(--accent);
+  font-weight: 600;
+}
+.cm-tok-hr {
+  color: var(--text-3);
+}
+/* Markdown の装飾記号（マーク）にも色を付ける（ユーザー要望・`#` `>` `*` 背鈎・リンク括弧）。
+   装飾対象と色を揃えて「何の記号か」を一目で分かるようにする。list マークは cm-tok-list（accent）を流用。 */
+.cm-tok-heading-mark {
+  color: var(--syntax-heading);
+  font-weight: 700;
+}
+.cm-tok-quote-mark {
+  color: var(--syntax-quote);
+}
+.cm-tok-emphasis-mark {
+  color: var(--syntax-keyword);
+}
+.cm-tok-link-mark {
+  color: var(--accent);
+}
+.cm-tok-code-mark {
+  color: var(--syntax-number);
+}
+/* 上で個別化しなかった残りのマークアップ（HardBreak 等）は淡色で主張させない。 */
+.cm-tok-markup {
+  color: var(--text-3);
+}
+.cm-tok-escape {
+  color: var(--syntax-number);
+}
+
+/* ── コード共通（CSS・JS/TS・HTML 埋め込み） ───────────── */
+.cm-tok-keyword {
+  color: var(--syntax-keyword);
+}
+.cm-tok-comment {
+  color: var(--syntax-comment);
+  font-style: italic;
+}
+.cm-tok-number,
+.cm-tok-bool {
+  color: var(--syntax-number);
+}
+.cm-tok-function {
+  color: var(--syntax-function);
+}
+.cm-tok-type {
+  color: var(--syntax-type);
+}
+.cm-tok-property {
+  color: var(--syntax-property);
+}
+/* 通常の変数名は地色のまま（虹色になりすぎないよう中立・text-1 へ明示して CM 既定を上書き）。 */
+.cm-tok-variable {
+  color: var(--text-1);
+}
+.cm-tok-regexp {
+  color: var(--syntax-regexp);
+}
+.cm-tok-invalid {
+  color: var(--syntax-invalid);
+  text-decoration: underline wavy var(--syntax-invalid);
+}
+/* 括弧/区切り記号は淡色、演算子は中間色（記号で埋め尽くさない）。 */
+.cm-tok-bracket {
+  color: var(--text-3);
+}
+.cm-tok-operator {
   color: var(--text-2);
 }
-/* string（ui-mock .tok-s）。配色は tokens.css の --syntax-string（light/dark/system 各値）に委譲する。 */
+
+/* ── HTML/XML ─────────────────────────────────────────── */
+.cm-tok-tag {
+  color: var(--syntax-tag);
+}
+.cm-tok-attribute {
+  color: var(--syntax-attribute);
+}
+
+/* インラインコード/等幅（言語指定の無いフェンス含む）= 等幅＋淡背景で地と弁別する。 */
+.cm-tok-monospace {
+  color: var(--text-1);
+  background: var(--syntax-code-bg);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+/* string（ui-mock .tok-s）＝文字列リテラル・HTML 属性値。配色は tokens.css の --syntax-string に委譲。 */
 .cm-tok-string {
   color: var(--syntax-string);
 }

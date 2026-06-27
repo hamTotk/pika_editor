@@ -2,6 +2,8 @@
  * pika テーマトークン（単一源）。
  * 出典: docs/ui-mock.html の :root/.theme-light/.theme-dark の CSS 変数（ui-design 2章・design doc 10章）。
  * ネイティブ wx 版の wxColour ハードコードを置換する全Web 質感の正本。配色値はミラーであり改変しない。
+ * 例外: `--syntax-string` および `--syntax-*` 拡張色（構文ハイライト用）は ui-mock.html のミラーではなく
+ * pika 独自定義（ui-design §1 原則2 のモノトーン例外・2026-06-28。正本は本ファイル＝ui-design §2 表と同期）。
  *
  * テーマ選択（design doc 10章・既定システム追従）:
  *   html[data-theme="light"]  -> 明示ライト
@@ -38,6 +40,21 @@ html[data-theme="light"] {
   --on-accent: #fff;
   /* 構文ハイライトの文字列リテラル色（ui-mock .tok-s）。app.css の生16進を置換する単一源。 */
   --syntax-string: #8a6a3a;
+  /* 構文ハイライト拡張色（ユーザー要望でモノトーン基調から色数・粒度を強化・md/HTML/コード共通）。
+     app.css の .cm-tok-* が参照する単一源。ライト値（地色 #fafafb 上で可読な彩度に抑えた配色）。 */
+  --syntax-heading: #2f5a9e;
+  --syntax-keyword: #9026a3;
+  --syntax-comment: #5e8a55;
+  --syntax-number: #b05a16;
+  --syntax-function: #2f6f9f;
+  --syntax-type: #1f7a6b;
+  --syntax-property: #246b88;
+  --syntax-tag: #c0392b;
+  --syntax-attribute: #9a6b1a;
+  --syntax-regexp: #b03a52;
+  --syntax-invalid: #c0392b;
+  --syntax-quote: #5a6a78;
+  --syntax-code-bg: #00000010;
   --diff-add-bg: #e9f2ec;
   --diff-add-tx: #2f6b41;
   --diff-add-gut: #d6e6dc;
@@ -68,6 +85,20 @@ html[data-theme="dark"] {
   --alert: #c98a52;
   --on-accent: #fff;
   --syntax-string: #c0a070;
+  /* 構文ハイライト拡張色（ダーク・上記ライトの対。地色 #212126 上で沈まない明度に再調整）。 */
+  --syntax-heading: #8fb4e0;
+  --syntax-keyword: #c678dd;
+  --syntax-comment: #7d9471;
+  --syntax-number: #d8985f;
+  --syntax-function: #61afef;
+  --syntax-type: #56b6c2;
+  --syntax-property: #69c0d0;
+  --syntax-tag: #e06c75;
+  --syntax-attribute: #d6a85f;
+  --syntax-regexp: #e0808c;
+  --syntax-invalid: #e06c75;
+  --syntax-quote: #8a97a8;
+  --syntax-code-bg: #ffffff14;
   --diff-add-bg: #18271d;
   --diff-add-tx: #6fb585;
   --diff-add-gut: #244430;
@@ -99,6 +130,20 @@ html[data-theme="dark"] {
     --alert: #c98a52;
     --on-accent: #fff;
     --syntax-string: #c0a070;
+    /* 構文ハイライト拡張色（システム追従ダーク・上の dark 値ミラー）。 */
+    --syntax-heading: #8fb4e0;
+    --syntax-keyword: #c678dd;
+    --syntax-comment: #7d9471;
+    --syntax-number: #d8985f;
+    --syntax-function: #61afef;
+    --syntax-type: #56b6c2;
+    --syntax-property: #69c0d0;
+    --syntax-tag: #e06c75;
+    --syntax-attribute: #d6a85f;
+    --syntax-regexp: #e0808c;
+    --syntax-invalid: #e06c75;
+    --syntax-quote: #8a97a8;
+    --syntax-code-bg: #ffffff14;
     --diff-add-bg: #18271d;
     --diff-add-tx: #6fb585;
     --diff-add-gut: #244430;
