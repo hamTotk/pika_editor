@@ -36,6 +36,11 @@ struct AccessInner {
     allowed_files: HashSet<PathBuf>,
     /// 個別許可ファイルの親ディレクトリ（canonicalize 済み）。新規保存（同フォルダ内）を通すため。
     allowed_dirs: HashSet<PathBuf>,
+    /// 名前を付けて保存（save-as）の **one-shot** 許可先（親 canonicalize＋ファイル名で構成・新規でも実体不要）。
+    /// `allow_save_target` で 1 つだけセットし、`verify_write` が一致したら即消費する（次の 1 回の書込だけ許可）。
+    /// 親ディレクトリ全体を恒久許可していた旧実装と異なり、選んだ 1 ファイルだけ・1 回限りに封じ込める
+    /// （最小権限・XSS 時の継続書込/フォルダ単位の被害面を塞ぐ）。
+    pending_save_target: Option<PathBuf>,
 }
 
 impl AccessControl {
@@ -78,6 +83,31 @@ impl AccessControl {
         }
     }
 
+    /// 名前を付けて保存（save-as）の保存先を **次の 1 回の書込に限り** 書込許可する（要件5.5・最小権限）。
+    ///
+    /// `dialog:allow-save`（OS 保存ダイアログ）を経た**ユーザー意図のあるパスのみ**がここへ来る前提で、
+    /// 選択先（ワークスペース外でもよい）を **file-scoped の one-shot** で許可する。親を canonicalize して
+    /// ファイル名と結合した 1 ファイルだけを `pending_save_target` にセットし、`allowed_dirs`/`allowed_files`
+    /// は**増やさない**（フォルダ全体・恒久許可だった旧実装の被害面拡大を是正＝XSS 時の継続書込を塞ぐ）。
+    /// 実際の書込は既存 `save_document`（退避先行＋アトミック書込＋エンコーディング維持）が `verify_write`
+    /// を通して行い、一致した時点で one-shot を消費する＝任意パスの素通しにはしない（多層防御）。
+    pub fn allow_save_target(&self, raw: &str) -> Result<(), String> {
+        verify_received_path(raw).map_err(|e| e.to_string())?;
+        let parent = Path::new(raw)
+            .parent()
+            .ok_or_else(|| "親ディレクトリが取れません".to_string())?;
+        let cparent =
+            std::fs::canonicalize(parent).map_err(|e| format!("親ディレクトリ解決に失敗: {e}"))?;
+        let file_name = Path::new(raw)
+            .file_name()
+            .ok_or_else(|| "保存先のファイル名が取れません".to_string())?;
+        // 新規ファイルでも実体不要: 親の実体パス（canonicalize）＋ファイル名で one-shot 許可先を構成する。
+        let target = cparent.join(file_name);
+        let mut inner = self.lock()?;
+        inner.pending_save_target = Some(target);
+        Ok(())
+    }
+
     /// 読み取り対象を検証し canonicalize 済み実体パスを返す（#5 封じ込め）。
     ///
     /// 1. `verify_received_path` で健全性検査（絶対パス/制御文字/ADS/相対）。
@@ -101,6 +131,8 @@ impl AccessControl {
     /// 新規ファイルはファイル自体が存在しなくてよいため、**親ディレクトリ**を canonicalize して
     /// 封じ込め判定する（symlink/junction 経由で許可域外へ書くのを防ぐ＝#46）。
     /// 既存ファイル自体が個別許可されている場合も許可する（リネーム済み等の取りこぼし防止）。
+    /// さらに save-as の **one-shot** 許可先（`pending_save_target`）と一致したら許可し、その場で消費する
+    /// （次の 1 回の書込だけ・file-scoped＝最小権限）。
     pub fn verify_write(&self, raw: &str) -> Result<(), String> {
         verify_received_path(raw).map_err(|e| e.to_string())?;
         let parent = Path::new(raw)
@@ -108,7 +140,7 @@ impl AccessControl {
             .ok_or_else(|| "親ディレクトリが取れません".to_string())?;
         let cparent =
             std::fs::canonicalize(parent).map_err(|e| format!("親ディレクトリ解決に失敗: {e}"))?;
-        let inner = self.lock()?;
+        let mut inner = self.lock()?;
         let parent_ok = inner
             .root
             .as_ref()
@@ -120,7 +152,14 @@ impl AccessControl {
             .ok()
             .map(|c| inner.allowed_files.contains(&c))
             .unwrap_or(false);
-        if parent_ok || file_ok {
+        // save-as の one-shot 許可（allow_save_target と同じ「親 canonicalize＋ファイル名」で突き合わせる）。
+        let target_norm = Path::new(raw).file_name().map(|n| cparent.join(n));
+        let pending_ok = target_norm.is_some() && inner.pending_save_target == target_norm;
+        if pending_ok {
+            // 理由が何であれ pending と一致したら消費する（次回はもう通らない＝一回限り・継続書込を塞ぐ）。
+            inner.pending_save_target = None;
+        }
+        if parent_ok || file_ok || pending_ok {
             Ok(())
         } else {
             Err("許可されていないパスです".to_string())
@@ -260,6 +299,66 @@ mod tests {
         assert!(
             ac.verify_write(&new_file).is_err(),
             "root 外への書込が許可された（封じ込め破れ）"
+        );
+    }
+
+    #[test]
+    fn allow_save_targetでワークスペース外の保存先が書込許可される() {
+        // 名前を付けて保存（要件5.5）: root 外でもユーザーが選んだ保存先は allow_save_target で通す。
+        let root = temp_dir("saveas-root");
+        let outside = temp_dir("saveas-out");
+        let ac = AccessControl::new();
+        ac.set_root(&root.to_string_lossy());
+        let dest = outside.join("export.md").to_string_lossy().to_string();
+        // 登録前は root 外なので拒否される。
+        assert!(
+            ac.verify_write(&dest).is_err(),
+            "登録前に root 外保存先が許可された（封じ込め破れ）"
+        );
+        // 保存ダイアログで選択した保存先を one-shot 許可登録する（親ディレクトリ全体ではなく当該 1 ファイルのみ）。
+        ac.allow_save_target(&dest).expect("保存先の許可登録");
+        assert!(
+            ac.verify_write(&dest).is_ok(),
+            "allow_save_target 後の最初の書込が拒否された"
+        );
+    }
+
+    #[test]
+    fn allow_save_targetはone_shotで2回目の書込は拒否される() {
+        // one-shot 化（最小権限）: 1 回の書込で消費し、以後は通らない（XSS 時の継続書込を塞ぐ）。
+        let outside = temp_dir("saveas-oneshot");
+        let ac = AccessControl::new();
+        // root は張らない＝保存先は許可域外（pending だけが許可根拠）。
+        let dest = outside.join("once.md").to_string_lossy().to_string();
+        ac.allow_save_target(&dest).expect("保存先の許可登録");
+        assert!(
+            ac.verify_write(&dest).is_ok(),
+            "1 回目の書込が拒否された（one-shot 未成立）"
+        );
+        // 一回限り: 消費後の 2 回目は拒否される。
+        assert!(
+            ac.verify_write(&dest).is_err(),
+            "one-shot 消費後の 2 回目が許可された（継続書込の被害面）"
+        );
+    }
+
+    #[test]
+    fn allow_save_targetは別パスへの書込を許可しない() {
+        // file-scoped: 親ディレクトリ全体ではなく選んだ 1 ファイルだけを許可する。
+        let outside = temp_dir("saveas-scope");
+        let ac = AccessControl::new();
+        let dest = outside.join("target.md").to_string_lossy().to_string();
+        ac.allow_save_target(&dest).expect("保存先の許可登録");
+        // 同フォルダ内の別ファイルは許可しない（旧実装は allowed_dirs で通っていた被害面）。
+        let sibling = outside.join("other.md").to_string_lossy().to_string();
+        assert!(
+            ac.verify_write(&sibling).is_err(),
+            "別パスへの書込が許可された（file-scoped 破れ）"
+        );
+        // 別パス検証では pending を消費しない（target のみ消費）ため、本来の保存先は引き続き許可される。
+        assert!(
+            ac.verify_write(&dest).is_ok(),
+            "別パス検証後に本来の保存先が拒否された（pending を誤消費した）"
         );
     }
 

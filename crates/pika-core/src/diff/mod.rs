@@ -13,9 +13,13 @@
 //! モジュール構成:
 //! - [`line`] — LF 正規化・行分割・行 LCS（[`DiffLine`]/[`FileDiff`]）。
 //! - [`inline`] — 変更行ペアの語/grapheme フォールバック行内差分（[`Segment`]）。
+//! - [`search_map`] — 差分ビュー内検索のヒット位置マッピング（連結表示テキスト上の byte ヒットを
+//!   差分行・セグメント単位の強調範囲へ写す純粋変換。フロント `src/diff/index.ts` の写しの正本＝S5）。
 
 pub mod inline;
 pub mod line;
+pub mod search_map;
 
 pub use inline::{intra_line_segments, Granularity, Segment};
 pub use line::{compute_diff, normalize_lf, DiffLine, DiffTag, FileDiff};
+pub use search_map::{diff_display_text, map_matches_to_spans, DiffHitSpan};
