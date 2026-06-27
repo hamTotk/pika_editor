@@ -537,12 +537,14 @@ pub fn create_entry(
     Ok(target_str)
 }
 
-/// 名前を付けて保存（save-as）の保存先を書込許可する（要件5.5）。
+/// 名前を付けて保存（save-as）の保存先を **次の 1 回の書込に限り** 書込許可する（要件5.5・最小権限）。
 ///
-/// frontend は `dialog:allow-save`（OS 保存ダイアログ）で保存先を選び、このコマンドで許可域へ登録してから
-/// 既存 `save_document` を呼ぶ。ダイアログを経たユーザー意図のあるパスのみがここへ来る前提で、選択先
-/// （ワークスペース外でもよい）を `AccessControl::allow_save_target` で登録する。実書込は save_document が
-/// `verify_write`（親 canonicalize 封じ込め）を通して行う＝任意パスの素通しにはしない（多層防御）。
+/// frontend は `dialog:allow-save`（OS 保存ダイアログ）で保存先を選び、このコマンドで許可してから
+/// 既存 `save_document` を呼ぶ。frontend 申告のパスを無条件に広く許可しない: `AccessControl::allow_save_target`
+/// は親ディレクトリ全体や恒久許可を**与えず**、選んだ 1 ファイルだけを **file-scoped の one-shot**
+/// （`pending_save_target`）に積む。実書込は save_document が `verify_write`（親 canonicalize 封じ込め）を
+/// 通すときに一致した one-shot を消費する＝1 回限り・当該ファイルのみ（XSS 時の継続書込/フォルダ単位の被害面を
+/// 塞ぐ多層防御）。表現不能文字での UTF-8 再保存（要件5.6）は frontend が再度このコマンドで one-shot を張り直す。
 #[tauri::command]
 pub fn allow_save_path(
     path: String,

@@ -55,6 +55,14 @@ export interface DiffHandle {
   setSearchMatches(matches: SearchMatch[], current: number): void;
   /** 指定ヒットを現在ヒットにし、その位置を中央へスクロールする（前後ジャンプ・S5）。 */
   jumpToHit(index: number): void;
+  /**
+   * 連結表示テキスト上の検索ヒットのうち、差分DOM 上で **1 つ以上の span を生む（描画可能な）** ヒットだけへ
+   * 絞り込む（S5・件数と可視ヒットの乖離防止）。行境界の `\n` 等にだけ乗ったヒットは差分DOM に span を作れず
+   * Next/Prev で無反応・件数が食い違うため、件数/ジャンプ/ハイライトに数える前に除外する。
+   * 判定は computeSpansByLine と同じ重なり規則（各行の本文＝改行を除く content 範囲との重なり）を流用する。
+   * 入力の順序を保ったまま部分集合を返す（呼び出し側はこの filtered 配列のインデックスで一貫処理する）。
+   */
+  filterRenderable(matches: SearchMatch[]): SearchMatch[];
   /** 検索ハイライトを全て消す（バーを閉じた/クエリ空・S5）。 */
   clearSearch(): void;
   /** 破棄（DOM をクリアし keydown ハンドラを外す）。 */
@@ -270,6 +278,28 @@ export function renderDiff(host: HTMLElement, diff: FileDiff): DiffHandle {
     for (const li of prev) renderLineBody(li);
   }
 
+  /**
+   * 描画可能（≥1 span を生む）ヒットだけへ絞る（S5・件数乖離防止）。computeSpansByLine と同じ重なり規則で、
+   * いずれかの行の本文範囲（改行を除く content 部分）と重なるヒットだけ残す（セグメントまで割らずとも、
+   * 行 content はセグメントで隙間なく敷き詰められているので行 content との重なり＝必ず 1 セグメントと重なる）。
+   * 行境界の `\n` にだけ乗ったヒット（どの行 content とも重ならない）は span を作れないので除外する。
+   */
+  function filterRenderable(matches: SearchMatch[]): SearchMatch[] {
+    return matches.filter((m) => {
+      const ms = m.utf16_start;
+      const me = m.utf16_end;
+      if (me <= ms) return false;
+      for (let li = 0; li < diff.lines.length; li++) {
+        const lineStart = lineStarts[li];
+        const lineEnd = lineStart + diff.lines[li].content.length;
+        const os = Math.max(ms, lineStart);
+        const oe = Math.min(me, lineEnd);
+        if (oe > os) return true; // 本文範囲と重なる＝この行に span を作れる。
+      }
+      return false; // どの行 content とも重ならない（改行/ゼロ幅のみ）＝描画不可。
+    });
+  }
+
   return {
     jumpNext: () => focusBlock(cursor + 1),
     jumpPrev: () => focusBlock(cursor - 1),
@@ -277,6 +307,7 @@ export function renderDiff(host: HTMLElement, diff: FileDiff): DiffHandle {
     searchText: () => displayText,
     setSearchMatches,
     jumpToHit,
+    filterRenderable,
     clearSearch,
     destroy: () => {
       host.removeEventListener("keydown", onKey);
@@ -387,6 +418,7 @@ function noopHandle(): DiffHandle {
     searchText: () => "",
     setSearchMatches: () => {},
     jumpToHit: () => {},
+    filterRenderable: (m) => m,
     clearSearch: () => {},
     destroy: () => {},
   };

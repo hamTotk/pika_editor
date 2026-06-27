@@ -63,6 +63,12 @@ export interface SearchDeps {
   setDiffMatches?: (matches: SearchMatch[], current: number) => void;
   /** 指定ヒットを現在ヒットにして差分DOM 上で中央へスクロールする（前後ジャンプ）。 */
   jumpDiffMatch?: (index: number) => void;
+  /**
+   * 差分検索時に、連結表示テキスト上のヒットのうち **差分DOM 上で span を生む（描画可能な）** ものだけへ絞る
+   * （S5・件数乖離防止）。行境界の `\n`/ゼロ幅にだけ乗ったヒットは差分DOM に出せず Next/Prev 無反応・件数食い違いに
+   * なるため、件数/ジャンプ/ハイライトに数える前にここで除外する。エディタ検索（isDiffSearch=false）では呼ばない。
+   */
+  filterDiffRenderable?: (matches: SearchMatch[]) => SearchMatch[];
   /** 差分DOM の検索ハイライトを消す（バーを閉じた/クエリ空）。 */
   clearDiffSearch?: () => void;
   /** 差分面へフォーカスを戻す（差分検索を閉じたときの F8 連続操作用）。 */
@@ -230,14 +236,19 @@ export function createSearchController(deps: SearchDeps): SearchController {
       const result = await searchInText(content, state.query, state.options);
       // 後着ガード: この await 中に新しい検索（query/option 変更）が走っていたら破棄する。
       if (gen !== searchGen) return;
-      state.matches = result.matches;
+      // 差分検索時だけ、差分DOM に出せない（改行/ゼロ幅のみの）ヒットを除外して件数・ジャンプ・
+      // ハイライトを同じ filtered 配列で一致させる（S5・件数乖離防止）。エディタ検索は絞らない。
+      const matches = deps.isDiffSearch?.()
+        ? (deps.filterDiffRenderable?.(result.matches) ?? result.matches)
+        : result.matches;
+      state.matches = matches;
       state.truncated = result.truncated;
-      if (result.matches.length === 0) {
+      if (matches.length === 0) {
         state.current = -1;
       } else if (prevStart >= 0) {
         // 直前の現在ヒットに最も近い（start >= prevStart の最初、無ければ末尾）ヒットへ寄せる。
-        const idx = result.matches.findIndex((m) => m.start >= prevStart);
-        state.current = idx >= 0 ? idx : result.matches.length - 1;
+        const idx = matches.findIndex((m) => m.start >= prevStart);
+        state.current = idx >= 0 ? idx : matches.length - 1;
       } else {
         state.current = 0;
       }

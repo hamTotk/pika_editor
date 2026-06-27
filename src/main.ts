@@ -1446,9 +1446,12 @@ async function saveOnce(
       // 表現不能文字で中断（要件5.6）。この時点でディスクは未変更＝データは失われていない。
       // ［UTF-8で保存／キャンセル］を確認し、選べば UTF-8（BOM なし）で保存し直す。
       const name = path.split(/[\\/]/).pop() ?? path;
-      const ok = window.confirm(
+      // window.confirm はこの Tauri/WebView2 ビルドでダイアログを出さず即 true を返す（confirmModal 新設の
+      // 根拠・src/main.ts 671 行）。素通しで無断 UTF-8 変換しないよう自前モーダルで明示確認する。
+      const ok = await confirmModal(
         `「${name}」には現在のエンコーディングで保存できない文字が ${result.unmappable.length} 件あります。\n` +
           `UTF-8（BOM なし）で保存しますか？［キャンセル］を選ぶと保存しません（変更は失われません）。`,
+        { okLabel: "UTF-8で保存" },
       );
       if (ok) {
         await saveOnce(path, content, tab, true);
@@ -2865,19 +2868,36 @@ async function onSaveAs(): Promise<void> {
     notify("保存先のパスを入力してください", "warn");
     return;
   }
-  await withBusy(async () => {
-    // 保存先を書込許可へ登録する（ワークスペース外でもユーザー意図ゲートを経たパスのみ許可・要件5.5）。
-    // 登録失敗（解決不能等）は握りつぶし、最終的な可否は saveDocument の verify_write に委ねる。
-    try {
-      await allowSavePath(newPath);
-    } catch {
-      // best-effort（後段 saveDocument が封じ込めで弾く）。
+  // 衝突検出（データを失わない・closeTab の「破棄は必ず確認」と挙動を揃える）: 保存先 newPath を
+  // 既に**別タブ**で開いていて、それが未保存（dirty もしくは退避 draft あり）なら、save-as 成功後に
+  // applySaveAsResult が無確認でそのタブを畳む＝未保存編集を silently 失う。これをディスク書込（withBusy）
+  // の前に破棄確認する。No（キャンセル）なら save-as 自体を中止する（保存もしない）。
+  if (newPath !== oldPath) {
+    const dup = state.tabs.find((t) => t !== tab && t.path === newPath);
+    if (dup && (dup.dirty || dup.draft !== undefined)) {
+      const ok = await confirmModal(
+        `別タブで開いている「${dup.title}」に未保存の変更があります。\n` +
+          `保存先として上書きすると失われます。続けますか？`,
+        { okLabel: "上書きする", danger: true },
+      );
+      if (!ok) return; // 破棄したくない＝save-as を中止（何もしない＝保存もしない）。
     }
+  }
+  await withBusy(async () => {
     // 現エンコーディングを維持して新パスへ書く。表現不能文字は UTF-8 で再試行可（onSave と同じ作法）。
     let encoding = tab.encoding;
     let hasBom = tab.hasBom;
     let forceUtf8 = false;
     for (;;) {
+      // 保存先を書込許可へ登録する（ワークスペース外でもユーザー意図ゲートを経たパスのみ許可・要件5.5）。
+      // backend 側は **one-shot**（次の 1 回の書込だけ・file-scoped）なので、表現不能文字の UTF-8 再試行
+      // （ループ 2 周目）では前回の verify_write で消費済み＝毎回ここで張り直す必要がある。
+      // 登録失敗（解決不能等）は握りつぶし、最終的な可否は saveDocument の verify_write に委ねる。
+      try {
+        await allowSavePath(newPath);
+      } catch {
+        // best-effort（後段 saveDocument が封じ込めで弾く）。
+      }
       let result;
       try {
         result = await saveDocument(
@@ -2893,9 +2913,12 @@ async function onSaveAs(): Promise<void> {
       }
       if (result.status === "unmappable") {
         const name = newPath.split(/[\\/]/).pop() ?? newPath;
-        const ok = window.confirm(
+        // window.confirm はこの Tauri/WebView2 ビルドでダイアログを出さず即 true を返す（confirmModal 新設の
+        // 根拠・src/main.ts 671 行）。素通しで無断 UTF-8 変換しないよう自前モーダルで明示確認する。
+        const ok = await confirmModal(
           `「${name}」には現在のエンコーディングで保存できない文字が ${result.unmappable.length} 件あります。\n` +
             `UTF-8（BOM なし）で保存しますか？［キャンセル］を選ぶと保存しません（変更は失われません）。`,
+          { okLabel: "UTF-8で保存" },
         );
         if (!ok) {
           notify("保存を中止しました（表現不能文字のため・変更は保持しています）", "warn");
@@ -3072,6 +3095,8 @@ async function main(): Promise<void> {
     isDiffSearch: diffSearchActive,
     setDiffMatches: (matches, current) => state.diff?.setSearchMatches(matches, current),
     jumpDiffMatch: (index) => state.diff?.jumpToHit(index),
+    // 差分検索の件数乖離防止（S5）: 差分DOM に出せないヒット（改行/ゼロ幅のみ）を件数に数える前に除外する。
+    filterDiffRenderable: (m) => state.diff?.filterRenderable(m) ?? m,
     clearDiffSearch: () => state.diff?.clearSearch(),
     focusDiff: () => diffHost().focus(),
   });
