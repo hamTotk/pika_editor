@@ -225,6 +225,16 @@ export function setPreviewBounds(rect: PreviewRect): Promise<void> {
   return invoke<void>("set_preview_bounds", { x: rect.x, y: rect.y, w: rect.w, h: rect.h });
 }
 
+/**
+ * エディタ→プレビューの**片方向**スクロール同期（要件6.1 改訂・S4）。
+ * backend が `webview.eval` で別WebView（権限ゼロ）の `data-sourcepos` ブロックへスクロールさせる。
+ * 逆方向はプレビュー別WebView の IPC 全拒否（F-029）で持たない。別WebView 未生成時 backend は no-op。
+ * @param line 最上部の表示行番号（1 始まり・`editor.getScrollTop()`）。
+ */
+export function syncPreviewScroll(line: number): Promise<void> {
+  return invoke<void>("sync_preview_scroll", { line });
+}
+
 /** 表示モード（state.json の ViewMode と対応・ui-design 8章）。 */
 export type ViewMode = "source" | "preview" | "split";
 
@@ -379,6 +389,15 @@ export interface OpenedDocument {
  */
 export function openDocument(path: string): Promise<OpenedDocument> {
   return invoke<OpenedDocument>("open_document", { path });
+}
+
+/**
+ * 名前を付けて保存（save-as）の保存先を書込許可する（要件5.5）。
+ * 保存ダイアログ（dialog:allow-save）で選んだパスを許可域へ登録してから saveDocument を呼ぶ。
+ * 実書込は saveDocument の verify_write が封じ込めを再検証する（任意パスの素通しにはしない）。
+ */
+export function allowSavePath(path: string): Promise<void> {
+  return invoke<void>("allow_save_path", { path });
 }
 
 /**

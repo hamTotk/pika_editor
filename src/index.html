@@ -158,6 +158,19 @@
              クリックを受けないラッパ（#tab-tools・.seg）には data-tauri-drag-region を付け、ボタン間の
              隙間でもウィンドウ移動できるようにする。各 button 本体には付けない（クリック優先）。 -->
         <div id="tab-tools" data-tauri-drag-region>
+          <!-- 全タブ一覧ドロップダウン（要件5.3）。クリックで開いている全タブを状態マーク付きで列挙し、
+               選択でそのタブへ切り替える。タブ列が横スクロールで隠れていても全タブへ到達できる導線。
+               タブ未オープン時は無効（refreshViewTools が活性を同期）。 -->
+          <button
+            id="tab-list"
+            type="button"
+            class="iconbtn"
+            disabled
+            aria-haspopup="menu"
+            title="開いているタブの一覧"
+          >
+            ▾ タブ
+          </button>
           <!-- モード切替セグメント（排他・ui-mock .seg）。現在モードに .on が付く。 -->
           <div class="seg" role="group" aria-label="表示モード" data-tauri-drag-region>
             <button id="mode-source" type="button" data-mode="source" aria-pressed="false">

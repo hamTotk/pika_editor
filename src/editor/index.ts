@@ -2,6 +2,7 @@
 // 外部リロード=単一トランザクション=1Undo境界・非dirty・スクロール/カーソル維持を結線する。
 import {
   EditorState,
+  EditorSelection,
   type Extension,
   Annotation,
   Compartment,
@@ -15,10 +16,38 @@ import {
   highlightActiveLine,
   Decoration,
   type DecorationSet,
+  type Command,
+  drawSelection,
+  rectangularSelection,
+  crosshairCursor,
+  highlightTrailingWhitespace,
+  highlightSpecialChars,
 } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import {
+  defaultKeymap,
+  history,
+  historyKeymap,
+  indentWithTab,
+  selectParentSyntax,
+} from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
-import { HighlightStyle, syntaxHighlighting, indentUnit } from "@codemirror/language";
+import {
+  HighlightStyle,
+  syntaxHighlighting,
+  indentUnit,
+  bracketMatching,
+  codeFolding,
+  foldKeymap,
+  foldService,
+} from "@codemirror/language";
+// @codemirror/search からは selectNextOccurrence(Ctrl+D)/selectSelectionMatches(Ctrl+Shift+L)/
+// highlightSelectionMatches（同一語の薄い強調）だけを使う。searchKeymap / search パネル / search 拡張は
+// import しない（pika 独自の Ctrl+F 検索バー＝自前 searchHighlightField と競合させない＝design 方針）。
+import {
+  selectNextOccurrence,
+  selectSelectionMatches,
+  highlightSelectionMatches,
+} from "@codemirror/search";
 import { tags } from "@lezer/highlight";
 
 /** 外部リロードのトランザクションに付ける注釈。これが付いた変更は dirty 化しない（要件7.2/5.1）。 */
@@ -97,6 +126,15 @@ export interface EditorHandle {
   clearSearch(): void;
   /** エディタへフォーカスを戻す（検索バーで Esc を押したとき）。 */
   focusEditor(): void;
+  /**
+   * 太字トグル（編集メニュー「太字」・Ctrl+B と同じ動作）。実行後エディタへフォーカスを戻す。
+   * キーバインドが主経路で、メニューからの再利用のために公開する（コマンド本体は keymap と共有）。
+   */
+  toggleBold(): void;
+  /** 斜体トグル（編集メニュー「斜体」・Ctrl+I と同じ動作）。実行後エディタへフォーカスを戻す。 */
+  toggleItalic(): void;
+  /** チェックボックストグル（編集メニュー・Ctrl+L と同じ動作）。実行後エディタへフォーカスを戻す。 */
+  toggleCheckbox(): void;
   /** 破棄する。 */
   destroy(): void;
 }
@@ -181,6 +219,218 @@ const searchHighlightField = StateField.define<DecorationSet>({
   provide: (field) => EditorView.decorations.from(field),
 });
 
+/**
+ * 単語構成文字（`\w` 相当＝ASCII 英数字＋`_`＋Unicode 文字/数字）。intraword `_` ガードに使う。
+ * 日本語など語中の `_` 誤削除も防ぐため `\p{L}\p{N}` まで含める（空白・句読点は非単語＝強調の境界）。
+ */
+const WORD_CHAR = /[\p{L}\p{N}_]/u;
+
+/**
+ * 太字（`**`）/斜体（`_`）のトグル（自前コマンド・要件5.1）。Ctrl+B / Ctrl+I に割り当てる。
+ *
+ * `state.changeByRange` で全選択範囲を一括処理する（マルチカーソル/矩形選択対応・手動オフセット計算をしない）。
+ * 各範囲について次の優先で判定する:
+ *   (1) 選択の**内側**がマーカー対（先頭末尾が marker）なら外す＝アンラップ。
+ *   (2) 選択の**外側**がマーカー対（直前直後が marker）なら外す＝アンラップ。
+ *   (3) いずれでもなければ marker で包む（空選択は marker 対の中央へカーソルを置く）。
+ * `userEvent:"input.wrap"` を付けてラップ操作を 1 つの Undo 境界にまとめる（往復で元へ戻せる）。
+ * ドキュメント文字以外は触らない（「データを失わない」死守）。
+ *
+ * **intraword `_` ガード（要件5.1・データを失わない）**: `_`（斜体）のときだけ、CommonMark の語中強調
+ * 無効規則に倣い、外側マーカーが両側とも単語構成文字に挟まれる語中 `_`（例: `foo_bar_baz` の `bar` を
+ * 選んで Ctrl+I）ではアンラップせず (3) ラップへ倒す。識別子のアンダースコアを誤って削除しない。
+ * `**`（太字）は語中強調が有効なのでこのガードは適用しない（従来どおり）。
+ * 既知制限: `**a** **b**` 全選択時の内側アンラップ崩れは今回は直さない。
+ */
+function toggleWrap(marker: string): Command {
+  const mlen = marker.length;
+  // `_` のときだけ intraword ガードを効かせる（`**` は語中強調が有効なので無効）。
+  const guardUnderscore = marker === "_";
+  return (view: EditorView): boolean => {
+    const { state } = view;
+    // 絶対位置の 1 文字を返す（範囲外は ""＝非単語扱い＝強調の境界）。
+    const charAt = (pos: number): string =>
+      pos >= 0 && pos < state.doc.length ? state.sliceDoc(pos, pos + 1) : "";
+    // 外側マーカーの前後（beforePos/afterPos）が両方とも単語構成文字＝語中 `_` か。
+    const isIntraword = (beforePos: number, afterPos: number): boolean =>
+      WORD_CHAR.test(charAt(beforePos)) && WORD_CHAR.test(charAt(afterPos));
+    const spec = state.changeByRange((range) => {
+      const { from, to } = range;
+      const selected = state.sliceDoc(from, to);
+      // (1) 選択の内側がマーカー対 → 内側の marker を 2 つ削除してアンラップ。
+      // `_` の語中ガード: 外側マーカー（選択先頭/末尾の `_`）の直前 from-1・直後 to が両方単語文字なら
+      // 語中 `_` とみなしアンラップを見送る（(3) ラップへ倒す）。
+      const innerPair =
+        to - from >= mlen * 2 && selected.startsWith(marker) && selected.endsWith(marker);
+      if (innerPair && !(guardUnderscore && isIntraword(from - 1, to))) {
+        const innerTo = to - mlen;
+        return {
+          changes: [
+            { from, to: from + mlen, insert: "" },
+            { from: innerTo, to, insert: "" },
+          ],
+          // marker 対を除いた内側がそのまま選択として残る（先頭は動かず末尾が 2*mlen 縮む）。
+          range: EditorSelection.range(from, to - mlen * 2),
+        };
+      }
+      // (2) 選択の外側がマーカー対 → 外側の marker を 2 つ削除してアンラップ。
+      const before = state.sliceDoc(Math.max(0, from - mlen), from);
+      const after = state.sliceDoc(to, Math.min(state.doc.length, to + mlen));
+      // `_` の語中ガード: 外側マーカー（[from-mlen,from] と [to,to+mlen]）の直前 from-mlen-1・直後 to+mlen が
+      // 両方単語文字なら語中 `_`（例: foo_bar_baz の bar）とみなしアンラップせず (3) ラップへ倒す。
+      const outerPair = before === marker && after === marker;
+      if (outerPair && !(guardUnderscore && isIntraword(from - mlen - 1, to + mlen))) {
+        return {
+          changes: [
+            { from: from - mlen, to: from, insert: "" },
+            { from: to, to: to + mlen, insert: "" },
+          ],
+          // 直前 marker が消えるぶん選択全体が mlen ぶん手前へずれる。
+          range: EditorSelection.range(from - mlen, to - mlen),
+        };
+      }
+      // (3) それ以外 → marker で包む。空選択は marker 対の中央へカーソルを置く。
+      return {
+        changes: [
+          { from, insert: marker },
+          { from: to, insert: marker },
+        ],
+        range:
+          from === to
+            ? EditorSelection.cursor(from + mlen)
+            : EditorSelection.range(from + mlen, to + mlen),
+      };
+    });
+    view.dispatch(state.update(spec, { scrollIntoView: true, userEvent: "input.wrap" }));
+    return true;
+  };
+}
+
+/** 太字トグル（Ctrl+B・編集メニュー）。keymap とメニュー双方から再利用する。 */
+const toggleBoldCmd = toggleWrap("**");
+/** 斜体トグル（Ctrl+I・編集メニュー）。keymap とメニュー双方から再利用する。 */
+const toggleItalicCmd = toggleWrap("_");
+
+/** 行頭のタスク記法（`- [ ]` / `* [x]` / `1. [X]` 等）を捉える正規表現。グループ1=記号〜`[`、2=チェック文字、3=`]`。 */
+const TASK_LINE_RE = /^(\s*(?:[-*+]|\d+\.)\s+\[)([ xX])(\])/;
+
+/**
+ * チェックボックスのトグル（自前コマンド・要件5.1）。Ctrl+L に割り当てる。
+ * 選択が跨る各行のうち**タスク記法行のみ**を対象に、チェック文字を ` `↔`x` で切り替える。
+ * 素の行をタスク化はしない（記法行限定）。複数行・複数選択に対応し、同じ行は 1 回だけ処理する。
+ * チェック文字 1 文字だけを置換し、文書の他の文字は壊さない（「データを失わない」）。
+ */
+const toggleCheckbox: Command = (view: EditorView): boolean => {
+  const { state } = view;
+  // 選択が跨る行番号を重複なく集める（複数選択でも各行 1 回）。
+  const lineNums = new Set<number>();
+  for (const range of state.selection.ranges) {
+    const startLine = state.doc.lineAt(range.from).number;
+    let endLine = state.doc.lineAt(range.to).number;
+    // 非空選択で終端がちょうど次行頭に乗る場合、その行は実質含まれていないので除外する
+    //（off-by-one: 触っていない次行までトグル対象にしない＝「データを失わない」）。
+    if (range.to > range.from && range.to === state.doc.line(endLine).from) endLine--;
+    for (let n = startLine; n <= endLine; n++) lineNums.add(n);
+  }
+  const changes: { from: number; to: number; insert: string }[] = [];
+  for (const n of lineNums) {
+    const line = state.doc.line(n);
+    const m = TASK_LINE_RE.exec(line.text);
+    if (!m) continue;
+    // チェック文字の絶対位置（記号〜`[` の長さ＝m[1].length 直後の 1 文字）。
+    const checkPos = line.from + m[1].length;
+    const next = m[2] === " " ? "x" : " ";
+    changes.push({ from: checkPos, to: checkPos + 1, insert: next });
+  }
+  if (changes.length === 0) return false;
+  view.dispatch(state.update({ changes, userEvent: "input.checkbox" }));
+  return true;
+};
+
+/**
+ * 特殊文字（全角スペース/NBSP/ゼロ幅）の可視化レンダラ（要件5.1・可視化のみ）。
+ * 全角スペース U+3000 は □、その他（NBSP・ゼロ幅など）は · で見せる。**ドキュメント文字は不変**＝
+ * これは replace widget の見た目だけで、コピー/保存される文字列は元のまま（正規化・変換は一切しない）。
+ * title に U+xxxx を入れて何の文字かを示し（スクリーンリーダ向けに aria-label も）、class でテーマ追従させる。
+ */
+function renderSpecialChar(code: number): HTMLElement {
+  const span = document.createElement("span");
+  const isFullWidth = code === 0x3000;
+  // 全角スペースは頻出（日本語字下げ）のため別 class でさらに控えめにできるようにする。
+  span.className = isFullWidth ? "cm-special-char cm-special-fullwidth" : "cm-special-char";
+  span.textContent = isFullWidth ? "□" : "·";
+  const label = "U+" + code.toString(16).toUpperCase().padStart(4, "0");
+  span.title = label;
+  span.setAttribute("aria-label", label);
+  return span;
+}
+
+/**
+ * 見出し（`#{1,6} `）単位のコード折りたたみを提供する foldService（要件5.1・折りたたみはキーボードのみ）。
+ * 折りたたみコマンド（Ctrl+Shift+[）が対象行に対して問い合わせる。見出し行なら、その見出し行末から
+ * 次の**同位以上の見出し**の直前（無ければ文末）までを畳む範囲として返す。折る中身が無ければ null。
+ * fold gutter は配線しないため、この走査は明示折り操作時にだけ呼ばれる（常時走査しない＝軽量）。
+ */
+function headingFoldRange(
+  state: EditorState,
+  lineStart: number,
+  lineEnd: number,
+): { from: number; to: number } | null {
+  const startLine = state.doc.lineAt(lineStart);
+  const m = /^(#{1,6})\s/.exec(startLine.text);
+  if (!m) return null;
+  const level = m[1].length;
+  const lastLineNo = state.doc.lines;
+  let endLineNo = startLine.number;
+  for (let n = startLine.number + 1; n <= lastLineNo; n++) {
+    const line = state.doc.line(n);
+    const hm = /^(#{1,6})\s/.exec(line.text);
+    if (hm && hm[1].length <= level) break; // 次の同/上位見出しの手前で止める。
+    endLineNo = n;
+  }
+  if (endLineNo === startLine.number) return null; // 見出し直下に中身が無い＝畳めない。
+  // 見出し行末（lineEnd）から節末尾までを畳む。見出し行のテキスト自体は残す。
+  return { from: lineEnd, to: state.doc.line(endLineNo).to };
+}
+
+/**
+ * 重い装飾（長行/巨大ファイルで外す対象）を束ねる Compartment（設計の要点「heavyDecoCompartment」）。
+ * backend の degrade（10万字/行で highlight_off・要件2.2/pika-core::huge）で `heavy=false` を渡すと
+ * このコンパートメントを空へ reconfigure し、構文ハイライト/対応括弧/同一語強調/行末空白可視化を一括で外す。
+ * これにより従来 baseExtensions に直挿しで巨大行でも常時走っていた syntaxHighlighting の穴（highlight_off
+ * 未実効）も同時に塞ぐ。createEditor の初期化時に heavy に応じて of() するだけで、以後 reconfigure はしない。
+ */
+const heavyDecoCompartment = new Compartment();
+
+/**
+ * heavyDecoCompartment に載せる重い装飾の束（heavy=true のときだけ有効化）。
+ * - syntaxHighlighting: 控えめな構文ハイライト（baseExtensions からここへ移設）。
+ * - bracketMatching: カーソル隣接の対応括弧を強調（CM6 標準・安価）。
+ * - highlightSelectionMatches: 選択語と同一の語を薄く強調（.cm-selectionMatch・app.css で .cm-search-hit と弁別）。
+ * - highlightTrailingWhitespace: 行末の空白を可視化（.cm-trailingSpace）。
+ * - highlightSpecialChars: 全角スペース/NBSP の**可視化のみ**（□/·・装飾でドキュメント文字は不変）。
+ *   ZWJ/ZWNJ は絵文字結合を壊すため可視化対象から外す（ZWSP/BOM は CM6 既定で可視化）。
+ * - codeFolding + foldService: 見出し単位の折りたたみ（キーボードのみ・fold gutter は出さない）。
+ * いずれも装飾のみでドキュメント文字は変えない（「データを失わない」死守）。長行（heavy=false）では一括で外れる。
+ */
+const heavyDecorations: Extension[] = [
+  syntaxHighlighting(pikaHighlightStyle),
+  bracketMatching(),
+  highlightSelectionMatches(),
+  highlightTrailingWhitespace(),
+  // 全角スペース U+3000 と NBSP U+00A0 を既定の特殊文字集合へ追加して可視化する。render は見た目だけを
+  // 差し替え、文字は置換しない（保存・コピーは元のまま＝データを失わない）。
+  // ZWJ(U+200D)/ZWNJ(U+200C) は **可視化対象から外す**: ZWJ 連結絵文字を `·` で分解してしまうため
+  //（絵文字結合保護）。ZWSP(U+200B)/BOM(U+FEFF) 等は CM6 既定で可視化される。
+  highlightSpecialChars({
+    addSpecialChars: /[\u00a0\u3000]/g,
+    render: renderSpecialChar,
+  }),
+  // 見出し折りたたみ（codeFolding が fold 状態を保持し、foldService が畳む範囲を見出し走査で算出）。
+  codeFolding(),
+  foldService.of(headingFoldRange),
+];
+
 const baseExtensions: Extension[] = [
   lineNumbers(),
   highlightActiveLine(),
@@ -188,8 +438,32 @@ const baseExtensions: Extension[] = [
   markdown(),
   // 検索ハイライト（自前 StateField・要件5.4・U4）。空集合で開始（バー未起動時は何も描かない）。
   searchHighlightField,
-  // 控えめな構文ハイライトを有効化（class 指定＝テーマ追従・色は app.css）。
-  syntaxHighlighting(pikaHighlightStyle),
+  // マルチカーソルを有効化する（CM6 標準）。allowMultipleSelections で複数選択を許可し、
+  // drawSelection で複数の選択/カーソルを描画する（既定の単一ネイティブ選択では複数カーソルが見えない）。
+  // 矩形選択（Alt+ドラッグ）とその十字カーソル表示も併せて有効化する。マルチカーソルのキー
+  // （Ctrl+Alt+↑↓）と Ctrl+D/Ctrl+Shift+L のコマンドは下の keymap が担う。
+  EditorState.allowMultipleSelections.of(true),
+  drawSelection(),
+  rectangularSelection(),
+  crosshairCursor(),
+  // pika 自前のエディタ級コマンド束（要件5.1/5.4）。defaultKeymap より **前** に置き上書き優先する
+  // （preventDefault でブラウザ既定も抑止）。アプリ級ショートカット（Ctrl+G/Ctrl+Tab 等）とは別系統で、
+  // フォーカスがエディタにある間だけ効く（resolveShortcut には載せない＝design 方針）。
+  // - Ctrl+B / Ctrl+I: 太字 `**` / 斜体 `_` のラップ/アンラップ。Ctrl+I は selectParentSyntax を上書きする。
+  // - Ctrl+Shift+I: 退避した selectParentSyntax（構文単位で選択を広げる）。
+  // - Ctrl+L: タスク記法行のチェックボックス（` `↔`x`）トグル。
+  // - Ctrl+D / Ctrl+Shift+L: 次の同一語を選択（マルチカーソル追加）／同一語を全選択。
+  keymap.of([
+    { key: "Mod-b", run: toggleBoldCmd, preventDefault: true },
+    { key: "Mod-i", run: toggleItalicCmd, preventDefault: true },
+    { key: "Mod-Shift-i", run: selectParentSyntax, preventDefault: true },
+    { key: "Mod-l", run: toggleCheckbox, preventDefault: true },
+    { key: "Mod-d", run: selectNextOccurrence, preventDefault: true },
+    { key: "Mod-Shift-l", run: selectSelectionMatches, preventDefault: true },
+    // 折りたたみ（Ctrl+Shift+[ 畳む / Ctrl+Shift+] 開く / Ctrl+Alt+[ ] 全畳/全開）。
+    // codeFolding 拡張（heavyDecorations 側）が無効な長行では何も起きない（degrade 時は素通し）。
+    ...foldKeymap,
+  ]),
   // Tab はタブ文字を挿入する（スペース展開しない・保守的既定＝要件5.2）。indentUnit を "\t" に固定し、
   // indentWithTab で Tab/Shift+Tab をインデント操作へ割り当てる。tab_width は**表示幅にのみ**効く値で、
   // ここで入るのは常にタブ文字 1 個（挿入スペース数ではない）。indentWithTab は defaultKeymap より
@@ -211,6 +485,12 @@ const baseExtensions: Extension[] = [
  * @param tabWidth タブの**表示幅**（EditorState.tabSize・settings.toml の tab_width・既定 4）。
  *   挿入文字（タブ文字）には影響せず、Tab 文字を画面上で何桁ぶんに見せるかだけを決める（要件5.2）。
  *   lineWrapping と同じく、タブ切替でエディタを作り直しても現在値を初期値で引き継ぐ。
+ * @param heavy 重い装飾（構文ハイライト/対応括弧/同一語強調/行末空白可視化）を有効にするか（既定 ON）。
+ *   backend の degrade（highlight_off/editing_off＝10万字/行の巨大ファイル・要件2.2）が立つときは false を
+ *   渡し、heavyDecoCompartment を空に初期化して重い装飾を外す（長行の編集応答 200ms 予算・固まらない）。
+ * @param onScroll エディタのスクロール変化通知（エディタ→プレビュー片方向スクロール同期・S4・要件6.1 改訂）。
+ *   `.cm-scroller` の native scroll を passive で拾うだけで、ハンドラ側がスロットルと発火条件
+ *   （Markdown プレビュー可視かつ差分OFF）を判断する（このモジュールは判断を持たない）。未指定なら配線しない。
  */
 export function createEditor(
   parent: HTMLElement,
@@ -219,6 +499,8 @@ export function createEditor(
   onCursorChange?: () => void,
   lineWrapping = true,
   tabWidth = 4,
+  heavy = true,
+  onScroll?: () => void,
 ): EditorHandle {
   parent.replaceChildren();
 
@@ -234,6 +516,8 @@ export function createEditor(
       doc: initialDoc,
       extensions: [
         ...baseExtensions,
+        // 重い装飾束を Compartment 経由で初期化する（heavy=false で空＝長行/巨大ファイルで外す）。
+        heavyDecoCompartment.of(heavy ? heavyDecorations : []),
         wrapCompartment.of(lineWrapping ? EditorView.lineWrapping : []),
         // タブ表示幅（EditorState.tabSize の Facet）を Compartment 経由で初期化する（setTabWidth で差替）。
         tabSizeCompartment.of(EditorState.tabSize.of(tabWidth)),
@@ -292,6 +576,11 @@ export function createEditor(
       ],
     }),
   });
+
+  // エディタ→プレビュー片方向スクロール同期（S4・要件6.1 改訂）。`.cm-scroller` の native scroll を
+  // passive で拾う（CM6 の updateListener は scroll を確実には拾わないため scrollDOM へ直接張る）。
+  // 発火条件（Markdown プレビュー可視・差分OFF）とスロットルはハンドラ側（main.ts）が判断する。
+  if (onScroll) view.scrollDOM.addEventListener("scroll", onScroll, { passive: true });
 
   return {
     getContent: () => view.state.doc.toString(),
@@ -385,6 +674,22 @@ export function createEditor(
       view.dispatch({ effects: setSearchMatchesEffect.of({ matches: [], current: -1 }) });
     },
     focusEditor: () => view.focus(),
-    destroy: () => view.destroy(),
+    toggleBold: () => {
+      toggleBoldCmd(view);
+      view.focus();
+    },
+    toggleItalic: () => {
+      toggleItalicCmd(view);
+      view.focus();
+    },
+    toggleCheckbox: () => {
+      toggleCheckbox(view);
+      view.focus();
+    },
+    destroy: () => {
+      // スクロール同期リスナを外してから破棄する（view.destroy は DOM を外すが明示的に解除する）。
+      if (onScroll) view.scrollDOM.removeEventListener("scroll", onScroll);
+      view.destroy();
+    },
   };
 }

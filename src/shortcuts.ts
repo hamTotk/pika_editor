@@ -36,7 +36,10 @@ export type Action =
   | "replace" // Ctrl+H
   | "save" // Ctrl+S
   | "close-tab" // Ctrl+W
-  | "resync"; // F5
+  | "resync" // F5
+  | "goto-line" // Ctrl+G（要件5.5）
+  | "next-tab" // Ctrl+Tab（代替 Ctrl+PageDown）
+  | "prev-tab"; // Ctrl+Shift+Tab（代替 Ctrl+PageUp）
 
 /**
  * キー（修飾＋フォーカス）から発火する操作を解決する（pika-core::shortcuts::resolve の写し・要件11.2）。
@@ -64,6 +67,14 @@ export function resolveShortcut(key: string, mods: Mods, focus: Focus): Action |
   if (key === "h" && plainCtrl) return "replace";
   if (key === "s" && plainCtrl) return "save";
   if (key === "w" && plainCtrl) return "close-tab";
+  // 行へ移動（Ctrl+G・要件5.5/11.2）。フロントは対話的に行番号を入力してジャンプする。
+  if (key === "g" && plainCtrl) return "goto-line";
+  // タブ切替（Ctrl+Tab / Ctrl+Shift+Tab・要件11.2）。Ctrl+Tab を WebView2 が飲む環境向けに
+  // 代替 Ctrl+PageDown/Ctrl+PageUp も同じ Action へ割り当てる（normalizeKey で "Tab"/"PageDown"/"PageUp" のまま渡る）。
+  if (key === "Tab" && plainCtrl) return "next-tab";
+  if (key === "Tab" && ctrlShift) return "prev-tab";
+  if (key === "PageDown" && plainCtrl) return "next-tab";
+  if (key === "PageUp" && plainCtrl) return "prev-tab";
 
   // Enter 系（確認済み）の誤爆防止（要件11.2）。
   if (key === "Enter") {
