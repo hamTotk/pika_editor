@@ -220,6 +220,12 @@ const searchHighlightField = StateField.define<DecorationSet>({
 });
 
 /**
+ * 単語構成文字（`\w` 相当＝ASCII 英数字＋`_`＋Unicode 文字/数字）。intraword `_` ガードに使う。
+ * 日本語など語中の `_` 誤削除も防ぐため `\p{L}\p{N}` まで含める（空白・句読点は非単語＝強調の境界）。
+ */
+const WORD_CHAR = /[\p{L}\p{N}_]/u;
+
+/**
  * 太字（`**`）/斜体（`_`）のトグル（自前コマンド・要件5.1）。Ctrl+B / Ctrl+I に割り当てる。
  *
  * `state.changeByRange` で全選択範囲を一括処理する（マルチカーソル/矩形選択対応・手動オフセット計算をしない）。
@@ -229,16 +235,34 @@ const searchHighlightField = StateField.define<DecorationSet>({
  *   (3) いずれでもなければ marker で包む（空選択は marker 対の中央へカーソルを置く）。
  * `userEvent:"input.wrap"` を付けてラップ操作を 1 つの Undo 境界にまとめる（往復で元へ戻せる）。
  * ドキュメント文字以外は触らない（「データを失わない」死守）。
+ *
+ * **intraword `_` ガード（要件5.1・データを失わない）**: `_`（斜体）のときだけ、CommonMark の語中強調
+ * 無効規則に倣い、外側マーカーが両側とも単語構成文字に挟まれる語中 `_`（例: `foo_bar_baz` の `bar` を
+ * 選んで Ctrl+I）ではアンラップせず (3) ラップへ倒す。識別子のアンダースコアを誤って削除しない。
+ * `**`（太字）は語中強調が有効なのでこのガードは適用しない（従来どおり）。
+ * 既知制限: `**a** **b**` 全選択時の内側アンラップ崩れは今回は直さない。
  */
 function toggleWrap(marker: string): Command {
   const mlen = marker.length;
+  // `_` のときだけ intraword ガードを効かせる（`**` は語中強調が有効なので無効）。
+  const guardUnderscore = marker === "_";
   return (view: EditorView): boolean => {
     const { state } = view;
+    // 絶対位置の 1 文字を返す（範囲外は ""＝非単語扱い＝強調の境界）。
+    const charAt = (pos: number): string =>
+      pos >= 0 && pos < state.doc.length ? state.sliceDoc(pos, pos + 1) : "";
+    // 外側マーカーの前後（beforePos/afterPos）が両方とも単語構成文字＝語中 `_` か。
+    const isIntraword = (beforePos: number, afterPos: number): boolean =>
+      WORD_CHAR.test(charAt(beforePos)) && WORD_CHAR.test(charAt(afterPos));
     const spec = state.changeByRange((range) => {
       const { from, to } = range;
       const selected = state.sliceDoc(from, to);
       // (1) 選択の内側がマーカー対 → 内側の marker を 2 つ削除してアンラップ。
-      if (to - from >= mlen * 2 && selected.startsWith(marker) && selected.endsWith(marker)) {
+      // `_` の語中ガード: 外側マーカー（選択先頭/末尾の `_`）の直前 from-1・直後 to が両方単語文字なら
+      // 語中 `_` とみなしアンラップを見送る（(3) ラップへ倒す）。
+      const innerPair =
+        to - from >= mlen * 2 && selected.startsWith(marker) && selected.endsWith(marker);
+      if (innerPair && !(guardUnderscore && isIntraword(from - 1, to))) {
         const innerTo = to - mlen;
         return {
           changes: [
@@ -252,7 +276,10 @@ function toggleWrap(marker: string): Command {
       // (2) 選択の外側がマーカー対 → 外側の marker を 2 つ削除してアンラップ。
       const before = state.sliceDoc(Math.max(0, from - mlen), from);
       const after = state.sliceDoc(to, Math.min(state.doc.length, to + mlen));
-      if (before === marker && after === marker) {
+      // `_` の語中ガード: 外側マーカー（[from-mlen,from] と [to,to+mlen]）の直前 from-mlen-1・直後 to+mlen が
+      // 両方単語文字なら語中 `_`（例: foo_bar_baz の bar）とみなしアンラップせず (3) ラップへ倒す。
+      const outerPair = before === marker && after === marker;
+      if (outerPair && !(guardUnderscore && isIntraword(from - mlen - 1, to + mlen))) {
         return {
           changes: [
             { from: from - mlen, to: from, insert: "" },
@@ -299,7 +326,10 @@ const toggleCheckbox: Command = (view: EditorView): boolean => {
   const lineNums = new Set<number>();
   for (const range of state.selection.ranges) {
     const startLine = state.doc.lineAt(range.from).number;
-    const endLine = state.doc.lineAt(range.to).number;
+    let endLine = state.doc.lineAt(range.to).number;
+    // 非空選択で終端がちょうど次行頭に乗る場合、その行は実質含まれていないので除外する
+    //（off-by-one: 触っていない次行までトグル対象にしない＝「データを失わない」）。
+    if (range.to > range.from && range.to === state.doc.line(endLine).from) endLine--;
     for (let n = startLine; n <= endLine; n++) lineNums.add(n);
   }
   const changes: { from: number; to: number; insert: string }[] = [];
@@ -378,7 +408,8 @@ const heavyDecoCompartment = new Compartment();
  * - bracketMatching: カーソル隣接の対応括弧を強調（CM6 標準・安価）。
  * - highlightSelectionMatches: 選択語と同一の語を薄く強調（.cm-selectionMatch・app.css で .cm-search-hit と弁別）。
  * - highlightTrailingWhitespace: 行末の空白を可視化（.cm-trailingSpace）。
- * - highlightSpecialChars: 全角スペース/NBSP/ゼロ幅の**可視化のみ**（□/·・装飾でドキュメント文字は不変）。
+ * - highlightSpecialChars: 全角スペース/NBSP の**可視化のみ**（□/·・装飾でドキュメント文字は不変）。
+ *   ZWJ/ZWNJ は絵文字結合を壊すため可視化対象から外す（ZWSP/BOM は CM6 既定で可視化）。
  * - codeFolding + foldService: 見出し単位の折りたたみ（キーボードのみ・fold gutter は出さない）。
  * いずれも装飾のみでドキュメント文字は変えない（「データを失わない」死守）。長行（heavy=false）では一括で外れる。
  */
@@ -387,10 +418,12 @@ const heavyDecorations: Extension[] = [
   bracketMatching(),
   highlightSelectionMatches(),
   highlightTrailingWhitespace(),
-  // 全角スペース U+3000 と NBSP U+00A0、ゼロ幅 U+200C/U+200D を既定の特殊文字集合へ追加して可視化する
-  //（U+200B/U+FEFF 等は CM6 既定で可視化済み）。render は見た目だけを差し替え、文字は置換しない。
+  // 全角スペース U+3000 と NBSP U+00A0 を既定の特殊文字集合へ追加して可視化する。render は見た目だけを
+  // 差し替え、文字は置換しない（保存・コピーは元のまま＝データを失わない）。
+  // ZWJ(U+200D)/ZWNJ(U+200C) は **可視化対象から外す**: ZWJ 連結絵文字を `·` で分解してしまうため
+  //（絵文字結合保護）。ZWSP(U+200B)/BOM(U+FEFF) 等は CM6 既定で可視化される。
   highlightSpecialChars({
-    addSpecialChars: /[\u00a0\u200c\u200d\u3000]/g,
+    addSpecialChars: /[\u00a0\u3000]/g,
     render: renderSpecialChar,
   }),
   // 見出し折りたたみ（codeFolding が fold 状態を保持し、foldService が畳む範囲を見出し走査で算出）。

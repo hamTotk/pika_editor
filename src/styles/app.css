@@ -342,10 +342,15 @@ body.window-maximized #resize-top {
 
 /* ツリーの右クリックメニュー（新規ファイル/新規フォルダ/削除＝T5）。menu-pop の見た目を流用しつつ、
    項目数が少ないので幅を内容なりに詰める（280px 固定だと広すぎる）。position:fixed で座標配置する
-   （main.ts が getBoundingClientRect でクランプしてから left/top を設定）。 */
+   （main.ts が getBoundingClientRect でクランプしてから left/top を設定）。
+   全タブ一覧（要件5.3・focusFirst 起動）はタブ多数で縦に伸びるため、max-height + overflow-y:auto で
+   画面外あふれをスクロール可能にする（末尾項目へキーボード focus() で自動スクロール到達できる）。
+   短いメニュー（右クリック）は max-height に届かないのでスクロールバーは出ず視覚回帰なし。 */
 .menu-pop.context-menu {
   width: auto;
   min-width: 188px;
+  max-height: 60vh;
+  overflow-y: auto;
 }
 
 /* 破壊的操作（削除）は警告色で弁別する（色＋ラベル「ごみ箱へ」の二重表示で色だけに依存しない）。 */
