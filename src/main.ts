@@ -230,7 +230,8 @@ function activeCanConfirm(): boolean {
 }
 
 function refreshTabs(): void {
-  renderTabs(state.tabs, state.active, activateTab, state.unread, closeTab);
+  // onClose は (path)=>void 型。closeTab は async（Promise を返す）なので void で包んで Promise を捨てる。
+  renderTabs(state.tabs, state.active, activateTab, state.unread, (p) => void closeTab(p));
   // アクティブタブが横スクロール域の外（新規に末尾へ追加された等）なら可視域へ寄せる（指摘2 補強）。
   // min-width:0（#editor-pane）で overflow-x が正しく効くようになった上で、切替/追加時に確実に見せる。
   scrollActiveTabIntoView();
@@ -736,6 +737,94 @@ function confirmModal(
     ok.addEventListener("click", () => close(true));
     overlay.addEventListener("pointerdown", (e) => {
       if (e.target === overlay) close(false);
+    });
+  });
+}
+
+/**
+ * テーマ準拠の自前三択モーダル（保存して切替／破棄して切替／キャンセル）。
+ *
+ * window.confirm はこの Tauri/WebView2 ビルドでダイアログを出さず即 true を返す（confirmModal 新設の
+ * 根拠・src/main.ts 671 行）。confirmModal は 2 択のためフォルダ切替の三択（保存/破棄/中止）を表現できず、
+ * window.confirm を 2 段にすると常に save へ倒れて無断でデータを失う。そこで三択を 1 枚のモーダルで明示する。
+ * 返り値は OK 系ボタンの選択（"save"|"discard"）／Esc・外側クリック・キャンセルは "cancel"。
+ *
+ * 作法は confirmModal/promptText を踏襲: prevFocus 退避と復帰・modalDepth 増減でグローバルショートカット抑止・
+ * keydown capture でフォーカストラップ（Tab 循環）・Esc=キャンセル・Enter=既定（保存して切替）・IME 合成ガード。
+ */
+function confirmDiscardModal(
+  message: string,
+): Promise<"save" | "discard" | "cancel"> {
+  return new Promise((resolve) => {
+    const prevFocus = document.activeElement as HTMLElement | null;
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    const box = document.createElement("div");
+    box.className = "modal-box";
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    const label = document.createElement("div");
+    label.className = "modal-label";
+    // 複数行メッセージ（\n）は <br> で改行表示する（confirmModal と同じ）。
+    message.split("\n").forEach((line, i) => {
+      if (i > 0) label.appendChild(document.createElement("br"));
+      label.appendChild(document.createTextNode(line));
+    });
+    const actions = document.createElement("div");
+    actions.className = "modal-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "modal-btn";
+    cancel.textContent = "キャンセル";
+    const discard = document.createElement("button");
+    discard.type = "button";
+    discard.className = "modal-btn danger-btn";
+    discard.textContent = "破棄して切替";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "modal-btn primary";
+    save.textContent = "保存して切替";
+    // 左から キャンセル／破棄して切替／保存して切替（既定の保存を右端に置く＝confirmModal の primary 位置と揃える）。
+    actions.append(cancel, discard, save);
+    box.append(label, actions);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    modalDepth += 1;
+    // 初期フォーカスは既定の「保存して切替」。
+    save.focus();
+    const focusables: HTMLElement[] = [cancel, discard, save];
+    const close = (value: "save" | "discard" | "cancel"): void => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey, true);
+      modalDepth = Math.max(0, modalDepth - 1);
+      prevFocus?.focus?.();
+      resolve(value);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      // IME 合成中（isComposing / keyCode 229）は素通しして誤確定を防ぐ（promptText と同じ）。
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        close("cancel");
+      } else if (e.key === "Enter") {
+        // Enter は既定の「保存して切替」（データを失わない側へ倒す）。
+        e.preventDefault();
+        e.stopPropagation();
+        close("save");
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        const idx = focusables.indexOf(document.activeElement as HTMLElement);
+        const dir = e.shiftKey ? -1 : 1;
+        focusables[(idx + dir + focusables.length) % focusables.length]?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    cancel.addEventListener("click", () => close("cancel"));
+    discard.addEventListener("click", () => close("discard"));
+    save.addEventListener("click", () => close("save"));
+    overlay.addEventListener("pointerdown", (e) => {
+      if (e.target === overlay) close("cancel");
     });
   });
 }
@@ -1327,25 +1416,18 @@ async function pickNativePath(opts: {
  * 未保存タブがある状態での破壊的操作（フォルダ切替）の三択確認（要件5.3・eval medium）。
  * 対象ファイル名を明示し、保存して切替/破棄して切替/キャンセル を選べる。
  *
- * vanilla TS のためネイティブ window.confirm を 2 段にして三択を表現する:
- * 1段目「保存してから切り替えますか？」OK=save / Cancel→2段目
- * 2段目「保存せず破棄して切り替えますか？」OK=discard / Cancel=cancel
+ * 確認は自前の三択モーダル（confirmDiscardModal）で出す。window.confirm はこの Tauri/WebView2 ビルドで
+ * ダイアログを出さず即 true を返すため、旧実装の「2 段にして三択」は常に save へ倒れて無断でデータを失っていた。
+ * 1 枚のモーダルに 保存して切替（既定）／破棄して切替（danger）／キャンセル を並べて明示確認する。
  */
 function confirmDiscardUnsaved(names: string[]): Promise<"save" | "discard" | "cancel"> {
   // 対象名を列挙（多すぎる場合は先頭数件＋残数）。
   const shown = names.slice(0, 5).join("、");
   const more = names.length > 5 ? ` ほか ${names.length - 5} 件` : "";
   const list = `${shown}${more}`;
-  const save = window.confirm(
-    `未保存の変更があります（${list}）。\n保存してからフォルダを切り替えますか？\n` +
-      `［OK］保存して切替 ／［キャンセル］次の選択へ`,
+  return confirmDiscardModal(
+    `未保存の変更があります（${list}）。\nフォルダを切り替える前にどうしますか？`,
   );
-  if (save) return Promise.resolve("save");
-  const discard = window.confirm(
-    `保存せずに破棄してフォルダを切り替えますか？（${list}）\n` +
-      `［OK］破棄して切替 ／［キャンセル］切替を中止`,
-  );
-  return Promise.resolve(discard ? "discard" : "cancel");
 }
 
 /**
@@ -1499,10 +1581,13 @@ async function reopenActiveWithEncoding(enc: DocEncoding): Promise<void> {
   const tab = state.tabs.find((t) => t.path === path);
   if (!tab) return;
   // dirty タブ保護: 未保存編集をバッファ差し替えで失う前に破棄確認する（最優先原則）。
+  // window.confirm はこの Tauri/WebView2 ビルドでダイアログを出さず即 true を返す（confirmModal 新設の
+  // 根拠・src/main.ts 671 行）。素通しで無断破棄しないよう自前モーダルで明示確認する。
   if (tab.dirty) {
-    const ok = window.confirm(
+    const ok = await confirmModal(
       `「${tab.title}」には未保存の変更があります。\n` +
         `${encodingLabel(enc, false)} で開き直すと、未保存の変更は破棄されます。続けますか？`,
+      { okLabel: "開き直す", danger: true },
     );
     if (!ok) return;
   }
@@ -2815,7 +2900,7 @@ async function onOpenFile(): Promise<void> {
 /** アクティブタブを閉じる（Ctrl+W・要件11.2）。任意パス版 closeTab へ委譲する。 */
 function onCloseActiveTab(): void {
   if (!state.active) return;
-  closeTab(state.active);
+  void closeTab(state.active);
 }
 
 /**
@@ -3020,18 +3105,22 @@ function applySaveAsResult(
  * 任意のタブを閉じる（Ctrl+W／タブの × クリック・要件11.2）。未保存があれば破棄確認を挟む
  * （データを失わない＝確認を必ず通す）。閉じたのがアクティブタブなら隣へアクティブを移す。
  */
-function closeTab(path: string): void {
+async function closeTab(path: string): Promise<void> {
   const tab = state.tabs.find((t) => t.path === path);
   if (!tab) return;
-  // タブを閉じるとエディタが作り直される/畳まれるので検索バーを閉じる（古いハイライトを残さない）。
-  searchController?.close();
+  // 破棄確認は検索バーを閉じる前に行う（キャンセル時に検索バーだけ閉じる副作用を避ける）。
+  // window.confirm はこの Tauri/WebView2 ビルドでダイアログを出さず即 true を返す（confirmModal 新設の
+  // 根拠・src/main.ts 671 行）。素通しで無断破棄しないよう自前モーダルで明示確認する。
   if (tab.dirty) {
     const name = tab.title;
-    const ok = window.confirm(
+    const ok = await confirmModal(
       `「${name}」に未保存の変更があります。保存せずに閉じると失われます。閉じますか？`,
+      { okLabel: "閉じる", danger: true },
     );
     if (!ok) return;
   }
+  // タブを閉じるとエディタが作り直される/畳まれるので検索バーを閉じる（古いハイライトを残さない）。
+  searchController?.close();
   const idx = state.tabs.findIndex((t) => t.path === path);
   const wasActive = state.active === path;
   state.tabs = state.tabs.filter((t) => t.path !== path);
