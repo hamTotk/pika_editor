@@ -123,6 +123,10 @@ struct WatcherInner {
     save_tokens: SaveTokenStore,
     /// オーバーフロー再同期/ポーリング/F5 が突き合わせるベースライン台帳。
     baseline: BTreeMap<String, BaselineEntry>,
+    /// ベースライン台帳の構築が完了したか（`watch_root` がワーカーで構築する間は false）。
+    /// 未完了の間は F5/ポーリング/オーバーフロー再同期を見送る（空台帳と突き合わせると
+    /// 全件 created の洪水になるため）。構築完了後にワーカーが true へ倒す。
+    baseline_ready: bool,
     /// 保持中の notify watcher（drop で監視停止）。
     _watcher: Option<RecommendedWatcher>,
     /// ポーリングフォールバック中か（監視不能 FS。ステータス表示用）。
@@ -142,6 +146,7 @@ impl WatcherService {
                 root: None,
                 save_tokens: SaveTokenStore::new(),
                 baseline: BTreeMap::new(),
+                baseline_ready: false,
                 _watcher: None,
                 polling: false,
                 excluded_dirs: default_excluded_dirs(),
@@ -169,13 +174,23 @@ impl WatcherService {
     ///
     /// notify の購読開始に失敗した場合（一部 FS）はポーリングフォールバックへ縮退する（要件7.1）。
     pub fn watch_root(&self, root: &Path) -> Result<(), String> {
-        let mut inner = self.inner.lock().map_err(|_| "watcher 状態ロック失敗")?;
-        inner.root = Some(root.to_path_buf());
-        // 設定済み除外（set_excluded_dirs 済み）を baseline 列挙へ渡す。ロック保持中だが
-        // enumerate_baseline は再ロックしない（clone した値を渡す＝デッドロックを作らない）。
-        let excluded = inner.excluded_dirs.clone();
-        inner.baseline = enumerate_baseline(root, &excluded);
+        // ベースライン（mtime/size 台帳）の構築はワーカースレッドへ逃がす（下の spawn_baseline_build）。
+        // 巨大ツリー（例: target/ 配下が数万ファイル）でも command スレッド/ロックを 200ms 超
+        // ブロックしない（設計原則2「固まらない」）。ここではロックを短く握って root を差し替え、
+        // 旧 baseline を捨てて「未構築」へ倒すだけにする。
+        let excluded = {
+            let mut inner = self.inner.lock().map_err(|_| "watcher 状態ロック失敗")?;
+            inner.root = Some(root.to_path_buf());
+            // 旧ルートの台帳は破棄し、構築完了まで「未準備」にする。未準備の間は
+            // F5/ポーリング/オーバーフロー再同期を空 baseline と突き合わせない（created 洪水を防ぐ）。
+            inner.baseline = BTreeMap::new();
+            inner.baseline_ready = false;
+            inner.excluded_dirs.clone()
+        };
 
+        // notify watcher は同期で張る（baseline 構築を待たずにイベント取りこぼしを防ぐ）。
+        // 通常の notify 経路（handle_notify_event→drain_and_emit）は baseline 有無に依存せず、
+        // 自己保存抑制は save_tokens で行うため、構築中の外部変更も正しく検知・emit される。
         let (tx, rx) = channel();
         let watch_result =
             notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
@@ -188,26 +203,53 @@ impl WatcherService {
 
         match watch_result {
             Ok(w) => {
+                // ロック毒化時も watcher を取り落とさない（into_inner で回復・他箇所と同作法）。
+                let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 inner._watcher = Some(w);
                 inner.polling = false;
                 drop(inner);
                 self.spawn_event_loop(rx);
-                Ok(())
             }
             Err(e) => {
                 // 監視不能 FS はポーリングへ縮退（機能を落とさない・要件7.1/12.1）。
+                let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 inner._watcher = None;
                 inner.polling = true;
-                let root = root.to_path_buf();
                 drop(inner);
-                self.spawn_polling_loop(root);
+                self.spawn_polling_loop(root.to_path_buf());
                 let _ = self.app.emit(
                     "watch-mode",
                     format!("監視不能のためポーリング（5秒間隔）に切替: {e}"),
                 );
-                Ok(())
             }
         }
+
+        // ベースラインをバックグラウンドで構築（重い再帰列挙を UI スレッド/ロックから分離）。
+        self.spawn_baseline_build(root.to_path_buf(), excluded);
+        Ok(())
+    }
+
+    /// ベースライン台帳（mtime/size）をワーカースレッドで構築する。
+    ///
+    /// 巨大ツリーの再帰列挙を command スレッド/ロック外で行い「固まらない」を満たす。
+    /// 構築完了までに `register_self_save` や notify 経路（`drain_and_emit`）が差し込んだ
+    /// 最新エントリは `or_insert` で温存する（バックグラウンド結果で上書きしない）。
+    /// 構築中に別フォルダを開き直した（root 差し替え）場合は結果を破棄する。
+    fn spawn_baseline_build(&self, root: PathBuf, excluded: Vec<String>) {
+        let inner = Arc::clone(&self.inner);
+        thread::spawn(move || {
+            // enumerate_baseline は mtime/size のみ採取（内容ハッシュは取らない）＝ファイルを読まない。
+            let built = enumerate_baseline(&root, &excluded);
+            let mut g = inner.lock().unwrap_or_else(|e| e.into_inner());
+            // 構築中に別フォルダを開き直していたら破棄（古いルートの台帳で上書きしない）。
+            if g.root.as_deref() != Some(root.as_path()) {
+                return;
+            }
+            for (path, entry) in built {
+                g.baseline.entry(path).or_insert(entry);
+            }
+            g.baseline_ready = true;
+        });
     }
 
     /// 保存直前に自己保存トークンを登録する（保存後ハッシュ＋時刻）。
@@ -235,6 +277,10 @@ impl WatcherService {
         let Some(root) = inner.root.clone() else {
             return Ok(0);
         };
+        if !inner.baseline_ready {
+            // ベースライン構築中は再同期しない（空台帳と突き合わせると全件 created になる）。
+            return Ok(0);
+        }
         let excluded = inner.excluded_dirs.clone();
         let _ = self.app.emit("watch-mode", "再同期中...".to_string());
         let current = enumerate_fingerprints(&root, &excluded);
@@ -308,15 +354,20 @@ impl WatcherService {
             thread::sleep(POLL_INTERVAL);
             // ルートが切替/停止されたら終了。除外リストも同じロックで読む（enumerate はロック外なので
             // ここで clone し、列挙時に再ロックしない＝デッドロックを作らない・設定変更にも追従する）。
-            let (still_root, excluded) = match inner.lock() {
+            let (still_root, ready, excluded) = match inner.lock() {
                 Ok(g) => (
                     g.root.as_ref().map(|r| r == &root).unwrap_or(false),
+                    g.baseline_ready,
                     g.excluded_dirs.clone(),
                 ),
-                Err(_) => (false, default_excluded_dirs()),
+                Err(_) => (false, false, default_excluded_dirs()),
             };
             if !still_root {
                 break;
+            }
+            if !ready {
+                // ベースライン構築中はこのティックを見送る（空台帳との突き合わせを避ける）。
+                continue;
             }
             // enumerate はロック外（重い I/O）。比較と baseline 前進は同一ロック内で行う（#14）。
             let current = enumerate_fingerprints(&root, &excluded);
@@ -503,11 +554,15 @@ fn advance_baseline(
 /// オーバーフロー検知時の全再列挙＋再同期（要件7.4・design doc 166行）。
 fn do_overflow_resync(inner: &Arc<Mutex<WatcherInner>>, app: &AppHandle) {
     // root と除外リストを同じ短いロックで読む（enumerate はロック外なので clone して渡す）。
-    let (root, excluded) = match inner.lock() {
-        Ok(g) => (g.root.clone(), g.excluded_dirs.clone()),
+    let (root, ready, excluded) = match inner.lock() {
+        Ok(g) => (g.root.clone(), g.baseline_ready, g.excluded_dirs.clone()),
         Err(_) => return,
     };
     let Some(root) = root else { return };
+    if !ready {
+        // ベースライン構築中はオーバーフロー再同期を見送る（構築完了後に通常検知へ戻る）。
+        return;
+    }
     let _ = app.emit("watch-mode", "オーバーフロー再同期中...".to_string());
     // enumerate はロック外。比較と baseline 前進は再ロックして同一ロック内で行う（#14）。
     let current = enumerate_fingerprints(&root, &excluded);
@@ -547,20 +602,22 @@ fn is_excluded(path: &Path, excluded: &[String]) -> bool {
     })
 }
 
-/// 監視ルート直下を再帰列挙してベースライン台帳を作る（初回オープン＝全既読スタート。要件8.1）。
+/// 監視ルート配下を再帰列挙してベースライン台帳を作る（初回オープン＝全既読スタート。要件8.1）。
+///
+/// 性能（設計原則2「固まらない」/3「軽い」）: ここでは **mtime/size のみ** を採取し、内容ハッシュは
+/// 取らない（＝開く瞬間に全ファイルを読まない）。空 `content_hash` は `drain_and_emit`/`advance_baseline`
+/// が入れるエントリと同じ扱いで、resync のプレスクリーン（mtime+size 一致→未変更で短絡）が機能する。
+/// 内容ハッシュが要るのは「mtime/size が変わったのに内容が同じ」を抑制する場面だけで、その照合は
+/// 変更検知時に当該ファイル 1 件だけ `hash_file` で行う（`handle_notify_event`）。
 fn enumerate_baseline(root: &Path, excluded: &[String]) -> BTreeMap<String, BaselineEntry> {
     let mut map = BTreeMap::new();
     for (path, fp) in walk(root, excluded) {
-        let hash = fp
-            .content_hash
-            .clone()
-            .unwrap_or_else(|| hash_file(&PathBuf::from(&path)).unwrap_or_default());
         map.insert(
             path,
             BaselineEntry {
                 mtime_ms: fp.mtime_ms,
                 size: fp.size,
-                content_hash: hash,
+                content_hash: fp.content_hash.unwrap_or_default(),
             },
         );
     }
