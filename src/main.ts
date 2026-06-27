@@ -722,9 +722,11 @@ function confirmModal(
         e.stopPropagation();
         close(false);
       } else if (e.key === "Enter") {
+        // Enter はフォーカス中のボタンを尊重する。キャンセルにフォーカスがあればキャンセル、
+        // それ以外（OK／フォーカス外の異常時）は既定の OK へ倒す（データ保全側＝確認を必ず通す）。
         e.preventDefault();
         e.stopPropagation();
-        close(true);
+        close(document.activeElement !== cancel);
       } else if (e.key === "Tab") {
         e.preventDefault();
         const idx = focusables.indexOf(document.activeElement as HTMLElement);
@@ -808,10 +810,18 @@ function confirmDiscardModal(
         e.stopPropagation();
         close("cancel");
       } else if (e.key === "Enter") {
-        // Enter は既定の「保存して切替」（データを失わない側へ倒す）。
+        // Enter はフォーカス中のボタンを尊重する。キャンセル／破棄にフォーカスがあればそれを選び、
+        // それ以外（保存／フォーカス外の異常時）は既定の「保存して切替」（データを失わない側）へ倒す。
         e.preventDefault();
         e.stopPropagation();
-        close("save");
+        const focused = document.activeElement;
+        close(
+          focused === cancel
+            ? "cancel"
+            : focused === discard
+              ? "discard"
+              : "save",
+        );
       } else if (e.key === "Tab") {
         e.preventDefault();
         const idx = focusables.indexOf(document.activeElement as HTMLElement);
