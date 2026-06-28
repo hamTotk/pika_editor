@@ -44,3 +44,35 @@ pub fn now_ms() -> u64 {
     NOW_MS_FLOOR.fetch_max(value, Ordering::Relaxed);
     value
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn now_ms_は単調非減少() {
+        // 退避 created_at・監視の時間窓判定がクロック後退で 0 化/逆行しないこと（#16）。
+        // 並行実行で他テストがフロアを前進させても「返り値 ≧ フロア」は壊れないので連続呼出は単調。
+        let mut prev = now_ms();
+        for _ in 0..1000 {
+            let cur = now_ms();
+            assert!(cur >= prev, "now_ms が後退した: {prev} -> {cur}");
+            prev = cur;
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn to_wide_はnul終端付きutf16を返す() {
+        // CreateFileW/MoveFileExW 等が要求する NUL 終端ワイド文字列を必ず返す。
+        let w = to_wide("ab");
+        assert_eq!(w, vec![0x61u16, 0x62, 0x00]);
+        assert_eq!(*w.last().unwrap(), 0, "末尾は NUL 終端");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn to_wide_空文字でもnul終端のみ返す() {
+        assert_eq!(to_wide(""), vec![0u16]);
+    }
+}
