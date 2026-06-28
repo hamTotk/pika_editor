@@ -17,6 +17,7 @@ import {
   onFsChanged,
   onWatchMode,
   onOpenRequest,
+  takeStartupOpenRequest,
   restoreAppState,
   saveAppState,
   hashContent,
@@ -3392,6 +3393,15 @@ async function main(): Promise<void> {
   });
   // 起動時に state.json を復元（version 安全側・復元3分岐は backend が判定）。
   await restoreOnStartup();
+  // 初回起動の引数オープン（要件3.2/3.4・Part 1）: pika 未起動でファイルをダブルクリックした初回プロセスは
+  // 自分がサーバーで open-request イベントを受けない。起動引数を pull して開く（前回状態の復元の**後**に開く＝
+  // 同じフォルダならタブを維持したまま指定ファイルを開く・要件3.2）。onOpenRequestEvent を転送経路と共用する。
+  try {
+    const startup = await takeStartupOpenRequest();
+    if (startup) await onOpenRequestEvent(startup);
+  } catch {
+    // dev ブラウザ単体や command 不在時は無視（起動を妨げない）。
+  }
   // Empty 3分岐の「フォルダ未オープン（no-folder）」文言（ui-design 15章）。
   if (!state.folder) setStatus(emptyMessage("no-folder"));
 }

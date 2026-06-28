@@ -49,6 +49,89 @@ impl From<OpenRequest> for OpenRequestPayload {
     }
 }
 
+/// 初回起動（サーバー役）で受け取った起動引数のオープン要求を保持する managed state（Part 1・要件3.2/3.4）。
+///
+/// 後発プロセス（クライアント）は named pipe 転送→`emit('open-request')` で開くが、**最初の**プロセスは
+/// 自分がサーバーなのでそのイベントを受けない（pika 未起動でファイルをダブルクリックした初回がこれ）。
+/// そこで起動引数から組んだ payload をここへ載せ、フロントが前回状態を復元した後に
+/// [`crate::commands::take_startup_open_request`] で **1 回だけ** 引いて開く（race-free な pull モデル）。
+pub struct StartupOpenRequest(pub std::sync::Mutex<Option<OpenRequestPayload>>);
+
+/// 起動引数（`std::env::args().skip(1)`）から初回オープン要求の payload を組み立てる（Part 1）。
+///
+/// 転送パスと**同じ信頼境界**を再利用する純粋ロジック（OS 呼び出しなし＝全プラットフォームで成立）。
+/// [`build_forward_json`] で転送 JSON を組み（split→絶対化→version 付与）、`parse_incoming_message` で
+/// 受信側と同一の再検証（受理操作=パスオープン限定・ADS/相対/制御文字の排除）を通してから、
+/// 検証済み `OpenRequest` を [`OpenRequestPayload`] へ変換する。
+///
+/// 引数が無い・有効なパスが無い・検証に通らない場合は `None`（＝起動時に開くものは無い）。
+pub fn build_startup_open_request(args: &[String]) -> Option<OpenRequestPayload> {
+    if args.is_empty() {
+        return None;
+    }
+    let json = build_forward_json(args)?;
+    let req = pika_core::ipc::parse_incoming_message(json.as_bytes()).ok()?;
+    // 初回起動でフォーカスすべき自ウィンドウは無いので、開く対象が無い（相対のみで全部落ちた等）なら
+    // None を返す（転送経路と違い、空 payload を渡しても意味がない）。
+    if req.paths.is_empty() {
+        return None;
+    }
+    Some(req.into())
+}
+
+/// 起動引数を転送用 JSON（version 付き）に組み立てる純粋ロジック（転送経路と初回起動経路で共用）。
+///
+/// 1. `-g <file>:<行>[:<桁>]` を [`split_forward_args`] で (paths, goto) に分解。
+/// 2. 各パスを cwd 基準で絶対化する（`pika_core::cli::normalize_to_absolute`）。受信側（サーバー）は
+///    相対パスを拒否するため、ここで絶対化しないと相対指定が無言で開かれない。転送経路でも同じ前処理を
+///    通すことで「pika 起動中／未起動」で相対パスの扱いが食い違わないよう対称化する。
+/// 3. `build_forward_message` で version 付き JSON を組む（スキーマ/version/パス検証は受信側が担う）。
+///
+/// 注意: パスが空でも `Some(空 paths の JSON)` を返す。転送経路では引数なし再起動でも空メッセージを
+/// 送ってサーバー側の既存ウィンドウ前面化（`bring_to_front`）を保つため。空時に開く/開かないの判断は
+/// 各呼び出し側が行う（初回起動経路は [`build_startup_open_request`] で空 paths を None に倒す）。
+/// JSON 組立自体に失敗したときのみ `None`。
+fn build_forward_json(args: &[String]) -> Option<String> {
+    let (paths, goto) = split_forward_args(args);
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let abs_paths: Vec<String> = paths
+        .iter()
+        .filter_map(|p| pika_core::cli::normalize_to_absolute(p, &cwd).ok())
+        .collect();
+    pika_core::ipc::build_forward_message(&abs_paths, goto).ok()
+}
+
+/// 転送引数列を `OpenRequest` 用の (paths, goto) に分解する（転送経路と初回起動経路で共用）。
+///
+/// `-g <abs>:<行>[:<桁>]` は core の `parse_goto_spec` で位置を剥がす。それ以外はパスとして積む。
+fn split_forward_args(args: &[String]) -> (Vec<String>, Option<pika_core::ipc::GotoPosition>) {
+    let mut paths = Vec::new();
+    let mut goto = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "-g" {
+            if let Some(spec) = args.get(i + 1) {
+                if let Ok(t) = pika_core::cli::parse_goto_spec(spec) {
+                    paths.push(t.file);
+                    if let Some(line) = t.line {
+                        goto = Some(pika_core::ipc::GotoPosition {
+                            line,
+                            column: t.column,
+                        });
+                    }
+                }
+            }
+            i += 2;
+            continue;
+        }
+        paths.push(args[i].clone());
+        i += 1;
+    }
+    (paths, goto)
+}
+
 /// 起動初期に単一インスタンスのロックを取得し役割を決める。
 ///
 /// サーバー（最初のインスタンス）なら `InstanceRole::Server` を返しリスナースレッドを起動する。
@@ -71,8 +154,7 @@ pub fn acquire_or_forward(app: &AppHandle, forward_args: &[String]) -> InstanceR
 mod windows_impl {
     use super::OpenRequestPayload;
     use pika_core::ipc::{
-        build_forward_message, build_pipe_name, decide_role, parse_incoming_message, InstanceRole,
-        MAX_MESSAGE_BYTES,
+        build_pipe_name, decide_role, parse_incoming_message, InstanceRole, MAX_MESSAGE_BYTES,
     };
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
@@ -237,11 +319,11 @@ mod windows_impl {
 
     /// 既存サーバーのパイプへ接続し、絶対パス正規化済み引数を JSON 転送する。
     fn forward_to_server(pipe_name: &str, forward_args: &[String]) {
-        // 転送 JSON は core が組み立てる（version 付与・空要素除去）。-g はここで分解する。
-        let (paths, goto) = split_forward_args(forward_args);
-        let json = match build_forward_message(&paths, goto) {
-            Ok(j) => j,
-            Err(_) => return,
+        // 転送 JSON の組立（-g 分解→cwd 基準で絶対化→version 付与）は初回起動経路と共用する
+        // モジュールレベルの build_forward_json に集約した（重複排除・相対パス扱いの対称化）。
+        let json = match super::build_forward_json(forward_args) {
+            Some(j) => j,
+            None => return,
         };
         let name_w = to_wide(pipe_name);
         // SAFETY: name_w は NUL 終端。
@@ -281,34 +363,6 @@ mod windows_impl {
             );
             CloseHandle(handle);
         }
-    }
-
-    /// 転送引数列を `OpenRequest` 用の (paths, goto) に分解する。
-    /// `-g <abs>:<行>[:<桁>]` は core の parse_goto_spec で位置を剥がす。
-    fn split_forward_args(args: &[String]) -> (Vec<String>, Option<pika_core::ipc::GotoPosition>) {
-        let mut paths = Vec::new();
-        let mut goto = None;
-        let mut i = 0;
-        while i < args.len() {
-            if args[i] == "-g" {
-                if let Some(spec) = args.get(i + 1) {
-                    if let Ok(t) = pika_core::cli::parse_goto_spec(spec) {
-                        paths.push(t.file);
-                        if let Some(line) = t.line {
-                            goto = Some(pika_core::ipc::GotoPosition {
-                                line,
-                                column: t.column,
-                            });
-                        }
-                    }
-                }
-                i += 2;
-                continue;
-            }
-            paths.push(args[i].clone());
-            i += 1;
-        }
-        (paths, goto)
     }
 
     /// 次接続用にパイプの追加インスタンスを生成する（FIRST_PIPE_INSTANCE は付けない）。
