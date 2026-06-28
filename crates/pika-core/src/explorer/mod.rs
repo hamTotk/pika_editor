@@ -124,6 +124,24 @@ pub fn unregistration() -> (Vec<String>, Vec<(String, String)>) {
     (trees, values)
 }
 
+/// 値削除（[`unregistration`] の `.1`）の後に「**空のときだけ**消す」候補キーを子→親順で返す。
+///
+/// register は新規プロファイルで `Software\Classes\<ext>\OpenWithProgids`（と途中の `<ext>` キー）を
+/// 自分で作りうる。値だけ消すと空キーが残り「残骸ゼロ」に反するため、これらを後始末する。ただし
+/// **他アプリの値やサブキーが残るキーは消さない**判断が要るので、ここでは候補キーを列挙するだけにし、
+/// 実際の「空判定→削除」は OS 側ラッパ（`pika-cli` の `win::delete_key_if_empty`）が担う（design doc 3章）。
+///
+/// 順序が肝心: 各拡張子で `OpenWithProgids`（子）を先に、`<ext>` 本体（親）を後に置く。子が消えてから
+/// 親の空判定が成立する（親は子を持つ間は「空でない」と判定され温存される）。
+pub fn empty_delete_candidates() -> Vec<String> {
+    let mut keys = Vec::with_capacity(ASSOC_EXTENSIONS.len() * 2);
+    for ext in ASSOC_EXTENSIONS {
+        keys.push(open_with_progids_key(ext)); // 子（先に空判定・削除）
+        keys.push(format!("Software\\Classes\\{ext}")); // 親（子が消えてから判定）
+    }
+    keys
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +233,26 @@ mod tests {
                     .iter()
                     .any(|t| t == &format!("Software\\Classes\\{ext}") || t == &owp),
                 "{ext} を丸ごと削除している（候補登録の解除は値削除のみのはず）"
+            );
+        }
+    }
+
+    #[test]
+    fn 空キー掃除候補は各拡張子で子owpを親extより先に置く() {
+        let cands = empty_delete_candidates();
+        // 各拡張子につき OpenWithProgids（子）と <ext> 本体（親）の 2 つ。
+        assert_eq!(cands.len(), ASSOC_EXTENSIONS.len() * 2);
+        for ext in ASSOC_EXTENSIONS {
+            let owp = open_with_progids_key(ext);
+            let ext_key = format!("Software\\Classes\\{ext}");
+            let owp_at = cands.iter().position(|k| k == &owp);
+            let ext_at = cands.iter().position(|k| k == &ext_key);
+            assert!(owp_at.is_some(), "{ext} の OpenWithProgids 掃除候補が無い");
+            assert!(ext_at.is_some(), "{ext} 本体の掃除候補が無い");
+            // 親（<ext>）は子（OpenWithProgids）より後ろ＝子を消してから親の空判定が成立する。
+            assert!(
+                owp_at.unwrap() < ext_at.unwrap(),
+                "{ext}: OpenWithProgids（子）を <ext>（親）より先に掃除していない"
             );
         }
     }

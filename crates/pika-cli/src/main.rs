@@ -195,6 +195,10 @@ fn register_shell() -> ExitCode {
     for e in &entries {
         if let Err(msg) = win::write_reg_sz(&e.key, &e.name, &e.data) {
             eprintln!("エラー: レジストリ書込に失敗しました（{}）: {msg}", e.key);
+            // 途中失敗だと一部キーだけ書かれた状態になりうる。掃除してから再実行するよう案内する。
+            eprintln!(
+                "  `--unregister-shell` で書き込み済みの分を掃除してから再実行してください。"
+            );
             return ExitCode::from(EXIT_REGISTRY_FAILURE);
         }
     }
@@ -226,8 +230,16 @@ fn unregister_shell() -> ExitCode {
             return ExitCode::from(EXIT_REGISTRY_FAILURE);
         }
     }
+    // 値削除で空になった候補（register が作りうる <ext>\OpenWithProgids・<ext>）を後始末する。
+    // 子（OpenWithProgids）→親（<ext>）の順で、値もサブキーも無いものだけ消す（他アプリは温存）。
+    for key in pika_core::explorer::empty_delete_candidates() {
+        if let Err(msg) = win::delete_key_if_empty(&key) {
+            eprintln!("エラー: 空キーの掃除に失敗しました（{key}）: {msg}");
+            return ExitCode::from(EXIT_REGISTRY_FAILURE);
+        }
+    }
     win::notify_assoc_changed();
-    println!("エクスプローラー統合を解除しました（候補・右クリックを削除）。");
+    println!("エクスプローラー統合を解除しました（候補・右クリック・残った空キーを掃除）。");
     ExitCode::SUCCESS
 }
 
@@ -250,10 +262,13 @@ fn unregister_shell() -> ExitCode {
 mod win {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
-    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+    use windows_sys::Win32::Foundation::{
+        ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS,
+    };
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW, RegSetValueExW, HKEY,
-        HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+        RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteKeyW, RegDeleteTreeW,
+        RegOpenKeyExW, RegQueryInfoKeyW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+        KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
     };
     use windows_sys::Win32::UI::Shell::{SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST};
 
@@ -263,6 +278,14 @@ mod win {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect()
+    }
+
+    /// 「既に無い」を表す戻りコードか（削除系を冪等にする）。
+    ///
+    /// 対象キー自身が無いと `ERROR_FILE_NOT_FOUND`、中間の親キーが無いと `ERROR_PATH_NOT_FOUND` が
+    /// 返りうる。未登録マシンでの `--unregister-shell` を失敗扱いにしないため、両方を成功とみなす。
+    fn is_already_absent(rc: u32) -> bool {
+        rc == ERROR_FILE_NOT_FOUND || rc == ERROR_PATH_NOT_FOUND
     }
 
     /// `HKCU\<key>` の値 `name`（""=既定値）へ `REG_SZ` の `data` を書く（キーが無ければ作る）。
@@ -316,7 +339,7 @@ mod win {
         let key_w = to_wide(key);
         // SAFETY: key_w は NUL 終端。HKCU 配下のみを対象にする（root を消さない）。
         let rc = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key_w.as_ptr()) };
-        if rc == ERROR_SUCCESS || rc == ERROR_FILE_NOT_FOUND {
+        if rc == ERROR_SUCCESS || is_already_absent(rc) {
             Ok(())
         } else {
             Err(format!("キー削除に失敗（コード {rc}）"))
@@ -329,10 +352,66 @@ mod win {
         let name_w = to_wide(name);
         // SAFETY: key_w / name_w は NUL 終端。キーを開いて値を消し閉じるまでを 1 呼び出しで行う。
         let rc = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key_w.as_ptr(), name_w.as_ptr()) };
-        if rc == ERROR_SUCCESS || rc == ERROR_FILE_NOT_FOUND {
+        if rc == ERROR_SUCCESS || is_already_absent(rc) {
             Ok(())
         } else {
             Err(format!("値削除に失敗（コード {rc}）"))
+        }
+    }
+
+    /// `HKCU\<key>` を **値もサブキーも無い空のときだけ** 削除する（残骸掃除・他アプリ温存）。
+    ///
+    /// register が新規プロファイルで作りうる `<ext>\OpenWithProgids`・`<ext>` の空キーを後始末する。
+    /// 他アプリの値やサブキーが残るキー（例えば既定アプリを持つ `.html`）は空判定で弾いて温存する。
+    /// キーが既に無い場合も成功扱い（冪等）。
+    pub fn delete_key_if_empty(key: &str) -> Result<(), String> {
+        let key_w = to_wide(key);
+        let mut hkey: HKEY = ptr::null_mut();
+        // SAFETY: key_w は NUL 終端。空判定のため読み取り専用で開く。
+        let rc =
+            unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, key_w.as_ptr(), 0, KEY_READ, &mut hkey) };
+        if is_already_absent(rc) {
+            return Ok(()); // 既に無い。
+        }
+        if rc != ERROR_SUCCESS {
+            return Err(format!("空判定のオープンに失敗（コード {rc}）"));
+        }
+        let mut subkeys: u32 = 0;
+        let mut values: u32 = 0;
+        // SAFETY: hkey は有効。サブキー数・値数だけを受け、他の出力は不要なので null。
+        let info = unsafe {
+            RegQueryInfoKeyW(
+                hkey,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null(),
+                &mut subkeys,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut values,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        // SAFETY: hkey は RegOpenKeyExW が返した有効なハンドル。
+        unsafe {
+            RegCloseKey(hkey);
+        }
+        if info != ERROR_SUCCESS {
+            return Err(format!("キー情報の取得に失敗（コード {info}）"));
+        }
+        // 既定値含む値が 1 つでも、サブキーが 1 つでも残るなら他アプリ等が使用中。触らない。
+        if subkeys != 0 || values != 0 {
+            return Ok(());
+        }
+        // SAFETY: key_w は NUL 終端。RegDeleteKeyW は空（サブキー無し）のキーのみ確実に消す。
+        let rc = unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, key_w.as_ptr()) };
+        if rc == ERROR_SUCCESS || is_already_absent(rc) {
+            Ok(())
+        } else {
+            Err(format!("空キー削除に失敗（コード {rc}）"))
         }
     }
 
