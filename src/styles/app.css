@@ -20,6 +20,14 @@ body {
   font-size: 14px;
 }
 
+/* 文章選択の配色（pika 独自トークン・tokens.css が単一源）。シェル全体の選択を半透明の青にし、
+   文字色は地のテキスト色を維持＝ダークでも白潰れしない。エディタ内は drawSelection の
+   .cm-selectionBackground が担い（editor/index.ts）、プレビュー別WebView は render の BASE_CSS が担う。 */
+::selection {
+  background: var(--selection-bg);
+  color: var(--selection-fg);
+}
+
 #app {
   display: grid;
   grid-template-rows: auto 1fr;
