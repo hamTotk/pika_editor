@@ -27,4 +27,8 @@ windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_System_Registry",
   "Win32_UI_Shell",
+  # RegCreateKeyExW は lpSecurityAttributes（SECURITY_ATTRIBUTES）を取るため Win32_Security 配下。
+  # これが無いと単体ビルド（cargo build -p pika-cli）が E0432 で落ちる（workspace 全体ビルドは
+  # src-tauri との feature 統合で偶然通るだけ＝隠れた取りこぼし）。
+  "Win32_Security",
 ] }
