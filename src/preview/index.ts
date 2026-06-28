@@ -13,7 +13,7 @@
 
 import {
   preparePreview,
-  type HtmlHazards,
+  type PreparedPreview,
   type PreviewMode,
   type PreviewTheme,
   type ViewMode,
@@ -95,19 +95,12 @@ export function resolvePreviewTheme(
   };
 }
 
-/** プレビュー準備の結果（別WebView へ流すための情報）。 */
-export interface PreviewReady {
-  /** 別WebView へナビゲートする URL（pika-preview:// 経由）。 */
-  url: string;
-  /** 占有世代（backend 側の世代。古ければ破棄）。 */
-  generation: number;
-  /** 系統A の信頼 JS 注入に使う nonce（系統B では空）。 */
-  nonce: string;
-  /** 系統（"markdown" | "html"）。 */
-  flavor: string;
-  /** 系統B の危険検知（要件6.3・通知バー導線）。系統A は全 false。 */
-  hazards: HtmlHazards;
-}
+/**
+ * プレビュー準備の結果（別WebView へ流すための情報）。
+ * backend の prepare_preview 戻り（`PreparedPreview`）と構造同一なので別定義を持たず再エクスポートで一元化する
+ * （url / generation / nonce / flavor / hazards）。
+ */
+export type PreviewReady = PreparedPreview;
 
 /**
  * プレビューを準備して別WebView へ流す URL を得る（要件6・design doc 6章）。
@@ -126,14 +119,8 @@ export async function buildPreview(
   opts: { allowExternal?: string[]; theme?: PreviewTheme } = {},
 ): Promise<PreviewReady> {
   const mode = previewModeForPath(path);
-  const prepared = await preparePreview(path, mode, content, opts.allowExternal, opts.theme);
-  return {
-    url: prepared.url,
-    generation: prepared.generation,
-    nonce: prepared.nonce,
-    flavor: prepared.flavor,
-    hazards: prepared.hazards,
-  };
+  // PreparedPreview と PreviewReady は構造同一のためフィールド写しをやめてそのまま返す（URL のみ・HTML 本体は非経由）。
+  return preparePreview(path, mode, content, opts.allowExternal, opts.theme);
 }
 
 // 信頼 JS（Mermaid/KaTeX/highlight.js）の初期化スクリプトの**実行時の正本は Rust 側**

@@ -661,39 +661,65 @@ const baseExtensions: Extension[] = [
 ];
 
 /**
- * 指定ホスト要素に CM6 を生成する。
- * @param parent エディタを描画する DOM 要素
- * @param initialDoc 初期内容
- * @param onChange 編集（dirty 化）通知。保存ボタンの活性に使う
- * @param onCursorChange カーソル/選択/内容の変化通知。右下ステータスの追従更新に使う（要件11.1）。
- *   selectionSet（カーソル移動・選択）または docChanged（編集）のたびに発火する。
- * @param lineWrapping 初期の折り返し ON/OFF（表示メニューのトグルが保持する現在値・既定 ON）。
- *   既定 ON で短文ファイルの不要な横スクロールバーを避ける（ui-design §120）。
- *   タブ切替でエディタを作り直しても現在の折り返し設定を引き継ぐために初期値で渡す。
- * @param tabWidth タブの**表示幅**（EditorState.tabSize・settings.toml の tab_width・既定 4）。
- *   挿入文字（タブ文字）には影響せず、Tab 文字を画面上で何桁ぶんに見せるかだけを決める（要件5.2）。
- *   lineWrapping と同じく、タブ切替でエディタを作り直しても現在値を初期値で引き継ぐ。
- * @param heavy 重い装飾（構文ハイライト/対応括弧/同一語強調/行末空白可視化）を有効にするか（既定 ON）。
- *   backend の degrade（highlight_off/editing_off＝10万字/行の巨大ファイル・要件2.2）が立つときは false を
- *   渡し、heavyDecoCompartment を空に初期化して重い装飾を外す（長行の編集応答 200ms 予算・固まらない）。
- * @param onScroll エディタのスクロール変化通知（エディタ→プレビュー片方向スクロール同期・S4・要件6.1 改訂）。
- *   `.cm-scroller` の native scroll を passive で拾うだけで、ハンドラ側がスロットルと発火条件
- *   （Markdown プレビュー可視かつ差分OFF）を判断する（このモジュールは判断を持たない）。未指定なら配線しない。
- * @param filePath 開いているファイルのパス（言語選択用・要件5.1）。拡張子で markdown / HTML を切替える
- *   （languageForPath）。null/未指定（タブ無しの空エディタ等）は Markdown を既定にする。
- *   言語はタブ単位で固定のため Compartment は使わず生成時に確定する（タブ切替＝エディタ再生成）。
+ * createEditor のオプション（旧 9 位置引数を options object 化・S7。意味・既定値は旧引数と同一）。
  */
-export function createEditor(
-  parent: HTMLElement,
-  initialDoc: string,
-  onChange: () => void,
-  onCursorChange?: () => void,
-  lineWrapping = true,
-  tabWidth = 4,
-  heavy = true,
-  onScroll?: () => void,
-  filePath: string | null = null,
-): EditorHandle {
+export interface CreateEditorOptions {
+  /** エディタを描画する DOM 要素。 */
+  parent: HTMLElement;
+  /** 初期内容。 */
+  initialDoc: string;
+  /** 編集（dirty 化）通知。保存ボタンの活性に使う。 */
+  onChange: () => void;
+  /**
+   * カーソル/選択/内容の変化通知。右下ステータスの追従更新に使う（要件11.1）。
+   * selectionSet（カーソル移動・選択）または docChanged（編集）のたびに発火する。
+   */
+  onCursorChange?: () => void;
+  /**
+   * 初期の折り返し ON/OFF（表示メニューのトグルが保持する現在値・既定 ON）。
+   * 既定 ON で短文ファイルの不要な横スクロールバーを避ける（ui-design §120）。
+   * タブ切替でエディタを作り直しても現在の折り返し設定を引き継ぐために初期値で渡す。
+   */
+  lineWrapping?: boolean;
+  /**
+   * タブの**表示幅**（EditorState.tabSize・settings.toml の tab_width・既定 4）。
+   * 挿入文字（タブ文字）には影響せず、Tab 文字を画面上で何桁ぶんに見せるかだけを決める（要件5.2）。
+   * lineWrapping と同じく、タブ切替でエディタを作り直しても現在値を初期値で引き継ぐ。
+   */
+  tabWidth?: number;
+  /**
+   * 重い装飾（構文ハイライト/対応括弧/同一語強調/行末空白可視化）を有効にするか（既定 ON）。
+   * backend の degrade（highlight_off/editing_off＝10万字/行の巨大ファイル・要件2.2）が立つときは false を
+   * 渡し、heavyDecoCompartment を空に初期化して重い装飾を外す（長行の編集応答 200ms 予算・固まらない）。
+   */
+  heavy?: boolean;
+  /**
+   * エディタのスクロール変化通知（エディタ→プレビュー片方向スクロール同期・S4・要件6.1 改訂）。
+   * `.cm-scroller` の native scroll を passive で拾うだけで、ハンドラ側がスロットルと発火条件
+   * （Markdown プレビュー可視かつ差分OFF）を判断する（このモジュールは判断を持たない）。未指定なら配線しない。
+   */
+  onScroll?: () => void;
+  /**
+   * 開いているファイルのパス（言語選択用・要件5.1）。拡張子で markdown / HTML を切替える
+   * （languageForPath）。null/未指定（タブ無しの空エディタ等）は Markdown を既定にする。
+   * 言語はタブ単位で固定のため Compartment は使わず生成時に確定する（タブ切替＝エディタ再生成）。
+   */
+  filePath?: string | null;
+}
+
+/** 指定ホスト要素に CM6 を生成する（options は CreateEditorOptions）。 */
+export function createEditor(opts: CreateEditorOptions): EditorHandle {
+  const {
+    parent,
+    initialDoc,
+    onChange,
+    onCursorChange,
+    lineWrapping = true,
+    tabWidth = 4,
+    heavy = true,
+    onScroll,
+    filePath = null,
+  } = opts;
   parent.replaceChildren();
 
   // 折り返しを動的に差し替えるための Compartment（setLineWrapping で reconfigure する）。

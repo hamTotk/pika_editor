@@ -5,6 +5,7 @@
 // 確認済み（8章・sprint 3）での解除はここを単一源にして両ビュー（ツリー/タブ）で共有する。
 
 import type { FsChange } from "../ipc";
+import { pathKey } from "../util/path";
 
 /** ファイル自身の未読種別（重畳の素・ui-design 5章の状態記号に対応）。 */
 export type UnreadKind = "modified" | "created" | "removed";
@@ -16,14 +17,12 @@ export const UNREAD_MARK: Record<UnreadKind, string> = {
   removed: "×", // 削除済み（表示は取り消し線も併用する）
 };
 
-/** パス区切りを正規化して親パス列挙に使う（Windows の \ と / を吸収）。 */
-function normalizeSep(path: string): string {
-  return path.replace(/\\/g, "/");
-}
+// パス区切りの正規化（Windows の \ と / を吸収・**大小保持**）は util/path.pathKey を使う
+// （backend 索引キー突合のため大小は潰さない）。
 
 /** パスの祖先フォルダを末端から順に列挙する（伝播マーク用）。 */
 function ancestors(path: string): string[] {
-  const norm = normalizeSep(path);
+  const norm = pathKey(path);
   const out: string[] = [];
   let idx = norm.lastIndexOf("/");
   while (idx > 0) {
@@ -56,7 +55,7 @@ export class UnreadStore {
         case "renamed":
           // 旧パスの未読を新パスへ引き継ぐ（要件4.2 の継承）。
           if (c.from) {
-            const prev = this.files.get(normalizeSep(c.from)) ?? "modified";
+            const prev = this.files.get(pathKey(c.from)) ?? "modified";
             this.clearFile(c.from);
             this.setFile(c.path, prev);
           } else {
@@ -69,17 +68,17 @@ export class UnreadStore {
 
   /** ファイルの未読種別を引く（無ければ undefined）。 */
   get(path: string): UnreadKind | undefined {
-    return this.files.get(normalizeSep(path));
+    return this.files.get(pathKey(path));
   }
 
   /** フォルダ配下に未読があるか（伝播マーク用・折りたたみ中でも気づける＝要件4.2）。 */
   folderHasUnread(folderPath: string): boolean {
-    return (this.folderCounts.get(normalizeSep(folderPath)) ?? 0) > 0;
+    return (this.folderCounts.get(pathKey(folderPath)) ?? 0) > 0;
   }
 
   /** 確認済み（8章）でファイルの未読を解除する。 */
   clearFile(path: string): void {
-    const norm = normalizeSep(path);
+    const norm = pathKey(path);
     if (!this.files.has(norm)) return;
     this.files.delete(norm);
     for (const anc of ancestors(norm)) {
@@ -108,7 +107,7 @@ export class UnreadStore {
   }
 
   private setFile(path: string, kind: UnreadKind): void {
-    const norm = normalizeSep(path);
+    const norm = pathKey(path);
     const existed = this.files.has(norm);
     this.files.set(norm, kind);
     if (!existed) {

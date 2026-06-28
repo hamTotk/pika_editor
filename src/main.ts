@@ -76,6 +76,27 @@ import {
   type ViewMode,
 } from "./preview";
 import type { PreviewTheme } from "./ipc";
+import { pathKey, samePath, parentDir, basename } from "./util/path";
+import {
+  workbench,
+  treeHeadLabel,
+  treeCollapseBtn,
+  treeExpandBtn,
+  editorPane,
+  editorHost,
+  diffHost,
+  previewHost,
+  imageHost,
+  modeButtons,
+  toggleDiffBtn,
+  confirmBtn,
+  openExternalBtn,
+  tabListBtn,
+  tabsEl,
+  hiddenUnreadBadge,
+} from "./ui/dom";
+import { promptText, confirmModal, confirmDiscardModal, isModalOpen } from "./ui/modal";
+import { openContextMenu, type ContextItem } from "./ui/context-menu";
 
 interface OpenTab extends TabModel {
   dirty: boolean;
@@ -189,31 +210,8 @@ let imageFit: ImageFit = "fit";
  */
 let searchController: SearchController | null = null;
 
-const workbench = () => document.getElementById("workbench") as HTMLElement;
-const treeHeadLabel = () => document.getElementById("tree-head-label") as HTMLElement;
-const treeCollapseBtn = () => document.getElementById("tree-collapse") as HTMLButtonElement;
-const treeExpandBtn = () => document.getElementById("tree-expand") as HTMLButtonElement;
-const editorPane = () => document.getElementById("editor-pane") as HTMLElement;
-const editorHost = () => document.getElementById("editor-host") as HTMLElement;
-const diffHost = () => document.getElementById("diff-host") as HTMLElement;
-const previewHost = () => document.getElementById("preview-host") as HTMLElement;
-// 非テキスト（画像/非対応バイナリ）の簡易ビュー占有領域（要件12.2・U3）。CM6 を作らずここで表示する。
-const imageHost = () => document.getElementById("image-host") as HTMLElement;
-// タブバー右端 tab-tools（UIブラッシュアップ T6 差分 C4）。モード切替セグメント・差分トグル・確認ボタン。
-const modeButtons = () =>
-  Array.from(
-    document.querySelectorAll<HTMLButtonElement>("#tab-tools .seg button[data-mode]"),
-  );
-const toggleDiffBtn = () => document.getElementById("toggle-diff") as HTMLButtonElement;
-const confirmBtn = () => document.getElementById("confirm-file") as HTMLButtonElement;
-// 「ブラウザで開く」（tab-tools・UIブラッシュアップ T9）。アクティブタブのファイルを OS 既定アプリで開く。
-const openExternalBtn = () => document.getElementById("open-external") as HTMLButtonElement;
-// 全タブ一覧ドロップダウンのトリガ（tab-tools・要件5.3）。クリックで開いている全タブを状態マーク付きで列挙する。
-const tabListBtn = () => document.getElementById("tab-list") as HTMLButtonElement;
-// タブ列（横スクロールするコンテナ）。隠れ未読バッジ（T10）の可視判定に scrollLeft/clientWidth を読む。
-const tabsEl = () => document.getElementById("tabs") as HTMLElement;
-// 隠れた差分あり（未読）タブ数のバッジ（T10・差分 C5・ui-mock .hidden-unread）。
-const hiddenUnreadBadge = () => document.getElementById("hidden-unread") as HTMLButtonElement;
+// メインWebView シェルの DOM 要素ゲッタは src/ui/dom.ts へ集約した（S7）。
+// 取得対象（#workbench/#tabs/#editor-host …）と null 非保証キャストは不変。
 
 /**
  * アクティブタブで「確認済みにする」が**効果を持つ**か（指摘7・要件8.3）。
@@ -428,17 +426,22 @@ function refreshTree(): void {
   );
 }
 
-// ── ツリーのコンテキストメニュー＋新規作成/削除（要件11・design G・T5）─────────────────────
-
-/** 現在開いている単一のコンテキストメニュー要素（多重表示を防ぐ）。 */
-let openContext: HTMLElement | null = null;
-
 /**
- * 開いているモーダル数（promptText・指摘5）。>0 の間はグローバルショートカット（window keydown）を
- * 無効化し、名前入力中の修飾キー操作（Ctrl+Shift+Enter＝確認済み / Ctrl+W＝タブを閉じる 等）が
- * 背景タブへ貫通するのを防ぐ。
+ * データ変更（確認/一括確認/巻き戻し）後の標準再描画クラスタ（S7・重複統合）。
+ * ツリー/タブ/構造化ステータスを更新し、差分トグル ON のときは新ベースライン基準で差分を貼り直す。
+ * 旧 onConfirm/onConfirmAll/onRollback で同一だった4行（refreshTree→refreshTabs→refreshStatus→差分再描画）の単一源。
  */
-let modalDepth = 0;
+async function refreshAll(): Promise<void> {
+  refreshTree();
+  refreshTabs();
+  refreshStatus(); // 差分あり数（差分 N）を更新。
+  if (state.diffOn) await renderActiveDiff();
+}
+
+// ── ツリーのコンテキストメニュー＋新規作成/削除（要件11・design G・T5）─────────────────────
+// コンテキストメニューの土台（openContextMenu/closeContextMenu）は src/ui/context-menu.ts へ、
+// 自前モーダル（promptText/confirmModal/confirmDiscardModal）とグローバルショートカット抑止判定
+// （isModalOpen＝旧 modalDepth）は src/ui/modal.ts へ集約した（S7・挙動不変）。
 
 /**
  * ツリーから今しがた自分で作成したパス→登録時刻(ms)（指摘4）。watcher は workspace を再帰監視するため、
@@ -457,7 +460,8 @@ const SELF_CREATED_TTL_MS = 15000;
 
 /** パスを selfCreatedPaths のキーへ正規化する（区切り `\`→`/`・Windows の大小無視）。 */
 function selfKey(p: string): string {
-  return p.replace(/\\/g, "/").toLowerCase();
+  // pathKey（区切り正規化・大小保持）に小文字化を重ねる＝旧 `p.replace(/\\/g,"/").toLowerCase()` と同一。
+  return pathKey(p).toLowerCase();
 }
 
 /** TTL を過ぎた未消費の自作成抑制エントリを破棄する（stale 過剰一致＋無制限増加の防止・第2巡）。 */
@@ -467,392 +471,10 @@ function pruneSelfCreated(now: number): void {
   }
 }
 
-/** コンテキストメニューを閉じる（外側クリック/Esc/ウィンドウblur/アクション後）。 */
-function closeContextMenu(): void {
-  if (openContext) {
-    openContext.remove();
-    openContext = null;
-  }
-  document.removeEventListener("pointerdown", onContextOutside, true);
-  document.removeEventListener("keydown", onContextKey, true);
-  window.removeEventListener("blur", closeContextMenu);
-}
-
-function onContextOutside(e: Event): void {
-  if (openContext && !openContext.contains(e.target as Node)) closeContextMenu();
-}
-function onContextKey(e: KeyboardEvent): void {
-  if (e.key === "Escape") {
-    e.preventDefault();
-    closeContextMenu();
-  }
-}
-
-/** コンテキストメニュー 1 項目（"sep" は区切り線）。 */
-type ContextItem =
-  | { label: string; danger?: boolean; checked?: boolean; run: () => void }
-  | "sep";
-
-/**
- * 指定座標へコンテキストメニューを開く（共通土台・menu-pop の見た目を流用）。
- *
- * `opts.focusFirst=true` のとき、項目をフォーカス可能（tabIndex=0）にし先頭へフォーカスを当て、
- * ↑/↓/Home/End で項目移動・Enter/Space で実行できるようにする（全タブ一覧ドロップダウンなど
- * キーボード起動するメニュー向け・要件11.5）。既定（右クリックメニュー）は従来どおりフォーカスを
- * 動かさず click のみで使う（既存挙動を変えない）。
- */
-function openContextMenu(
-  items: ContextItem[],
-  x: number,
-  y: number,
-  opts?: { focusFirst?: boolean },
-): void {
-  closeContextMenu();
-  const focusable = opts?.focusFirst ?? false;
-  const menu = document.createElement("div");
-  menu.className = "menu-pop context-menu";
-  menu.setAttribute("role", "menu");
-  for (const item of items) {
-    if (item === "sep") {
-      const sep = document.createElement("div");
-      sep.className = "msep";
-      sep.setAttribute("role", "separator");
-      menu.appendChild(sep);
-      continue;
-    }
-    const row = document.createElement("div");
-    row.className = item.danger ? "mrow danger" : "mrow";
-    row.setAttribute("role", "menuitem");
-    // キーボード起動メニューは矢印移動の対象にするためフォーカス可能にする。右クリックは従来どおり -1。
-    row.tabIndex = focusable ? 0 : -1;
-    if (item.checked) {
-      row.classList.add("checked");
-      row.setAttribute("aria-checked", "true");
-    }
-    const label = document.createElement("span");
-    label.className = "mlabel";
-    label.textContent = item.label;
-    row.appendChild(label);
-    row.addEventListener("click", () => {
-      closeContextMenu();
-      item.run();
-    });
-    // 矢印/Home/End/Enter のキーボード操作（フォーカスされた項目でのみ発火＝右クリックには影響しない）。
-    row.addEventListener("keydown", (e) => onContextRowKey(e, menu));
-    menu.appendChild(row);
-  }
-  // 画面外へはみ出さないよう、仮表示で寸法を測ってから位置をクランプする。
-  menu.style.position = "fixed";
-  menu.style.visibility = "hidden";
-  menu.style.zIndex = "2000";
-  document.body.appendChild(menu);
-  const rect = menu.getBoundingClientRect();
-  const left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4));
-  const top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4));
-  menu.style.left = `${left}px`;
-  menu.style.top = `${top}px`;
-  menu.style.visibility = "visible";
-  openContext = menu;
-  // キーボード起動メニューは開いたら先頭項目へフォーカスする（↑/↓ で移動できる起点を作る）。
-  if (focusable) {
-    menu.querySelector<HTMLElement>(".mrow")?.focus();
-  }
-  // 外側クリック/Esc/blur で閉じる。トリガとなった contextmenu ジェスチャの後続イベントで
-  // 即閉じないよう、登録は次フレームへ遅延する（capture フェーズで先取り）。
-  setTimeout(() => {
-    document.addEventListener("pointerdown", onContextOutside, true);
-    document.addEventListener("keydown", onContextKey, true);
-    window.addEventListener("blur", closeContextMenu);
-  }, 0);
-}
-
-/** コンテキストメニュー項目のキーボード操作（↑/↓/Home/End 移動・Enter/Space 実行）。 */
-function onContextRowKey(e: KeyboardEvent, menu: HTMLElement): void {
-  const rows = Array.from(menu.querySelectorAll<HTMLElement>(".mrow"));
-  const idx = rows.indexOf(e.currentTarget as HTMLElement);
-  if (idx < 0) return;
-  if (e.key === "ArrowDown") {
-    e.preventDefault();
-    rows[(idx + 1) % rows.length]?.focus();
-  } else if (e.key === "ArrowUp") {
-    e.preventDefault();
-    rows[(idx - 1 + rows.length) % rows.length]?.focus();
-  } else if (e.key === "Home") {
-    e.preventDefault();
-    rows[0]?.focus();
-  } else if (e.key === "End") {
-    e.preventDefault();
-    rows[rows.length - 1]?.focus();
-  } else if (e.key === "Enter" || e.key === " ") {
-    e.preventDefault();
-    (e.currentTarget as HTMLElement).click();
-  }
-}
-
-/**
- * テーマ準拠の自前プロンプトモーダル（名前入力・T5）。
- *
- * window.prompt はこのコードベースでは dev フォールバックでのみ使われ、Tauri 本番 WebView での動作
- * 実績が無い（無反応で新規作成が黙って失敗する事故を避ける）。window.confirm は本番実績があるので
- * 削除確認はそちらを使い、テキスト入力だけ自前モーダルにする。Promise で OK=入力値 / Cancel=null を返す。
- */
-function promptText(message: string, placeholder = ""): Promise<string | null> {
-  return new Promise((resolve) => {
-    // 閉じた後にフォーカスを戻す元要素を退避（右クリックしたツリー行など・指摘10 a11y）。
-    const prevFocus = document.activeElement as HTMLElement | null;
-    const overlay = document.createElement("div");
-    overlay.className = "modal-overlay";
-    const box = document.createElement("div");
-    box.className = "modal-box";
-    box.setAttribute("role", "dialog");
-    box.setAttribute("aria-modal", "true");
-    const label = document.createElement("div");
-    label.className = "modal-label";
-    label.textContent = message;
-    const input = document.createElement("input");
-    input.type = "text";
-    input.className = "modal-input";
-    input.placeholder = placeholder;
-    const actions = document.createElement("div");
-    actions.className = "modal-actions";
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "modal-btn";
-    cancel.textContent = "キャンセル";
-    const ok = document.createElement("button");
-    ok.type = "button";
-    ok.className = "modal-btn primary";
-    ok.textContent = "OK";
-    actions.append(cancel, ok);
-    box.append(label, input, actions);
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-    // モーダル表示中はグローバルショートカット（window keydown）を無効化する（指摘5: 名前入力中の
-    // Ctrl+Shift+Enter→確認済み や Ctrl+W→タブを閉じる が背景タブへ貫通するのを防ぐ）。
-    modalDepth += 1;
-    input.focus();
-    const close = (value: string | null): void => {
-      overlay.remove();
-      document.removeEventListener("keydown", onKey, true);
-      modalDepth = Math.max(0, modalDepth - 1);
-      // フォーカスを開く前の要素へ戻す（キーボード操作位置を見失わない・指摘10）。
-      prevFocus?.focus?.();
-      resolve(value);
-    };
-    // Tab フォーカスを box 内（input / キャンセル / OK）へ閉じ込める（指摘10 フォーカストラップ）。
-    const focusables: HTMLElement[] = [input, cancel, ok];
-    const onKey = (e: KeyboardEvent): void => {
-      // IME（日本語入力）変換確定の Enter で入力を誤確定しないよう、合成中（isComposing）/合成キー
-      // （keyCode 229）は素通しして入力欄に委ねる（変換中の Enter は確定のためのもの＝モーダル確定ではない）。
-      if (e.isComposing || e.keyCode === 229) return;
-      // 処理可否に関わらず、モーダル中のキーは背景（window ハンドラ）へ伝播させない（指摘5）。
-      // ただし入力欄へは届かせる必要があるため capture では stopImmediatePropagation せず、
-      // ここで stopPropagation して bubble 経路の window ハンドラだけを止める。
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        close(null);
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        e.stopPropagation();
-        close(input.value);
-      } else if (e.key === "Tab") {
-        // box 内の 3 要素を循環させる（外へ抜けない）。
-        e.preventDefault();
-        const active = document.activeElement as HTMLElement | null;
-        const idx = focusables.indexOf(active as HTMLElement);
-        const dir = e.shiftKey ? -1 : 1;
-        const next = focusables[(idx + dir + focusables.length) % focusables.length];
-        next?.focus();
-      }
-    };
-    document.addEventListener("keydown", onKey, true);
-    cancel.addEventListener("click", () => close(null));
-    ok.addEventListener("click", () => close(input.value));
-    // 背景（オーバーレイ自身）クリックでキャンセル（box 内クリックは透過しない）。
-    overlay.addEventListener("pointerdown", (e) => {
-      if (e.target === overlay) close(null);
-    });
-  });
-}
-
-/**
- * テーマ準拠の自前確認モーダル（はい/いいえ・T5 削除確認）。Promise で OK=true / Cancel=false を返す。
- *
- * 実機検証で window.confirm がこの Tauri/WebView2 ビルドでは**ダイアログを出さず即 true を返す**ことが
- * 判明したため（window.prompt と同根）、削除の確認をネイティブ confirm に頼らず自前モーダルにする
- * （誤クリックでの即削除を防ぐ＝最上位原則「データを失わない」。ごみ箱移動で復元可能だが確認は出す）。
- */
-function confirmModal(
-  message: string,
-  opts?: { okLabel?: string; danger?: boolean },
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    const prevFocus = document.activeElement as HTMLElement | null;
-    const overlay = document.createElement("div");
-    overlay.className = "modal-overlay";
-    const box = document.createElement("div");
-    box.className = "modal-box";
-    box.setAttribute("role", "dialog");
-    box.setAttribute("aria-modal", "true");
-    const label = document.createElement("div");
-    label.className = "modal-label";
-    // 複数行メッセージ（\n）は <br> で改行表示する。
-    message.split("\n").forEach((line, i) => {
-      if (i > 0) label.appendChild(document.createElement("br"));
-      label.appendChild(document.createTextNode(line));
-    });
-    const actions = document.createElement("div");
-    actions.className = "modal-actions";
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "modal-btn";
-    cancel.textContent = "キャンセル";
-    const ok = document.createElement("button");
-    ok.type = "button";
-    ok.className = opts?.danger ? "modal-btn danger-btn" : "modal-btn primary";
-    ok.textContent = opts?.okLabel ?? "OK";
-    actions.append(cancel, ok);
-    box.append(label, actions);
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-    modalDepth += 1;
-    ok.focus();
-    const focusables: HTMLElement[] = [cancel, ok];
-    const close = (value: boolean): void => {
-      overlay.remove();
-      document.removeEventListener("keydown", onKey, true);
-      modalDepth = Math.max(0, modalDepth - 1);
-      prevFocus?.focus?.();
-      resolve(value);
-    };
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        close(false);
-      } else if (e.key === "Enter") {
-        // Enter はフォーカス中のボタンを尊重する。キャンセルにフォーカスがあればキャンセル、
-        // それ以外（OK／フォーカス外の異常時）は既定の OK へ倒す（データ保全側＝確認を必ず通す）。
-        e.preventDefault();
-        e.stopPropagation();
-        close(document.activeElement !== cancel);
-      } else if (e.key === "Tab") {
-        e.preventDefault();
-        const idx = focusables.indexOf(document.activeElement as HTMLElement);
-        const dir = e.shiftKey ? -1 : 1;
-        focusables[(idx + dir + focusables.length) % focusables.length]?.focus();
-      }
-    };
-    document.addEventListener("keydown", onKey, true);
-    cancel.addEventListener("click", () => close(false));
-    ok.addEventListener("click", () => close(true));
-    overlay.addEventListener("pointerdown", (e) => {
-      if (e.target === overlay) close(false);
-    });
-  });
-}
-
-/**
- * テーマ準拠の自前三択モーダル（保存して切替／破棄して切替／キャンセル）。
- *
- * window.confirm はこの Tauri/WebView2 ビルドでダイアログを出さず即 true を返す（confirmModal 新設の
- * 根拠・src/main.ts 671 行）。confirmModal は 2 択のためフォルダ切替の三択（保存/破棄/中止）を表現できず、
- * window.confirm を 2 段にすると常に save へ倒れて無断でデータを失う。そこで三択を 1 枚のモーダルで明示する。
- * 返り値は OK 系ボタンの選択（"save"|"discard"）／Esc・外側クリック・キャンセルは "cancel"。
- *
- * 作法は confirmModal/promptText を踏襲: prevFocus 退避と復帰・modalDepth 増減でグローバルショートカット抑止・
- * keydown capture でフォーカストラップ（Tab 循環）・Esc=キャンセル・Enter=既定（保存して切替）・IME 合成ガード。
- */
-function confirmDiscardModal(
-  message: string,
-): Promise<"save" | "discard" | "cancel"> {
-  return new Promise((resolve) => {
-    const prevFocus = document.activeElement as HTMLElement | null;
-    const overlay = document.createElement("div");
-    overlay.className = "modal-overlay";
-    const box = document.createElement("div");
-    box.className = "modal-box";
-    box.setAttribute("role", "dialog");
-    box.setAttribute("aria-modal", "true");
-    const label = document.createElement("div");
-    label.className = "modal-label";
-    // 複数行メッセージ（\n）は <br> で改行表示する（confirmModal と同じ）。
-    message.split("\n").forEach((line, i) => {
-      if (i > 0) label.appendChild(document.createElement("br"));
-      label.appendChild(document.createTextNode(line));
-    });
-    const actions = document.createElement("div");
-    actions.className = "modal-actions";
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "modal-btn";
-    cancel.textContent = "キャンセル";
-    const discard = document.createElement("button");
-    discard.type = "button";
-    discard.className = "modal-btn danger-btn";
-    discard.textContent = "破棄して切替";
-    const save = document.createElement("button");
-    save.type = "button";
-    save.className = "modal-btn primary";
-    save.textContent = "保存して切替";
-    // 左から キャンセル／破棄して切替／保存して切替（既定の保存を右端に置く＝confirmModal の primary 位置と揃える）。
-    actions.append(cancel, discard, save);
-    box.append(label, actions);
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-    modalDepth += 1;
-    // 初期フォーカスは既定の「保存して切替」。
-    save.focus();
-    const focusables: HTMLElement[] = [cancel, discard, save];
-    const close = (value: "save" | "discard" | "cancel"): void => {
-      overlay.remove();
-      document.removeEventListener("keydown", onKey, true);
-      modalDepth = Math.max(0, modalDepth - 1);
-      prevFocus?.focus?.();
-      resolve(value);
-    };
-    const onKey = (e: KeyboardEvent): void => {
-      // IME 合成中（isComposing / keyCode 229）は素通しして誤確定を防ぐ（promptText と同じ）。
-      if (e.isComposing || e.keyCode === 229) return;
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        close("cancel");
-      } else if (e.key === "Enter") {
-        // Enter はフォーカス中のボタンを尊重する。キャンセル／破棄にフォーカスがあればそれを選び、
-        // それ以外（保存／フォーカス外の異常時）は既定の「保存して切替」（データを失わない側）へ倒す。
-        e.preventDefault();
-        e.stopPropagation();
-        const focused = document.activeElement;
-        close(
-          focused === cancel
-            ? "cancel"
-            : focused === discard
-              ? "discard"
-              : "save",
-        );
-      } else if (e.key === "Tab") {
-        e.preventDefault();
-        const idx = focusables.indexOf(document.activeElement as HTMLElement);
-        const dir = e.shiftKey ? -1 : 1;
-        focusables[(idx + dir + focusables.length) % focusables.length]?.focus();
-      }
-    };
-    document.addEventListener("keydown", onKey, true);
-    cancel.addEventListener("click", () => close("cancel"));
-    discard.addEventListener("click", () => close("discard"));
-    save.addEventListener("click", () => close("save"));
-    overlay.addEventListener("pointerdown", (e) => {
-      if (e.target === overlay) close("cancel");
-    });
-  });
-}
-
 /** ツリー項目の右クリックメニュー（ファイル/フォルダ＝要件11）。 */
 function showTreeContextMenu(entry: TreeEntry, x: number, y: number): void {
   // 新規作成先: フォルダ上ならその中、ファイル上ならその親フォルダ。
-  const targetDir = entry.is_dir ? entry.path : parentDirOf(entry.path);
+  const targetDir = entry.is_dir ? entry.path : parentDir(entry.path);
   const expandAfter = entry.is_dir; // フォルダ内に作ったら展開して中身を見せる。
   openContextMenu(
     [
@@ -916,17 +538,7 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-/** パスの親フォルダ（末尾区切り＋名前を落とす）。区切りが無ければ自身を返す。 */
-function parentDirOf(path: string): string {
-  const m = path.replace(/[\\/]+$/, "").replace(/[\\/][^\\/]+$/, "");
-  return m || path;
-}
-
-/** パス区切り（\ と /）・末尾区切り・大小を吸収して等価比較する。 */
-function samePath(a: string, b: string): boolean {
-  const norm = (p: string): string => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-  return norm(a) === norm(b);
-}
+// パス操作（parentDir/samePath/basename/pathKey）は src/util/path.ts へ集約した（S7・挙動不変）。
 
 /**
  * 新規ファイル/フォルダを作成する（要件11）。名前を尋ね、backend で作成し、ツリーを更新する。
@@ -975,7 +587,7 @@ async function onDeleteEntry(entry: TreeEntry): Promise<void> {
     await deleteEntry(entry.path);
     // 削除したフォルダ自身とその配下の展開状態/子キャッシュを掃除する（同名再作成時の幽霊表示防止・指摘8）。
     if (entry.is_dir) pruneTreeDir(entry.path);
-    await refreshTreeDir(parentDirOf(entry.path));
+    await refreshTreeDir(parentDir(entry.path));
     notify(`ごみ箱へ移動しました: ${entry.name}`);
     // 開いているタブの追従（「削除済み」表示）は watcher の removed イベント（onExternalChange）が担う。
   } catch (e) {
@@ -1012,8 +624,10 @@ function updateTreeHeader(): void {
     return;
   }
   // 末尾の区切り文字を落としてからベース名を取る（C:\work\notes\ → notes、ドライブ直下 C:\ → C:）。
+  // 末尾区切りは除去済みなので basename（`?? trimmed`）と旧 `|| trimmed` は同値（pop が "" を返すのは
+  // trimmed が空のときだけで、その場合は両者とも ""）。
   const trimmed = folder.replace(/[\\/]+$/, "");
-  const base = trimmed.split(/[\\/]/).pop() || trimmed;
+  const base = basename(trimmed);
   label.textContent = `エクスプローラー — ${base}`;
   // 省略表示でも全パスが分かるよう title（ツールチップ）に絶対パスを残す。
   label.setAttribute("title", folder);
@@ -1156,20 +770,20 @@ async function activateTab(path: string): Promise<void> {
   if (tab?.deleted) {
     const deletedContent = tab.dirty && tab.draft !== undefined ? tab.draft : "";
     state.editor?.destroy();
-    state.editor = createEditor(
-      editorHost(),
-      deletedContent,
-      () => markDirty(path),
-      () => refreshStatus(),
-      state.lineWrapping,
-      state.tabWidth,
+    state.editor = createEditor({
+      parent: editorHost(),
+      initialDoc: deletedContent,
+      onChange: () => markDirty(path),
+      onCursorChange: () => refreshStatus(),
+      lineWrapping: state.lineWrapping,
+      tabWidth: state.tabWidth,
       // 削除済みタブの内容は draft/空＝小さいが、直近の段階制（editing_off）を踏襲して重い装飾の要否を決める。
-      !tab.editingOff,
+      heavy: !tab.editingOff,
       // エディタ→プレビュー片方向スクロール同期（S4・要件6.1 改訂）。
-      onEditorScroll,
+      onScroll: onEditorScroll,
       // 言語選択（拡張子で markdown/HTML を切替・要件5.1）。
-      path,
-    );
+      filePath: path,
+    });
     refreshTabs();
     // 直前に画像タブを見ていた場合に image-host が残らないよう隠す（画像→削除済みタブ切替の正規化）。
     imageHost().hidden = true;
@@ -1199,20 +813,20 @@ async function activateTab(path: string): Promise<void> {
     const hasDraft = tab?.dirty && tab.draft !== undefined;
     const content = hasDraft ? (tab as OpenTab).draft! : doc.text;
     state.editor?.destroy();
-    state.editor = createEditor(
-      editorHost(),
-      content,
-      () => markDirty(path),
-      () => refreshStatus(),
-      state.lineWrapping,
-      state.tabWidth,
+    state.editor = createEditor({
+      parent: editorHost(),
+      initialDoc: content,
+      onChange: () => markDirty(path),
+      onCursorChange: () => refreshStatus(),
+      lineWrapping: state.lineWrapping,
+      tabWidth: state.tabWidth,
       // 巨大ファイル段階制（highlight_off/editing_off）が立つときは重い装飾を外す（heavyDecoCompartment）。
-      !(doc.degrade.highlight_off || doc.degrade.editing_off),
+      heavy: !(doc.degrade.highlight_off || doc.degrade.editing_off),
       // エディタ→プレビュー片方向スクロール同期（S4・要件6.1 改訂）。
-      onEditorScroll,
+      onScroll: onEditorScroll,
       // 言語選択（拡張子で markdown/HTML を切替・要件5.1）。
-      path,
-    );
+      filePath: path,
+    });
     // host 可視を正規化する（画像タブ→テキストタブ切替で image-host が残らないよう必ず隠す＝U3）。
     // applyOccupancy は hidden 切替＋bounds のみで preview ナビゲートはしないため、下の
     // renderActiveDiff/renderActivePreview（実ナビゲート）の前に置いても順序を壊さない。
@@ -1571,6 +1185,22 @@ async function onSave(): Promise<void> {
 }
 
 /**
+ * 表現不能文字（unmappable）で保存中断したときの「UTF-8（BOM なし）で保存しますか？」確認（要件5.6・S7 統合）。
+ *
+ * saveOnce（通常保存）と onSaveAs（名前を付けて保存）で同一だった確認モーダルの単一源。この時点でディスクは
+ * 未変更＝データは失われていない。window.confirm はこの Tauri/WebView2 ビルドでダイアログを出さず即 true を
+ * 返すため、素通しで無断 UTF-8 変換しないよう自前モーダル（confirmModal）で明示確認する。OK=true で UTF-8 保存へ。
+ */
+function confirmUtf8Fallback(filePath: string, unmappableCount: number): Promise<boolean> {
+  const name = basename(filePath);
+  return confirmModal(
+    `「${name}」には現在のエンコーディングで保存できない文字が ${unmappableCount} 件あります。\n` +
+      `UTF-8（BOM なし）で保存しますか？［キャンセル］を選ぶと保存しません（変更は失われません）。`,
+    { okLabel: "UTF-8で保存" },
+  );
+}
+
+/**
  * 1 回分の保存処理（withBusy の内側で呼ぶ）。表現不能文字で中断したら確認のうえ UTF-8 で再試行する
  * （同区間内の再帰なので withBusy を取り直さない）。
  */
@@ -1586,15 +1216,8 @@ async function saveOnce(
     const result = await saveDocument(path, content, encoding, hasBom, forceUtf8);
     if (result.status === "unmappable") {
       // 表現不能文字で中断（要件5.6）。この時点でディスクは未変更＝データは失われていない。
-      // ［UTF-8で保存／キャンセル］を確認し、選べば UTF-8（BOM なし）で保存し直す。
-      const name = path.split(/[\\/]/).pop() ?? path;
-      // window.confirm はこの Tauri/WebView2 ビルドでダイアログを出さず即 true を返す（confirmModal 新設の
-      // 根拠・src/main.ts 671 行）。素通しで無断 UTF-8 変換しないよう自前モーダルで明示確認する。
-      const ok = await confirmModal(
-        `「${name}」には現在のエンコーディングで保存できない文字が ${result.unmappable.length} 件あります。\n` +
-          `UTF-8（BOM なし）で保存しますか？［キャンセル］を選ぶと保存しません（変更は失われません）。`,
-        { okLabel: "UTF-8で保存" },
-      );
+      // ［UTF-8で保存／キャンセル］を確認し、選べば UTF-8（BOM なし）で保存し直す（確認は confirmUtf8Fallback に集約）。
+      const ok = await confirmUtf8Fallback(path, result.unmappable.length);
       if (ok) {
         await saveOnce(path, content, tab, true);
       } else {
@@ -1665,20 +1288,20 @@ async function reopenActiveWithEncoding(enc: DocEncoding): Promise<void> {
     tab.draft = undefined;
     // エディタを開いた内容で作り直す（activateTab の載せ替えと同じ作法）。
     state.editor?.destroy();
-    state.editor = createEditor(
-      editorHost(),
-      doc.text,
-      () => markDirty(path),
-      () => refreshStatus(),
-      state.lineWrapping,
-      state.tabWidth,
+    state.editor = createEditor({
+      parent: editorHost(),
+      initialDoc: doc.text,
+      onChange: () => markDirty(path),
+      onCursorChange: () => refreshStatus(),
+      lineWrapping: state.lineWrapping,
+      tabWidth: state.tabWidth,
       // 開き直し後も段階制（highlight_off/editing_off）に従い重い装飾の要否を決める。
-      !(doc.degrade.highlight_off || doc.degrade.editing_off),
+      heavy: !(doc.degrade.highlight_off || doc.degrade.editing_off),
       // エディタ→プレビュー片方向スクロール同期（S4・要件6.1 改訂）。
-      onEditorScroll,
+      onScroll: onEditorScroll,
       // 言語選択（拡張子で markdown/HTML を切替・要件5.1）。
-      path,
-    );
+      filePath: path,
+    });
     // 開いた内容のハッシュを基準に取り直し未読をクリアする（復元の別物判定の素・eval high）。
     void captureTabHash(path, doc.text);
     state.unread.clearFile(path);
@@ -2014,12 +1637,9 @@ async function onConfirm(): Promise<void> {
     try {
       const confirmed = await confirmFile(path);
       if (confirmed) {
-        // 未読解除・ツリー/タブのマーク解除（要件8.3）。
+        // 未読解除・ツリー/タブのマーク解除（要件8.3）。新ベースライン基準で差分も貼り直す。
         state.unread.clearFile(path);
-        refreshTree();
-        refreshTabs();
-        refreshStatus(); // 差分あり数（差分 N）を更新。
-        if (state.diffOn) await renderActiveDiff(); // 新ベースライン基準で再描画。
+        await refreshAll();
         notify("確認済みにしました");
       } else {
         // 確定直前にディスクが変化＝中断して再差分（要件8.3）。
@@ -2087,10 +1707,7 @@ async function onConfirmAll(): Promise<void> {
         });
       }
       // updated===0（全スキップ）のときは未読を一切触らない（全件未確定のまま残す）。
-      refreshTree();
-      refreshTabs();
-      refreshStatus(); // 差分あり数（差分 N）を更新。
-      if (state.diffOn) await renderActiveDiff();
+      await refreshAll();
       notify(
         `すべて確認済み: ${result.updated} 件確定 / ${result.skipped} 件スキップ（更新前は一括退避済み）`,
       );
@@ -2124,10 +1741,8 @@ async function onRollback(): Promise<void> {
       const tab = state.tabs.find((t) => t.path === path);
       if (tab) tab.deleted = false;
       state.unread.clearFile(path);
-      refreshTree();
-      refreshTabs();
-      refreshStatus(); // 差分あり数（差分 N）を更新（巻き戻しは内容も変わるので行/文字も再計測）。
-      if (state.diffOn) await renderActiveDiff();
+      // 巻き戻しは内容も変わるので行/文字も再計測（refreshAll が status を更新）。
+      await refreshAll();
       notify("確認済み時点に戻しました（戻す前の内容は退避済み）");
     } catch (e) {
       notify(`巻き戻しできません: ${String(e)}`, "error");
@@ -2582,7 +2197,7 @@ async function onOpenRequestEvent(payload: OpenRequestPayload): Promise<void> {
  * - 存在しないパス → 「保存時に作成される新規タブ」として空タブで開く（should: 存在しないファイルパス）。
  */
 async function openPath(path: string): Promise<void> {
-  const name = path.split(/[\\/]/).pop() ?? path;
+  const name = basename(path);
   let kind: "file" | "dir" | "missing";
   try {
     kind = await pathKind(path);
@@ -2623,20 +2238,20 @@ function openNewFileTab(path: string, name: string): void {
   captureActivePosition();
   state.active = path;
   state.editor?.destroy();
-  state.editor = createEditor(
-    editorHost(),
-    "",
-    () => markDirty(path),
-    () => refreshStatus(),
-    state.lineWrapping,
-    state.tabWidth,
+  state.editor = createEditor({
+    parent: editorHost(),
+    initialDoc: "",
+    onChange: () => markDirty(path),
+    onCursorChange: () => refreshStatus(),
+    lineWrapping: state.lineWrapping,
+    tabWidth: state.tabWidth,
     // 新規（空）ファイルは段階制対象でない＝重い装飾を有効にする。
-    true,
+    heavy: true,
     // エディタ→プレビュー片方向スクロール同期（S4・要件6.1 改訂）。新規 .md でも split で同期する。
-    onEditorScroll,
+    onScroll: onEditorScroll,
     // 言語選択（拡張子で markdown/HTML を切替・要件5.1）。
-    path,
-  );
+    filePath: path,
+  });
   void captureTabHash(path, "");
   refreshTabs();
   // 新規ファイルは「保存で作成される」旨を一旦提示し、以後の編集（onCursorChange）で構造化ステータスへ移る。
@@ -2742,7 +2357,7 @@ async function restoreOnStartup(): Promise<void> {
   }
   // タブ復元（消失=削除済みタブとして残す・別物=未読復元・正常=位置復元して開く）。
   for (const rt of outcome.tabs) {
-    const name = rt.tab.path.split(/[\\/]/).pop() ?? rt.tab.path;
+    const name = basename(rt.tab.path);
     if (rt.status === "deleted") {
       // 外部削除されたタブを取消線タブとして残す（退避から「確認済み時点に戻す」へ到達可能・eval high）。
       const tab = newTab(rt.tab.path, name);
@@ -3083,14 +2698,8 @@ async function onSaveAs(): Promise<void> {
         return;
       }
       if (result.status === "unmappable") {
-        const name = newPath.split(/[\\/]/).pop() ?? newPath;
-        // window.confirm はこの Tauri/WebView2 ビルドでダイアログを出さず即 true を返す（confirmModal 新設の
-        // 根拠・src/main.ts 671 行）。素通しで無断 UTF-8 変換しないよう自前モーダルで明示確認する。
-        const ok = await confirmModal(
-          `「${name}」には現在のエンコーディングで保存できない文字が ${result.unmappable.length} 件あります。\n` +
-            `UTF-8（BOM なし）で保存しますか？［キャンセル］を選ぶと保存しません（変更は失われません）。`,
-          { okLabel: "UTF-8で保存" },
-        );
+        // 表現不能文字の確認は saveOnce と共通の confirmUtf8Fallback に集約（自前モーダルで明示確認）。
+        const ok = await confirmUtf8Fallback(newPath, result.unmappable.length);
         if (!ok) {
           notify("保存を中止しました（表現不能文字のため・変更は保持しています）", "warn");
           return;
@@ -3152,7 +2761,7 @@ function applySaveAsResult(
     }
   }
   tab.path = newPath;
-  tab.title = newPath.split(/[\\/]/).pop() ?? newPath;
+  tab.title = basename(newPath);
   tab.dirty = false;
   tab.draft = undefined;
   tab.deleted = false; // 実体を書いたので削除済みフラグは解除。
@@ -3219,18 +2828,17 @@ async function closeTab(path: string): Promise<void> {
     state.active = null;
     state.editor?.destroy();
     // 空のエディタを残す（タブが無くてもキーボード操作の到達先を保つ）。
-    state.editor = createEditor(
-      editorHost(),
-      "",
-      () => undefined,
-      undefined,
-      state.lineWrapping,
-      state.tabWidth,
+    state.editor = createEditor({
+      parent: editorHost(),
+      initialDoc: "",
+      onChange: () => undefined,
+      lineWrapping: state.lineWrapping,
+      tabWidth: state.tabWidth,
       // 空エディタ（タブ無し）は段階制対象でない＝重い装飾を有効にする。
-      true,
+      heavy: true,
       // エディタ→プレビュー片方向スクロール同期（S4）。タブ無しなので実質発火しない（ガードで no-op）。
-      onEditorScroll,
-    );
+      onScroll: onEditorScroll,
+    });
     // 直前が画像タブだった場合に image-host が残らないよう host 可視を正規化する（画像→空状態の正規化・U3）。
     // state.active=null なので applyOccupancy は image-host を隠し空エディタ（editor-host）を出す。
     applyOccupancy();
@@ -3330,9 +2938,9 @@ async function main(): Promise<void> {
     // IME（日本語入力）変換中のキーはショートカット判定に回さない（誤爆ガード）。変換確定の Enter や
     // 変換候補操作中のキーで Action が暴発しないよう、合成中（isComposing）/合成キー（keyCode 229）は委譲する。
     if (e.isComposing || e.keyCode === 229) return;
-    // モーダル（名前入力プロンプト）表示中はグローバルショートカットを無効化する（指摘5）。
+    // モーダル（名前入力プロンプト/確認）表示中はグローバルショートカットを無効化する（指摘5）。
     // 名前入力中の Ctrl+Shift+Enter（確認済み）/ Ctrl+W（タブを閉じる）等が背景タブへ貫通しない。
-    if (modalDepth > 0) return;
+    if (isModalOpen()) return;
     const action = resolveShortcut(normalizeKey(e), modsOf(e), currentFocus());
     if (action === null) return; // 未割当キーは CM6 等の既定処理へ委ねる。
     if (dispatchAction(action)) e.preventDefault();

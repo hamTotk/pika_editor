@@ -210,6 +210,46 @@ export function createSearchController(deps: SearchDeps): SearchController {
   }
 
   /**
+   * 検索の共通コア（runSearch / runSearchAndSelectFrom の統合・S7）。content を 1 回受け取り、世代採番・
+   * 後着ガード・searchInText・state 反映・applyHighlight・renderCount・catch（無効正規表現 UI）を一本化する。
+   * 「現在ヒットをどう選ぶか」だけ `selectCurrent`（matches 非空時のみ呼ばれる）でコールバック化し、
+   * 差分検索の描画不可ヒット除外（filterDiff・エディタ専用検索は false）とスクロール要否（scroll）を opts で切替える。
+   */
+  async function runSearchCore(
+    content: string,
+    selectCurrent: (matches: SearchMatch[]) => number,
+    opts: { scroll: boolean; filterDiff: boolean },
+  ): Promise<void> {
+    const gen = ++searchGen;
+    try {
+      const result = await searchInText(content, state.query, state.options);
+      // 後着ガード: この await 中に新しい検索（query/option 変更）が走っていたら破棄する。
+      if (gen !== searchGen) return;
+      // 差分検索時だけ、差分DOM に出せない（改行/ゼロ幅のみの）ヒットを除外して件数・ジャンプ・
+      // ハイライトを同じ filtered 配列で一致させる（S5・件数乖離防止）。エディタ検索（filterDiff=false）は絞らない。
+      const matches =
+        opts.filterDiff && deps.isDiffSearch?.()
+          ? (deps.filterDiffRenderable?.(result.matches) ?? result.matches)
+          : result.matches;
+      state.matches = matches;
+      state.truncated = result.truncated;
+      state.current = matches.length === 0 ? -1 : selectCurrent(matches);
+      applyHighlight(opts.scroll);
+      renderCount();
+    } catch {
+      // 不正な正規表現は searchInText が reject する（regex モードのみ起こりうる）。
+      // 件数を「無効な正規表現」にし、ハイライトを消す（throw を握って UI を保つ）。
+      if (gen !== searchGen) return;
+      state.matches = [];
+      state.current = -1;
+      state.truncated = false;
+      clearActiveHighlight();
+      countLabel.textContent = "無効な正規表現";
+      countLabel.classList.add("search-count-error");
+    }
+  }
+
+  /**
    * 現在の query/options で全文検索し、結果でハイライト・件数表示・current を更新する。
    * keepCurrent=true なら可能な限り直前の現在ヒット位置を近傍維持する（オプション変更/置換後の再検索用）。
    */
@@ -226,45 +266,23 @@ export function createSearchController(deps: SearchDeps): SearchController {
       renderCount();
       return;
     }
-    const gen = ++searchGen;
-    // 現在ヒットの開始バイトを覚えておき、再検索後に近傍維持に使う。
+    // 現在ヒットの開始バイトを覚えておき、再検索後に近傍維持に使う（runSearchCore へ渡す前に state から読む）。
     const prevStart =
       keepCurrent && state.current >= 0 && state.current < state.matches.length
         ? state.matches[state.current].start
         : -1;
-    try {
-      const result = await searchInText(content, state.query, state.options);
-      // 後着ガード: この await 中に新しい検索（query/option 変更）が走っていたら破棄する。
-      if (gen !== searchGen) return;
-      // 差分検索時だけ、差分DOM に出せない（改行/ゼロ幅のみの）ヒットを除外して件数・ジャンプ・
-      // ハイライトを同じ filtered 配列で一致させる（S5・件数乖離防止）。エディタ検索は絞らない。
-      const matches = deps.isDiffSearch?.()
-        ? (deps.filterDiffRenderable?.(result.matches) ?? result.matches)
-        : result.matches;
-      state.matches = matches;
-      state.truncated = result.truncated;
-      if (matches.length === 0) {
-        state.current = -1;
-      } else if (prevStart >= 0) {
-        // 直前の現在ヒットに最も近い（start >= prevStart の最初、無ければ末尾）ヒットへ寄せる。
-        const idx = matches.findIndex((m) => m.start >= prevStart);
-        state.current = idx >= 0 ? idx : matches.length - 1;
-      } else {
-        state.current = 0;
-      }
-      applyHighlight(/* scroll */ !keepCurrent);
-      renderCount();
-    } catch {
-      // 不正な正規表現は searchInText が reject する（regex モードのみ起こりうる）。
-      // 件数を「無効な正規表現」にし、ハイライトを消す（throw を握って UI を保つ）。
-      if (gen !== searchGen) return;
-      state.matches = [];
-      state.current = -1;
-      state.truncated = false;
-      clearActiveHighlight();
-      countLabel.textContent = "無効な正規表現";
-      countLabel.classList.add("search-count-error");
-    }
+    await runSearchCore(
+      content,
+      (matches) => {
+        if (prevStart >= 0) {
+          // 直前の現在ヒットに最も近い（start >= prevStart の最初、無ければ末尾）ヒットへ寄せる。
+          const idx = matches.findIndex((m) => m.start >= prevStart);
+          return idx >= 0 ? idx : matches.length - 1;
+        }
+        return 0;
+      },
+      { scroll: !keepCurrent, filterDiff: true },
+    );
   }
 
   /** いま有効なハイライト先（差分DOM or CM6 エディタ）のハイライトを消す。 */
@@ -409,28 +427,16 @@ export function createSearchController(deps: SearchDeps): SearchController {
     if (!deps.canSearch()) return;
     const content = deps.getContent();
     if (content === null) return;
-    const gen = ++searchGen;
-    try {
-      const result = await searchInText(content, state.query, state.options);
-      if (gen !== searchGen) return;
-      state.matches = result.matches;
-      state.truncated = result.truncated;
-      if (result.matches.length === 0) {
-        state.current = -1;
-      } else {
-        const idx = result.matches.findIndex((m) => m.start >= fromByte);
-        state.current = idx >= 0 ? idx : 0;
-      }
-      applyHighlight(/* scroll */ true);
-      renderCount();
-    } catch {
-      if (gen !== searchGen) return;
-      state.matches = [];
-      state.current = -1;
-      deps.getEditor()?.clearSearch();
-      countLabel.textContent = "無効な正規表現";
-      countLabel.classList.add("search-count-error");
-    }
+    // エディタ専用（置換は差分検索では無効＝doReplaceOne が弾く）なので filterDiff=false。現在ヒットは
+    // start >= fromByte の最初、無ければ先頭へラップする。常に現在ヒットへスクロールする。
+    await runSearchCore(
+      content,
+      (matches) => {
+        const idx = matches.findIndex((m) => m.start >= fromByte);
+        return idx >= 0 ? idx : 0;
+      },
+      { scroll: true, filterDiff: false },
+    );
   }
 
   // ── キー処理 ─────────────────────────────────────────────────────────────────
