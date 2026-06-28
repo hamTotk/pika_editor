@@ -38,8 +38,9 @@ pub const MAX_OPEN_BYTES: u64 = 500 * 1024 * 1024;
 
 /// 行長ガードの閾値（文字数）。1 行がこれを**超える**とサイズと独立にハイライト/折返しを自動オフ。
 ///
-/// AI 出力の単一行巨大 JSON/JSONL 対策（要件2.2 行長ガード）。[`crate::render::guard`] と同値。
-pub const LONG_LINE_CHARS: usize = 100_000;
+/// AI 出力の単一行巨大 JSON/JSONL 対策（要件2.2 行長ガード）。値の単一 source は
+/// [`crate::render::guard::DEFAULT_LONG_LINE_CHARS`]（同値を参照し二重定義のドリフトを断つ＝eval low）。
+pub const LONG_LINE_CHARS: usize = crate::render::guard::DEFAULT_LONG_LINE_CHARS;
 
 // 10MB 閾値の三者一致を**コンパイル時**に担保する（eval low data: 単一源化）。
 // 段階制境界（[`STAGE1_THRESHOLD_BYTES`]）・内容保存境界（[`crate::snapshot::policy::DEFAULT_CONTENT_LIMIT_BYTES`]）・
@@ -170,8 +171,14 @@ pub fn degrade_flags(size_bytes: u64, text: &str) -> DegradeFlags {
 /// 1 行でも行長ガード（[`LONG_LINE_CHARS`] 超）に掛かるか（要件2.2 行長ガード）。
 ///
 /// 改行を含まない巨大 1 行（AI 出力の単一行 JSON/JSONL）を検出する。文字数（grapheme でなく
-/// char）で数え、ハイライト/折返しの自動オフ判定に使う（[`crate::render::guard::has_long_line`]
-/// と同じ閾値・規則。巨大ファイルでは呼び出し側が先頭サンプルを渡す前提）。
+/// char）で数え、ハイライト/折返しの自動オフ判定に使う（巨大ファイルでは呼び出し側が先頭サンプル
+/// を渡す前提）。閾値は [`crate::render::guard::DEFAULT_LONG_LINE_CHARS`] と同値。
+///
+/// **注記（[`crate::render::guard::has_long_line`] とは別実装のまま統合しない）**: 本関数は単独 CR
+/// （`\n` を伴わない `\r`＝旧 Mac 改行）を行長に**数えない**（`docs/acceptance-findings.md`「CR は
+/// 行長に数えない」で固定された挙動）。一方 guard 版は `str::lines()` ベースで単独 CR を行内文字として
+/// **数える**。両者は単独 CR 入力で判定結果が割れるため、一本化すると外部挙動を変えてしまう（純粋
+/// リファクタの原則に反する）。重複に見えるが意図的に別実装を保つ（S2 で統合を見送り＝下記レポート）。
 pub fn has_long_line(text: &str) -> bool {
     // 改行で分割して各行の char 数を見る。末尾改行なしの 1 行巨大ファイルにも効く。
     let mut count = 0usize;

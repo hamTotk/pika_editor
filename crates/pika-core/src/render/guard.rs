@@ -327,13 +327,17 @@ fn count_svg_elements(text: &str) -> u64 {
 
 /// SVG の width*height（属性 or viewBox の幅・高さ）から推定ピクセル数を出す（取れなければ None）。
 fn svg_estimated_pixels(text: &str) -> Option<u64> {
-    let w = svg_attr_number(text, "width");
-    let h = svg_attr_number(text, "height");
+    // 属性名検索用の小文字化は **1 回だけ** 行い width/height/viewBox の探索で使い回す（従来は
+    // svg_attr_value 内で最大 3 回 to_ascii_lowercase していた＝軽量化）。`to_ascii_lowercase` は
+    // バイト長を変えないため `lower` 上の位置は元 `text` にそのまま通用する（取得値は不変）。
+    let lower = text.to_ascii_lowercase();
+    let w = svg_attr_number(text, &lower, "width");
+    let h = svg_attr_number(text, &lower, "height");
     if let (Some(w), Some(h)) = (w, h) {
         return Some(w.saturating_mul(h));
     }
     // viewBox="minx miny w h"
-    if let Some(vb) = svg_attr_value(text, "viewbox") {
+    if let Some(vb) = svg_attr_value(text, &lower, "viewbox") {
         let nums: Vec<f64> = vb
             .split([' ', ',', '\t', '\n'])
             .filter(|s| !s.is_empty())
@@ -349,15 +353,17 @@ fn svg_estimated_pixels(text: &str) -> Option<u64> {
 }
 
 /// SVG 属性の数値（`width="600"` の 600。単位 px は許容しそれ以外は None）。
-fn svg_attr_number(text: &str, name: &str) -> Option<u64> {
-    let raw = svg_attr_value(text, name)?;
+/// `lower` は `text` の小文字化済みコピー（属性名検索用・呼び出し側が 1 回生成して使い回す）。
+fn svg_attr_number(text: &str, lower: &str, name: &str) -> Option<u64> {
+    let raw = svg_attr_value(text, lower, name)?;
     let trimmed = raw.trim().trim_end_matches("px").trim();
     trimmed.parse::<f64>().ok().map(|v| v.max(0.0) as u64)
 }
 
 /// SVG ルートの属性値を素朴に拾う（最初の `name="..."`/`name='...'`・大小無視）。
-fn svg_attr_value(text: &str, name: &str) -> Option<String> {
-    let lower = text.to_ascii_lowercase();
+/// `lower` は `text` を `to_ascii_lowercase` した属性名検索用文字列（呼び出し側で 1 回生成し使い回す）。
+/// `to_ascii_lowercase` はバイト長を変えないため `lower` 上の位置は `text` にそのまま通用する。
+fn svg_attr_value(text: &str, lower: &str, name: &str) -> Option<String> {
     let key = format!("{name}=");
     let pos = lower.find(&key)?;
     let after = &text[pos + key.len()..];
@@ -727,5 +733,139 @@ mod tests {
             DEFAULT_SVG_MAX_ELEMENTS
         )
         .is_allowed());
+    }
+
+    /// BMP ヘッダ（"BM" + DIB の width/height は little-endian i32・offset 18/22）を組み立てる。
+    fn bmp_header(w: i32, h: i32) -> Vec<u8> {
+        let mut b = b"BM".to_vec();
+        b.extend_from_slice(&[0u8; 16]); // offset 2..18（ファイルヘッダ残り + DIB ヘッダ先頭）
+        b.extend_from_slice(&w.to_le_bytes()); // offset 18..22 width(i32 LE)
+        b.extend_from_slice(&h.to_le_bytes()); // offset 22..26 height(i32 LE)
+        b
+    }
+
+    #[test]
+    fn bmp_ヘッダから寸法を読み小寸法は許可し巨大はブロックする() {
+        // 小寸法（1920x1080）は寸法を読めて Allow。
+        assert_eq!(
+            image_dimensions(&bmp_header(1920, 1080)),
+            Some((1920, 1080))
+        );
+        assert!(check_image_bytes(&bmp_header(1920, 1080), DEFAULT_IMAGE_MAX_PIXELS).is_allowed());
+        // 10000x7000 = 7000万px は 6000万px 超でブロック（デコードしない）。
+        let d = check_image_bytes(&bmp_header(10_000, 7_000), DEFAULT_IMAGE_MAX_PIXELS);
+        assert_eq!(
+            d,
+            GuardDecision::Block(BlockReason::ImagePixels {
+                pixels: 70_000_000,
+                limit: DEFAULT_IMAGE_MAX_PIXELS
+            })
+        );
+    }
+
+    #[test]
+    fn bmp_の負の高さ_top_down_は絶対値で寸法を読む() {
+        // BMP は height 負値で top-down 格納。実装は unsigned_abs で寸法を取る。
+        assert_eq!(image_dimensions(&bmp_header(640, -480)), Some((640, 480)));
+    }
+
+    /// WebP(VP8・ロッシー)ヘッダ。width=b[26..28]&0x3fff / height=b[28..30]&0x3fff（実装どおり）。
+    fn webp_vp8_header(w: u16, h: u16) -> Vec<u8> {
+        let mut b = b"RIFF".to_vec();
+        b.extend_from_slice(&[0u8; 4]); // file size（寸法判定に未使用）
+        b.extend_from_slice(b"WEBP");
+        b.extend_from_slice(b"VP8 ");
+        b.extend_from_slice(&[0u8; 10]); // 16..26（チャンク長/フレームタグ/開始コード等・未使用）
+        b.extend_from_slice(&w.to_le_bytes()); // 26..28 width
+        b.extend_from_slice(&h.to_le_bytes()); // 28..30 height
+        b
+    }
+
+    /// WebP(VP8L・ロスレス)ヘッダ。b[21..25] の 32bit に (width-1)|((height-1)<<14) を詰める。
+    fn webp_vp8l_header(w: u32, h: u32) -> Vec<u8> {
+        let mut b = b"RIFF".to_vec();
+        b.extend_from_slice(&[0u8; 4]);
+        b.extend_from_slice(b"WEBP");
+        b.extend_from_slice(b"VP8L");
+        b.extend_from_slice(&[0u8; 4]); // 16..20 チャンク長（未使用）
+        b.push(0x2f); // 20: VP8L シグネチャ
+        let bits = ((w - 1) & 0x3fff) | (((h - 1) & 0x3fff) << 14);
+        b.extend_from_slice(&bits.to_le_bytes()); // 21..25
+        b.resize(30, 0); // 外側ガード（b.len() >= 30）を満たすよう padding
+        b
+    }
+
+    /// WebP(VP8X・拡張)ヘッダ。width-1=b[24..27] / height-1=b[27..30] の 24bit LE。
+    fn webp_vp8x_header(w: u32, h: u32) -> Vec<u8> {
+        let mut b = b"RIFF".to_vec();
+        b.extend_from_slice(&[0u8; 4]);
+        b.extend_from_slice(b"WEBP");
+        b.extend_from_slice(b"VP8X");
+        b.extend_from_slice(&[0u8; 8]); // 16..24 チャンク長(4)+フラグ(4)（未使用）
+        let wm1 = w - 1;
+        let hm1 = h - 1;
+        for v in [wm1, hm1] {
+            b.push((v & 0xff) as u8);
+            b.push(((v >> 8) & 0xff) as u8);
+            b.push(((v >> 16) & 0xff) as u8);
+        }
+        b
+    }
+
+    #[test]
+    fn webp_vp8_ヘッダから寸法を読み小寸法は許可し巨大はブロックする() {
+        assert_eq!(
+            image_dimensions(&webp_vp8_header(1920, 1080)),
+            Some((1920, 1080))
+        );
+        assert!(
+            check_image_bytes(&webp_vp8_header(1920, 1080), DEFAULT_IMAGE_MAX_PIXELS).is_allowed()
+        );
+        let d = check_image_bytes(&webp_vp8_header(10_000, 7_000), DEFAULT_IMAGE_MAX_PIXELS);
+        assert_eq!(
+            d,
+            GuardDecision::Block(BlockReason::ImagePixels {
+                pixels: 70_000_000,
+                limit: DEFAULT_IMAGE_MAX_PIXELS
+            })
+        );
+    }
+
+    #[test]
+    fn webp_vp8l_ヘッダから寸法を読み小寸法は許可し巨大はブロックする() {
+        assert_eq!(
+            image_dimensions(&webp_vp8l_header(1920, 1080)),
+            Some((1920, 1080))
+        );
+        assert!(
+            check_image_bytes(&webp_vp8l_header(1920, 1080), DEFAULT_IMAGE_MAX_PIXELS).is_allowed()
+        );
+        let d = check_image_bytes(&webp_vp8l_header(10_000, 7_000), DEFAULT_IMAGE_MAX_PIXELS);
+        assert_eq!(
+            d,
+            GuardDecision::Block(BlockReason::ImagePixels {
+                pixels: 70_000_000,
+                limit: DEFAULT_IMAGE_MAX_PIXELS
+            })
+        );
+    }
+
+    #[test]
+    fn webp_vp8x_ヘッダから寸法を読み小寸法は許可し巨大はブロックする() {
+        assert_eq!(
+            image_dimensions(&webp_vp8x_header(1920, 1080)),
+            Some((1920, 1080))
+        );
+        assert!(
+            check_image_bytes(&webp_vp8x_header(1920, 1080), DEFAULT_IMAGE_MAX_PIXELS).is_allowed()
+        );
+        let d = check_image_bytes(&webp_vp8x_header(10_000, 7_000), DEFAULT_IMAGE_MAX_PIXELS);
+        assert_eq!(
+            d,
+            GuardDecision::Block(BlockReason::ImagePixels {
+                pixels: 70_000_000,
+                limit: DEFAULT_IMAGE_MAX_PIXELS
+            })
+        );
     }
 }

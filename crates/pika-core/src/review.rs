@@ -50,28 +50,27 @@ pub enum ConfirmDecision {
 }
 
 /// 確認済み操作のエラー（最上位原則: 失敗を握り潰さずベースラインを進めない）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Display 文言は `thiserror` の `#[error("...")]` 属性で宣言する（canon 指定・手書き Display 廃止）。
+/// 文言は手書き版と 1 バイトも変えていない（`{0}` はタプル要素 0＝旧 `{m}` と同一）。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReviewError {
     /// 退避（object 保存）に失敗。ベースラインは未更新（未読維持）。
+    #[error("退避に失敗したためベースラインを更新しませんでした: {0}")]
     StashFailed(String),
     /// 退避不能対象（10MB以上・画像）への破壊的操作を既定ブロック（要件7.3）。
+    #[error("退避が取れないためブロックしました: {0}")]
     StashImpossibleBlocked(String),
 }
 
-impl std::fmt::Display for ReviewError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ReviewError::StashFailed(m) => {
-                write!(f, "退避に失敗したためベースラインを更新しませんでした: {m}")
-            }
-            ReviewError::StashImpossibleBlocked(m) => {
-                write!(f, "退避が取れないためブロックしました: {m}")
-            }
-        }
-    }
+/// 差分時点（`snapshot`）と現ディスク（`disk`）が一致しているか（確認済み確定直前の再照合・要件8.3）。
+///
+/// mtime かハッシュのどちらかでも変化していれば不一致（false）。mtime 据え置きの取りこぼし対策に
+/// ハッシュも見る。`decide_confirm`/`decide_confirm_all` の「ディスク変化」判定を 1 箇所へ集約する
+/// （判定結果は従来の `mtime != || hash !=` と完全等価＝De Morgan で否定形に揃えただけ）。
+fn disk_unchanged(snapshot: &DiffSnapshot, disk: &DiskState) -> bool {
+    snapshot.mtime_ms == disk.mtime_ms && snapshot.content_hash == disk.content_hash
 }
-
-impl std::error::Error for ReviewError {}
 
 /// 「確認済みにする」を判定する（要件8.3）。
 ///
@@ -84,7 +83,7 @@ pub fn decide_confirm(
     policy: BaselinePolicy,
 ) -> ConfirmDecision {
     // mtime かハッシュのどちらかでも変化していれば中断（mtime 据え置きの取りこぼし対策にハッシュも見る）。
-    if diff_snapshot.mtime_ms != disk.mtime_ms || diff_snapshot.content_hash != disk.content_hash {
+    if !disk_unchanged(diff_snapshot, disk) {
         return ConfirmDecision::AbortReDiff;
     }
     ConfirmDecision::UpdateBaseline {
@@ -142,8 +141,7 @@ pub fn decide_confirm_all(targets: &[ConfirmAllTarget]) -> Vec<ConfirmAllOutcome
     targets
         .iter()
         .map(|t| {
-            if t.frozen.mtime_ms != t.disk.mtime_ms || t.frozen.content_hash != t.disk.content_hash
-            {
+            if !disk_unchanged(&t.frozen, &t.disk) {
                 ConfirmAllOutcome::SkippedChanged {
                     rel_path: t.rel_path.clone(),
                 }
@@ -358,6 +356,19 @@ mod tests {
     fn 現在内容が退避不能なら巻き戻しブロック() {
         let e = decide_rollback(true, false).unwrap_err();
         assert!(matches!(e, ReviewError::StashImpossibleBlocked(_)));
+    }
+
+    #[test]
+    fn display文言は手書き版と一致する() {
+        // thiserror 採用後も Display 出力が 1 バイトも変わらないことを固定する（文言回帰防止）。
+        assert_eq!(
+            ReviewError::StashFailed("e".into()).to_string(),
+            "退避に失敗したためベースラインを更新しませんでした: e"
+        );
+        assert_eq!(
+            ReviewError::StashImpossibleBlocked("b".into()).to_string(),
+            "退避が取れないためブロックしました: b"
+        );
     }
 
     #[test]

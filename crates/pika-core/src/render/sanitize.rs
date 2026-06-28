@@ -112,7 +112,12 @@ fn css_has_dangerous_token(css: &str) -> bool {
 ///
 /// 目的は危険トークン（`url(`/`@import`/`expression(` 等）のエスケープ回避を検出することなので、
 /// デコード結果を表示に使うわけではない（検査専用・誤除去を避けるため正当エスケープも忠実に復元する）。
-fn decode_css_escapes(css: &str) -> String {
+fn decode_css_escapes(css: &str) -> Cow<'_, str> {
+    // `\` が 1 つも無ければエスケープ解釈は不要＝借用のまま返す（割当・走査を省く軽量化）。
+    // CSS 宣言の大多数はエスケープを含まないため hot path の早期復帰が効く。判定結果は不変。
+    if !css.contains('\\') {
+        return Cow::Borrowed(css);
+    }
     let mut out = String::with_capacity(css.len());
     let mut chars = css.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -146,7 +151,7 @@ fn decode_css_escapes(css: &str) -> String {
         let code = u32::from_str_radix(&hex, 16).unwrap_or(0xFFFD);
         out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
     }
-    out
+    Cow::Owned(out)
 }
 
 /// `style` 属性値を宣言（`;` 区切り）単位で保守的に検査し、危険トークンを含む宣言を捨てる。
@@ -298,6 +303,36 @@ fn sanitize_css_block_depth(css: &str, nest_depth: usize) -> String {
     out
 }
 
+/// SVG サブセットの幾何/描画タグ（要件6.2・design doc 6章）。
+///
+/// 許可タグ集合（[`build_sanitizer`]）とタグ別の許可属性割当（[`tag_attributes`]）の**双方が参照する
+/// 単一 source**（従来は 2 箇所に同じタグ列を重複定義していた＝eval duplication 解消）。
+/// `script`/`foreignObject` は含めない。アクセシブルテキストの `title`/`desc` は描画属性を持たないため
+/// ここには含めず、許可タグにのみ [`build_sanitizer`] 側で別途追加する（従来挙動どおり）。
+const SVG_GEOMETRY_TAGS: &[&str] = &[
+    "svg",
+    "g",
+    "path",
+    "rect",
+    "circle",
+    "ellipse",
+    "line",
+    "polyline",
+    "polygon",
+    "text",
+    "tspan",
+    "defs",
+    "lineargradient",
+    "radialgradient",
+    "stop",
+    "use",
+    "symbol",
+    "marker",
+    "clippath",
+    "mask",
+    "pattern",
+];
+
 /// 系統に応じた ammonia ビルダーを構築する。
 ///
 /// ammonia の既定は安全側（`<script>`/`on*`/`<iframe>` 等を許可しない）だが、本実装は
@@ -341,31 +376,12 @@ fn build_sanitizer(flavor: PreviewFlavor) -> Builder<'static> {
         "td",
         "img",
         "input", // タスクリストの checkbox（type=checkbox disabled）。
-        // SVG サブセット（design doc 6章: script/foreignObject は含めない）。
-        "svg",
-        "g",
-        "path",
-        "rect",
-        "circle",
-        "ellipse",
-        "line",
-        "polyline",
-        "polygon",
-        "text",
-        "tspan",
-        "defs",
-        "lineargradient",
-        "radialgradient",
-        "stop",
-        "use",
-        "symbol",
-        "title",
-        "desc",
-        "marker",
-        "clippath",
-        "mask",
-        "pattern",
     ]);
+    // SVG サブセット（design doc 6章: script/foreignObject は含めない）。幾何/描画タグは
+    // SVG_GEOMETRY_TAGS（tag_attributes と属性割当を共有する単一 source）、アクセシブルテキストの
+    // title/desc は描画属性を持たないため許可タグにのみ別途追加する（従来の集合と完全一致）。
+    tags.extend(SVG_GEOMETRY_TAGS.iter().copied());
+    tags.extend(["title", "desc"]);
     // 系統B（HTML）は文書スタイル尊重のため <style> を許可する（要件6.3・11.3。JS は CSP/ammonia で無効）。
     // ammonia 既定は <style> を `clean_content_tags`（中身ごと除去）に入れているため、tags へ足すなら
     // clean_content_tags から外す必要がある（両立できない＝ammonia の制約）。
@@ -496,29 +512,9 @@ fn tag_attributes(
         "xmlns",
         "version",
     ]);
-    for tag in [
-        "svg",
-        "g",
-        "path",
-        "rect",
-        "circle",
-        "ellipse",
-        "line",
-        "polyline",
-        "polygon",
-        "text",
-        "tspan",
-        "defs",
-        "lineargradient",
-        "radialgradient",
-        "stop",
-        "use",
-        "symbol",
-        "marker",
-        "clippath",
-        "mask",
-        "pattern",
-    ] {
+    // 幾何/描画タグは許可タグ集合（build_sanitizer）と同じ SVG_GEOMETRY_TAGS を参照する（単一 source）。
+    // title/desc はここでは属性を割り当てない（従来どおり＝描画属性を持たないアクセシブルテキスト）。
+    for &tag in SVG_GEOMETRY_TAGS {
         map.insert(tag, svg_common.clone());
     }
 

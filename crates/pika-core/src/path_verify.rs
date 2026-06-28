@@ -70,26 +70,37 @@ pub fn verify_received_path(raw: &str) -> Result<VerifiedPath> {
     Ok(VerifiedPath { normalized, kind })
 }
 
+/// バイト列のオフセット `at` から `X:`（英字＋コロン）のドライブレターが始まるか。
+///
+/// Windows パス形状判定の単一 source（cli.rs / path_verify.rs が共有して重複を断つ）。
+/// `at=0` で先頭ドライブレター、`at=4` で `\\?\X:` のドライブレターを判定する。
+pub(crate) fn has_drive_letter_at(bytes: &[u8], at: usize) -> bool {
+    bytes.len() >= at + 2 && bytes[at].is_ascii_alphabetic() && bytes[at + 1] == b':'
+}
+
+/// 先頭が `\\` または `//`（UNC・拡張長パス `\\?\` の共通接頭辞）で始まるか。
+pub(crate) fn starts_with_double_slash(raw: &str) -> bool {
+    raw.starts_with(r"\\") || raw.starts_with("//")
+}
+
+/// ドライブ絶対パス（`X:\` または `X:/`）か。`X:rel`（ドライブ相対）・`X:` 単体は絶対ではない。
+pub(crate) fn is_drive_absolute(raw: &str) -> bool {
+    let b = raw.as_bytes();
+    has_drive_letter_at(b, 0) && b.len() >= 3 && (b[2] == b'\\' || b[2] == b'/')
+}
+
 /// 絶対パスか判定し、種別を返す。相対パスはエラー（信頼しない＝再検証で弾く）。
 fn classify_absolute(raw: &str) -> Result<PathKind> {
-    let bytes = raw.as_bytes();
     // 拡張長パス接頭辞（`\\?\` または `//?/`）。
     if raw.starts_with(r"\\?\") || raw.starts_with("//?/") {
         return Ok(PathKind::Extended);
     }
     // UNC（`\\server\share` または `//server/share`）。`\\?\` は上で処理済み。
-    if (raw.starts_with(r"\\") || raw.starts_with("//"))
-        && !raw.starts_with(r"\\?")
-        && !raw.starts_with("//?")
-    {
+    if starts_with_double_slash(raw) && !raw.starts_with(r"\\?") && !raw.starts_with("//?") {
         return Ok(PathKind::Unc);
     }
     // ドライブ絶対（`X:\` または `X:/`）。`X:rel`（ドライブ相対）は絶対ではないので拒否する。
-    if bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'\\' || bytes[2] == b'/')
-    {
+    if is_drive_absolute(raw) {
         return Ok(PathKind::Drive);
     }
     Err(PikaError::InvalidArgument(format!(
@@ -121,9 +132,8 @@ fn reject_alternate_data_stream(raw: &str, kind: &PathKind) -> Result<()> {
 /// 拡張パスで ADS 走査を始めるバイト位置。`\\?\X:` ならドライブレターのコロン直後（6）から、
 /// それ以外（`\\?\UNC\...` 等）は接頭辞直後（4）から走査する。
 fn extended_scan_start(raw: &str) -> usize {
-    let b = raw.as_bytes();
     // `\\?\` は 4 バイト。続けて `X:` ならドライブレターのコロンを許可する。
-    if b.len() >= 6 && b[4].is_ascii_alphabetic() && b[5] == b':' {
+    if has_drive_letter_at(raw.as_bytes(), 4) {
         6
     } else {
         4
