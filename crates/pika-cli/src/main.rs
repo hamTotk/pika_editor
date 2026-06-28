@@ -24,13 +24,18 @@ pika — Windows 向け超軽量 Markdown/HTML エディタ
     pika -g <ファイル>[:<行>[:<桁>]]
 
 オプション:
-    -h, --help       このヘルプを表示して終了する
-    -v, --version    バージョンを表示して終了する
-    -g <spec>        指定位置にカーソルを置いて開く（VS Code 互換）
+    -h, --help            このヘルプを表示して終了する
+    -v, --version         バージョンを表示して終了する
+    -g <spec>             指定位置にカーソルを置いて開く（VS Code 互換）
+    --register-shell      エクスプローラー統合を登録する（HKCU・「pikaで開く」/関連付け候補）
+    --unregister-shell    エクスプローラー統合を解除する
 
 注記:
     本 console CLI は引数を検証し絶対パス正規化して GUI（pika.exe）を起動する。
     既に起動済みのときは GUI 側が単一インスタンスとして引数を転送し前面化する。
+    --register-shell は HKCU\\Software\\Classes に候補（OpenWithProgids）と右クリック
+    「pikaで開く」を追加する（管理者不要）。Windows は既定アプリを強制設定できないため、
+    最後にエクスプローラーで対象を右クリック→「プログラムから開く」→「常にこのアプリ」を選ぶ。
 ";
 
 fn main() -> ExitCode {
@@ -42,7 +47,8 @@ fn main() -> ExitCode {
 ///
 /// パース規則は `pika-core::cli` に集約し、ここでは「制御フラグ処理・絶対パス正規化・GUI 起動」を行う。
 fn run(args: &[String]) -> ExitCode {
-    // 先頭の制御フラグを処理（--help / --version は他引数より優先・同期完結）。
+    // 先頭の制御フラグを処理（--help / --version / --register-shell / --unregister-shell は
+    // 他引数より優先・同期完結。GUI 起動には進まない）。
     for a in args {
         match a.as_str() {
             "-h" | "--help" => {
@@ -54,6 +60,8 @@ fn run(args: &[String]) -> ExitCode {
                 println!("pika {VERSION}");
                 return ExitCode::SUCCESS;
             }
+            "--register-shell" => return register_shell(),
+            "--unregister-shell" => return unregister_shell(),
             _ => {}
         }
     }
@@ -161,6 +169,185 @@ fn gui_exe_path() -> Option<std::path::PathBuf> {
     dir.pop();
     dir.push(if cfg!(windows) { "pika.exe" } else { "pika" });
     Some(dir)
+}
+
+// ── エクスプローラー統合（要件3.3 `--register-shell` / `--unregister-shell`）─────────────
+//
+// 書き込む/消すキー・値の決定は純粋ロジック pika_core::explorer（cargo test 済み）に集約し、
+// ここは HKCU\Software\Classes への実レジストリ書込/削除（Reg*）と関連付け変更通知
+// （SHChangeNotify）という OS 呼び出しの薄いラッパに徹する（design doc 3章）。
+
+/// 終了コード: レジストリ書込/削除に失敗（要件3.4 の終了コード規約に 4 を追加）。
+const EXIT_REGISTRY_FAILURE: u8 = 4;
+
+/// エクスプローラー統合を登録する（HKCU・候補登録＋右クリック「pikaで開く」）。
+#[cfg(windows)]
+fn register_shell() -> ExitCode {
+    // 関連付け先の実行体は GUI（pika.exe）。コンソール窓を出さずに開くため pika-cli.exe ではない。
+    let exe = match gui_exe_path() {
+        Some(p) => p.to_string_lossy().to_string(),
+        None => {
+            eprintln!("エラー: GUI（pika.exe）の場所を特定できません");
+            return ExitCode::from(3);
+        }
+    };
+    let entries = pika_core::explorer::registration_entries(&exe);
+    for e in &entries {
+        if let Err(msg) = win::write_reg_sz(&e.key, &e.name, &e.data) {
+            eprintln!("エラー: レジストリ書込に失敗しました（{}）: {msg}", e.key);
+            return ExitCode::from(EXIT_REGISTRY_FAILURE);
+        }
+    }
+    // エクスプローラーへ関連付け変更を即時反映させる。
+    win::notify_assoc_changed();
+    println!("エクスプローラー統合を登録しました（pika.exe = {exe}）。");
+    println!(
+        "Windows は既定アプリを強制設定できないため、最後にユーザー操作が必要です:\n  \
+         エクスプローラーで対象ファイル（.md/.markdown/.html/.htm）を右クリック →\n  \
+         「プログラムから開く」→「別のプログラムを選択」→ pika を選び「常にこのアプリで開く」。\n  \
+         フォルダ/ファイルの右クリックには「pikaで開く」が追加されています。"
+    );
+    ExitCode::SUCCESS
+}
+
+/// エクスプローラー統合を解除する（独自キーの DeleteTree ＋ OpenWithProgids の pika 値削除）。
+#[cfg(windows)]
+fn unregister_shell() -> ExitCode {
+    let (trees, values) = pika_core::explorer::unregistration();
+    for key in &trees {
+        if let Err(msg) = win::delete_tree(key) {
+            eprintln!("エラー: レジストリキーの削除に失敗しました（{key}）: {msg}");
+            return ExitCode::from(EXIT_REGISTRY_FAILURE);
+        }
+    }
+    for (key, name) in &values {
+        if let Err(msg) = win::delete_value(key, name) {
+            eprintln!("エラー: レジストリ値の削除に失敗しました（{key}\\{name}）: {msg}");
+            return ExitCode::from(EXIT_REGISTRY_FAILURE);
+        }
+    }
+    win::notify_assoc_changed();
+    println!("エクスプローラー統合を解除しました（候補・右クリックを削除）。");
+    ExitCode::SUCCESS
+}
+
+/// 非 Windows ではエクスプローラー統合を持たない（pika は Windows 専用＝通常到達しない）。
+#[cfg(not(windows))]
+fn register_shell() -> ExitCode {
+    eprintln!("エラー: エクスプローラー統合は Windows でのみ対応しています");
+    ExitCode::from(EXIT_REGISTRY_FAILURE)
+}
+
+/// 非 Windows ではエクスプローラー統合を持たない（pika は Windows 専用＝通常到達しない）。
+#[cfg(not(windows))]
+fn unregister_shell() -> ExitCode {
+    eprintln!("エラー: エクスプローラー統合は Windows でのみ対応しています");
+    ExitCode::from(EXIT_REGISTRY_FAILURE)
+}
+
+/// HKCU への実レジストリ書込/削除・関連付け変更通知（OS 呼び出しの薄いラッパ）。
+#[cfg(windows)]
+mod win {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW, RegSetValueExW, HKEY,
+        HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+    };
+    use windows_sys::Win32::UI::Shell::{SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST};
+
+    /// UTF-8 → NUL 終端 UTF-16（Win32 境界変換）。
+    fn to_wide(s: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    /// `HKCU\<key>` の値 `name`（""=既定値）へ `REG_SZ` の `data` を書く（キーが無ければ作る）。
+    pub fn write_reg_sz(key: &str, name: &str, data: &str) -> Result<(), String> {
+        let key_w = to_wide(key);
+        let mut hkey: HKEY = ptr::null_mut();
+        // SAFETY: key_w は NUL 終端。lpClass/lpSecurityAttributes は不要なので null。phkresult のみ受ける。
+        let rc = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                key_w.as_ptr(),
+                0,
+                ptr::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE,
+                ptr::null(),
+                &mut hkey,
+                ptr::null_mut(),
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            return Err(format!("キー作成に失敗（コード {rc}）"));
+        }
+        let name_w = to_wide(name);
+        // REG_SZ は NUL 終端付き UTF-16。バイト長（NUL 含む）を渡す。
+        let data_w = to_wide(data);
+        let data_bytes = data_w.len() * std::mem::size_of::<u16>();
+        // SAFETY: hkey は有効。name_w は NUL 終端。data_w は data_bytes バイトの有効な UTF-16。
+        let set = unsafe {
+            RegSetValueExW(
+                hkey,
+                name_w.as_ptr(),
+                0,
+                REG_SZ,
+                data_w.as_ptr() as *const u8,
+                data_bytes as u32,
+            )
+        };
+        // SAFETY: hkey は RegCreateKeyExW が返した有効なハンドル。
+        unsafe {
+            RegCloseKey(hkey);
+        }
+        if set != ERROR_SUCCESS {
+            return Err(format!("値設定に失敗（コード {set}）"));
+        }
+        Ok(())
+    }
+
+    /// `HKCU\<key>` をサブキーごと削除する（既に無い場合も成功扱い＝冪等）。
+    pub fn delete_tree(key: &str) -> Result<(), String> {
+        let key_w = to_wide(key);
+        // SAFETY: key_w は NUL 終端。HKCU 配下のみを対象にする（root を消さない）。
+        let rc = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key_w.as_ptr()) };
+        if rc == ERROR_SUCCESS || rc == ERROR_FILE_NOT_FOUND {
+            Ok(())
+        } else {
+            Err(format!("キー削除に失敗（コード {rc}）"))
+        }
+    }
+
+    /// `HKCU\<key>` の値 `name` だけを削除する（キー本体は残す。既に無い場合も成功扱い）。
+    pub fn delete_value(key: &str, name: &str) -> Result<(), String> {
+        let key_w = to_wide(key);
+        let name_w = to_wide(name);
+        // SAFETY: key_w / name_w は NUL 終端。キーを開いて値を消し閉じるまでを 1 呼び出しで行う。
+        let rc = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key_w.as_ptr(), name_w.as_ptr()) };
+        if rc == ERROR_SUCCESS || rc == ERROR_FILE_NOT_FOUND {
+            Ok(())
+        } else {
+            Err(format!("値削除に失敗（コード {rc}）"))
+        }
+    }
+
+    /// 関連付け変更をエクスプローラーへ通知する（候補/右クリックを即時反映）。
+    pub fn notify_assoc_changed() {
+        // SAFETY: 引数なしの通知（dwItem は null）。副作用は OS への変更通知のみ。
+        unsafe {
+            SHChangeNotify(
+                SHCNE_ASSOCCHANGED as i32,
+                SHCNF_IDLIST as u32,
+                ptr::null(),
+                ptr::null(),
+            );
+        }
+    }
 }
 
 #[cfg(test)]

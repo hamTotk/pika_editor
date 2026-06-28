@@ -15,6 +15,16 @@ name = "pika-cli"
 path = "src/main.rs"
 
 [dependencies]
-# CLI は core の純粋ロジック（-g パース・データルート解決）に依存する。
+# CLI は core の純粋ロジック（-g パース・データルート解決・エクスプローラー統合の登録エントリ）に依存する。
 # Tauri/wry には依存しない（GUI 起動は pika.exe の spawn で行う＝design doc 9章 二段構成）。
 pika-core = { path = "../pika-core" }
+
+[target.'cfg(windows)'.dependencies]
+# エクスプローラー統合（要件3.3 `--register-shell`/`--unregister-shell`）の OS 呼び出し:
+# HKCU\Software\Classes へのレジストリ書込/削除（Reg*）と関連付け変更通知（SHChangeNotify）。
+# 純粋ロジック（書き込むキー/値の決定）は pika-core::explorer。ここはその薄い OS ラッパに閉じる。
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Registry",
+  "Win32_UI_Shell",
+] }

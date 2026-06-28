@@ -336,6 +336,16 @@ export function onOpenRequest(
   return listen<OpenRequestPayload>("open-request", (e) => handler(e.payload));
 }
 
+/**
+ * 初回起動（サーバー役）の引数オープン要求を **1 回だけ** 取り出す（要件3.2/3.4・Part 1）。
+ * pika 未起動でファイルをダブルクリックした初回プロセスは自分がサーバーで `open-request` イベントを
+ * 受けないため、起動時に渡されたパスはこの pull 経路で取得して開く（無ければ null）。
+ * 状態復元（restoreAppState）の**後**に呼ぶ規約（前回タブを復元してから引数ファイルを開く）。
+ */
+export function takeStartupOpenRequest(): Promise<OpenRequestPayload | null> {
+  return invoke<OpenRequestPayload | null>("take_startup_open_request");
+}
+
 /** 外部変更（合成結果）の購読。返り値の関数で購読解除する。 */
 export function onFsChanged(
   handler: (payload: FsChangedPayload) => void,
