@@ -228,7 +228,7 @@ mod windows_impl {
     /// CreateNamedPipe を FIRST_PIPE_INSTANCE で生成する。既に存在すれば失敗（None）＝クライアント役割。
     fn create_server_pipe(pipe_name: &str) -> Option<HANDLE> {
         let name_w = to_wide(pipe_name);
-        let mut sa = security_attributes()?;
+        let sa = security_attributes()?;
         // SAFETY: name_w は NUL 終端。sa はこの関数スコープで有効。
         let handle = unsafe {
             CreateNamedPipeW(
@@ -239,7 +239,7 @@ mod windows_impl {
                 READ_BUF as u32,
                 READ_BUF as u32,
                 0,
-                &mut sa.attrs,
+                &sa.attrs,
             )
         };
         // SDDL から確保した security descriptor を解放する（成否に関わらず）。
@@ -345,10 +345,10 @@ mod windows_impl {
             return;
         }
         // メッセージモードに設定して 1 メッセージとして書き込む。
-        let mut mode = PIPE_READMODE_MESSAGE;
+        let mode = PIPE_READMODE_MESSAGE;
         // SAFETY: handle は有効。
         unsafe {
-            SetNamedPipeHandleState(handle, &mut mode, ptr::null_mut(), ptr::null_mut());
+            SetNamedPipeHandleState(handle, &mode, ptr::null_mut(), ptr::null_mut());
         }
         let bytes = json.as_bytes();
         let mut written: u32 = 0;
@@ -368,7 +368,7 @@ mod windows_impl {
     /// 次接続用にパイプの追加インスタンスを生成する（FIRST_PIPE_INSTANCE は付けない）。
     fn create_next_instance(pipe_name: &str) -> Option<HANDLE> {
         let name_w = to_wide(pipe_name);
-        let mut sa = security_attributes()?;
+        let sa = security_attributes()?;
         // SAFETY: name_w は NUL 終端。sa は関数スコープで有効。
         let handle = unsafe {
             CreateNamedPipeW(
@@ -379,7 +379,7 @@ mod windows_impl {
                 READ_BUF as u32,
                 READ_BUF as u32,
                 0,
-                &mut sa.attrs,
+                &sa.attrs,
             )
         };
         if !sa.descriptor.is_null() {

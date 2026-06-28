@@ -185,29 +185,26 @@ fn capture_baseline_for(path: &Path, snapshot: &SnapshotService, sensitive_patte
         snapshot.capture_baseline(&path_str, "", size);
         return;
     }
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            // **open_document と同じ encoding::decode** で判定する（指摘6 の direct-children 漏れ）。
-            // 旧実装は String::from_utf8 を使い、Shift_JIS/UTF-16（非UTF-8テキスト）が Err→ハッシュのみへ倒れて
-            // 直下ファイルが誤って「差分非対象」になり、UTF-8 BOM はベースラインに BOM が残って未編集でも偽差分が
-            // 出ていた。decode は BOM を剥がし元エンコーディングを判定するので、テキストは baseline ソースが editor
-            // 内容（open_document の decoded.text / ensure_baseline）と一致し、直下/サブフォルダ・全エンコーディングで
-            // 差分が一貫する（機密/巨大/画像は上の policy 早期 return で既に除外済み）。
-            let decoded = pika_core::encoding::decode(&bytes);
-            if decoded.had_decode_warning {
-                // strict UTF-8 も Shift_JIS 等も判定できず lossy デコードへ倒れた＝テキストでない（バイナリ）。
-                // 旧 from_utf8 Err 分岐の意図（内容を保存しない）を復元する: ロッシーデコードしたバイナリ内容を
-                // data root へ保存せず、バイト由来ハッシュのみベースライン化する（データ最小化#20・肥大/
-                // folder-open コスト回避・第2巡 回帰修正。空文字で確定しない＝#54）。
-                let hash = hash_normalized_lf(&bytes);
-                snapshot.capture_baseline_hash_only(&path_str, &hash);
-            } else {
-                // テキスト（UTF-8/Shift_JIS/UTF-16・BOM 除去済み）: デコード済み内容を保存（差分・巻き戻し可能）。
-                snapshot.capture_baseline(&path_str, &decoded.text, size);
-            }
+    // 読めない（権限/一時ロック等）場合はベースラインを張らない（次回 open で再試行。空文字で確定しない・#54）。
+    if let Ok(bytes) = std::fs::read(path) {
+        // **open_document と同じ encoding::decode** で判定する（指摘6 の direct-children 漏れ）。
+        // 旧実装は String::from_utf8 を使い、Shift_JIS/UTF-16（非UTF-8テキスト）が Err→ハッシュのみへ倒れて
+        // 直下ファイルが誤って「差分非対象」になり、UTF-8 BOM はベースラインに BOM が残って未編集でも偽差分が
+        // 出ていた。decode は BOM を剥がし元エンコーディングを判定するので、テキストは baseline ソースが editor
+        // 内容（open_document の decoded.text / ensure_baseline）と一致し、直下/サブフォルダ・全エンコーディングで
+        // 差分が一貫する（機密/巨大/画像は上の policy 早期 return で既に除外済み）。
+        let decoded = pika_core::encoding::decode(&bytes);
+        if decoded.had_decode_warning {
+            // strict UTF-8 も Shift_JIS 等も判定できず lossy デコードへ倒れた＝テキストでない（バイナリ）。
+            // 旧 from_utf8 Err 分岐の意図（内容を保存しない）を復元する: ロッシーデコードしたバイナリ内容を
+            // data root へ保存せず、バイト由来ハッシュのみベースライン化する（データ最小化#20・肥大/
+            // folder-open コスト回避・第2巡 回帰修正。空文字で確定しない＝#54）。
+            let hash = hash_normalized_lf(&bytes);
+            snapshot.capture_baseline_hash_only(&path_str, &hash);
+        } else {
+            // テキスト（UTF-8/Shift_JIS/UTF-16・BOM 除去済み）: デコード済み内容を保存（差分・巻き戻し可能）。
+            snapshot.capture_baseline(&path_str, &decoded.text, size);
         }
-        // 読めない（権限/一時ロック等）: ベースラインを張らない（次回 open で再試行。空文字で確定しない・#54）。
-        Err(_) => {}
     }
 }
 
@@ -616,7 +613,7 @@ fn move_to_recycle_bin(path: &str) -> Result<(), String> {
     from.push(0);
     // SAFETY: `from` は呼び出し中ずっと生存し二重 NUL 終端。`op` は zeroed 後に必要フィールドのみ設定する。
     let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
-    op.wFunc = FO_DELETE as u32;
+    op.wFunc = FO_DELETE;
     op.pFrom = from.as_ptr();
     // FOF_WANTNUKEWARNING を立て、**ごみ箱へ入れられない対象**（ごみ箱を持たないネットワーク/リムーバブル
     // ドライブ・容量超過等で FOF_ALLOWUNDO が完全削除へフォールバックするケース）では OS 警告を出す（指摘3）。

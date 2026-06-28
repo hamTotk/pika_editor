@@ -312,7 +312,7 @@ mod tests {
         // 判定側がファイルを全読みしないこと（プレフィックス長以下しか読まない）も確認する（指摘2）。
         let dir = temp_dir("prefix");
         let mut body = png_header(640, 480);
-        body.extend(std::iter::repeat(0u8).take(200_000)); // プレフィックス超のダミー後続バイト。
+        body.extend(std::iter::repeat_n(0u8, 200_000)); // プレフィックス超のダミー後続バイト。
         let path = write_bytes(&dir, "wide.png", &body);
         let prefix = read_prefix(&path, IMAGE_HEADER_PREFIX_BYTES).expect("プレフィックス読取");
         assert!(

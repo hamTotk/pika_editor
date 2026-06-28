@@ -330,7 +330,7 @@ fn svg_estimated_pixels(text: &str) -> Option<u64> {
     let w = svg_attr_number(text, "width");
     let h = svg_attr_number(text, "height");
     if let (Some(w), Some(h)) = (w, h) {
-        return Some((w as u64).saturating_mul(h as u64));
+        return Some(w.saturating_mul(h));
     }
     // viewBox="minx miny w h"
     if let Some(vb) = svg_attr_value(text, "viewbox") {

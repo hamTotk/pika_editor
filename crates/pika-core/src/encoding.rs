@@ -227,7 +227,7 @@ const UTF16_NULL_RATIO: f64 = 0.25;
 ///
 /// 偏りが拮抗（どちらとも言えない）なら `None` を返し、後段の UTF-8/Shift_JIS 判定へ委ねる。
 fn detect_bomless_utf16(bytes: &[u8]) -> Option<TextEncoding> {
-    if bytes.len() < 2 || bytes.len() % 2 != 0 {
+    if bytes.len() < 2 || !bytes.len().is_multiple_of(2) {
         return None;
     }
     if null_byte_ratio(bytes) < UTF16_NULL_RATIO {
@@ -280,7 +280,7 @@ fn detect_bomless_utf16(bytes: &[u8]) -> Option<TextEncoding> {
 ///
 /// LE/BE どちらのシグネチャでも検出する。該当しなければ `false`。
 fn looks_like_bomless_utf16_text(bytes: &[u8]) -> bool {
-    if bytes.len() < UTF16_SIGNATURE_MIN_BYTES || bytes.len() % 2 != 0 {
+    if bytes.len() < UTF16_SIGNATURE_MIN_BYTES || !bytes.len().is_multiple_of(2) {
         return false;
     }
     // この警告は「ASCII と紛れて UTF-8 strict が通った」低ヌル域だけが対象。1 バイトでも 0x80 以上を含めば
@@ -804,8 +804,8 @@ mod tests {
         let bytes = vec![0x80, 0x81, 0xFF, 0xFE_u8.wrapping_add(1)];
         let d = decode(&bytes);
         assert_eq!(d.encoding, TextEncoding::Utf8);
-        // どちらの strict デコードも失敗 → lossy + 警告（無条件で開けることが大事）。
-        assert!(d.had_decode_warning || !d.had_decode_warning);
+        // どちらの strict デコードも失敗しても無条件で開ける＝ lossy 採用で警告を立てる（要件5.2・Reopen を促す）。
+        assert!(d.had_decode_warning);
     }
 
     #[test]

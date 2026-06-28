@@ -12,7 +12,6 @@ use pika_core::range::{align_to_lines, window_around, DEFAULT_WINDOW_BYTES};
 use pika_core::search::{self, Cancel, SearchOptions};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::State;
 
@@ -244,6 +243,9 @@ pub struct UnmappableDto {
 /// しない＝最上位原則「データを失わない」）。保存はアトミック書込（一時ファイル→置換）。
 ///
 /// - `force_utf8=true`: 「UTF-8で保存」選択肢（要件5.6）。BOM なし UTF-8 で書き出す。
+// Tauri コマンドの引数は IPC 契約（frontend の invoke 引数）と注入 State に 1:1 対応するため
+// 平坦な署名が必須で、構造体へまとめると IPC 契約が変わる（挙動変更）。よって引数数は許容する。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn save_document(
     path: String,
@@ -514,12 +516,11 @@ pub struct SearchResultDto {
 
 /// 検索/置換のキャンセルトークン置き場（要件5.4「キャンセル可能」）。
 ///
-/// 同時に走る検索/置換は 1 本（フロントの検索バー）想定。`generation` で世代を進め、古い検索を
-/// キャンセルする（新しい検索を始めたら前のをキャンセル＝UI が固まらない）。
+/// 同時に走る検索/置換は 1 本（フロントの検索バー）想定。新しい検索を始めたら直前のトークンを
+/// 差し替えてキャンセルする（前の検索を打ち切り＝UI が固まらない）。
 #[derive(Default)]
 pub struct SearchCancelService {
     current: Mutex<Option<Cancel>>,
-    generation: AtomicU64,
 }
 
 impl SearchCancelService {
@@ -533,7 +534,6 @@ impl SearchCancelService {
         if let Some(prev) = cur.replace(token.clone()) {
             prev.cancel();
         }
-        self.generation.fetch_add(1, Ordering::SeqCst);
         token
     }
 }

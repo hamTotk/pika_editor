@@ -421,7 +421,7 @@ mod win {
         unsafe {
             SHChangeNotify(
                 SHCNE_ASSOCCHANGED as i32,
-                SHCNF_IDLIST as u32,
+                SHCNF_IDLIST,
                 ptr::null(),
                 ptr::null(),
             );

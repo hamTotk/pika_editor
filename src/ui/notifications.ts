@@ -19,9 +19,6 @@ export type NoticeKind =
   | "huge-file-limit"
   | "file-removed";
 
-/** 後方互換の簡易レベル（旧 notify(message, kind) 互換用）。 */
-export type NoticeLevel = "info" | "warn" | "error";
-
 /** 種別の表示優先順位（小さいほど先・要件11.1）。 */
 const PRIORITY: Record<NoticeKind, number> = {
   conflict: 0,
@@ -30,22 +27,6 @@ const PRIORITY: Record<NoticeKind, number> = {
   "script-detected": 3,
   "huge-file-limit": 4,
   "file-removed": 5,
-};
-
-/**
- * 種別が「解消時に自動消滅する」か（要件11.1・pika-core::notify_queue の写し）。衝突だけは閉じるまで残す。
- *
- * 自動消滅する種別は **条件が解消した時点** に呼び出し側が明示 dismiss する（例: 外部許可後の
- * external-resource）。自動消滅しない種別（conflict）はユーザーが × で閉じるまで残す＝閉じるボタンの
- * 表示判断に使う。簡易 notify（トースト）は意味付き通知ではないのでこの表に依らず seq 指定で自動消滅する。
- */
-export const AUTO_DISMISS: Record<NoticeKind, boolean> = {
-  conflict: false,
-  "settings-error": true,
-  "external-resource": true,
-  "script-detected": true,
-  "huge-file-limit": true,
-  "file-removed": true,
 };
 
 const MAX_VISIBLE = 3;
@@ -119,12 +100,6 @@ class NoticeQueue {
   dismiss(kind: NoticeKind, path: string | null): void {
     const key = mergeKey(kind, path);
     this.items = this.items.filter((n) => mergeKey(n.kind, n.path) !== key);
-    this.render();
-  }
-
-  /** タブを閉じたとき、そのタブ固有通知を全消去する。 */
-  dismissTab(path: string): void {
-    this.items = this.items.filter((n) => n.path !== path);
     this.render();
   }
 

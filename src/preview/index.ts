@@ -16,10 +16,14 @@ import {
   type HtmlHazards,
   type PreviewMode,
   type PreviewTheme,
+  type ViewMode,
 } from "../ipc";
 
-/** 表示モード（要件6.1）。差分トグルは別の直交フラグ（diffOn）。 */
-export type ViewMode = "source" | "split" | "preview";
+/**
+ * 表示モード（要件6.1）。差分トグルは別の直交フラグ（diffOn）。
+ * 定義は `../ipc`（state.json の ViewMode と対応）に一元化し、ここでは再エクスポートのみ行う。
+ */
+export type { ViewMode };
 
 /** 占有世代（タブ,モード,差分）。切替直列化に使う（design doc 6章・ui-design 8章）。 */
 export interface PreviewGeneration {
@@ -132,100 +136,13 @@ export async function buildPreview(
   };
 }
 
-/**
- * 別WebView へ注入する信頼 JS の初期化スクリプトを組み立てる（系統A・要件6.2・design doc 6章）。
- *
- * **【Stage ② で実行時の正本は Rust 側へ移動】** 注入する信頼 JS の正本は
- * `crates/pika-core/src/render/mod.rs` の `TRUSTED_JS_INIT`（`wrap_preview_document` が inline 注入）。
- * 信頼 JS と同梱アセットは custom protocol 経由で別WebView 内に閉じ、メイン WebView の JS ワールドを
- * 一切経由しない（HTML/JS を invoke で返さない＝design doc 6章）。本関数はもはやランタイムでは呼ばれず、
- * **意味の対照参照として残す**（変更時は Rust 側 `TRUSTED_JS_INIT` を正とし、文字列の意味を一致させること）。
- *
- * **【Stage ③・失敗の可視化】** 描画失敗は **in-preview で可視化する**（失敗ブロックへ `pika-block-error` を
- * 付け、別WebView 文書の BASE_CSS が縦線＋「描画に失敗」ラベルで視認可能にする＝要件6.2）。
- * F-029 でプレビュー別WebView からの IPC/event は境界で全拒否されるため、失敗件数をメインへ送る
- * 経路は持たない（プレビューに IPC 穴を開け直さない）。旧 `postMessage` 経由の失敗件数通知・
- * `parsePreviewFailureMessage`・main.ts の message リスナは廃止した（送信先が無いため送らない）。
- *
- * 危険オプション封じ（design doc 6章「信頼済み JS の危険オプション封じ」）:
- * - **Mermaid**: `securityLevel:'strict'`（click/任意 HTML 生成禁止）・`startOnLoad:false`（手動 per-block 描画）。
- * - **KaTeX**: `trust:false`・`strict:true`・`maxExpand` 制限（`\href{javascript:}`/`\htmlData` 経路封じ）。
- * - **highlight.js**: コードブロックのみ。
- * - 各ブロック個別描画。構文エラー/タイムアウト（約1秒）で当該ブロックを元コード表示へ戻しエラーマーク。
- *
- * 返すのは別WebView の `<script nonce="...">` に入れる本文（インライン）。`'unsafe-inline'`(script) は
- * CSP に付けず nonce のみ（design doc 6章）。
- */
-export function buildTrustedJsInit(nonce: string): string {
-  // nonce はサニタイズ済み（base64url・backend 生成）だが、文字列連結の安全のため英数記号のみ採用する。
-  const safeNonce = nonce.replace(/[^A-Za-z0-9_-]/g, "");
-  // 別WebView 内で動く初期化（per-block 描画・約1秒タイムアウト・失敗件数集計）。
-  return [
-    `(function(){`,
-    `  "use strict";`,
-    `  var BLOCK_TIMEOUT_MS = 1000;`,
-    `  var failures = 0;`,
-    // 失敗件数の集計は per-block 描画の制御に使う（in-preview で可視化）。メインへ送る経路は
-    // 持たない（F-029 で別WebView の IPC/event は全拒否。targetOrigin "*" の postMessage は廃止）。
-    `  function reportFailures(){ /* in-preview 可視化のみ。外部送信なし。 */ }`,
-    // --- highlight.js（コードブロック） ---
-    `  function runHighlight(){`,
-    `    if (!window.hljs) return;`,
-    `    document.querySelectorAll("pre code").forEach(function(el){`,
-    `      try { window.hljs.highlightElement(el); } catch(e){ failures++; }`,
-    `    });`,
-    `  }`,
-    // --- KaTeX（数式・trust:false/strict:true/maxExpand 制限） ---
-    `  function runKatex(){`,
-    `    if (!window.renderMathInElement) return;`,
-    `    try {`,
-    `      window.renderMathInElement(document.body, {`,
-    `        delimiters: [`,
-    `          { left: "$$", right: "$$", display: true },`,
-    `          { left: "$", right: "$", display: false },`,
-    `          { left: "\\\\(", right: "\\\\)", display: false },`,
-    `          { left: "\\\\[", right: "\\\\]", display: true }`,
-    `        ],`,
-    // 危険オプション封じ（要件6.2・design doc 6章）。
-    `        trust: false, strict: true, maxExpand: 1000, throwOnError: false,`,
-    `        errorCallback: function(){ failures++; }`,
-    `      });`,
-    `    } catch(e){ failures++; }`,
-    `  }`,
-    // --- Mermaid（図・securityLevel:strict・per-block 描画・約1秒タイムアウト） ---
-    `  function runMermaid(){`,
-    `    if (!window.mermaid) return;`,
-    `    try { window.mermaid.initialize({ startOnLoad: false, securityLevel: "strict" }); } catch(e){}`,
-    `    var blocks = document.querySelectorAll("pre code.language-mermaid, code.language-mermaid");`,
-    `    blocks.forEach(function(el, i){`,
-    `      var src = el.textContent || "";`,
-    `      var host = document.createElement("div");`,
-    `      host.className = "pika-mermaid";`,
-    `      var id = "pika-mmd-" + i;`,
-    `      var done = false;`,
-    `      var timer = setTimeout(function(){ if(!done){ done = true; failures++; markError(el); } }, BLOCK_TIMEOUT_MS);`,
-    `      try {`,
-    `        window.mermaid.render(id, src).then(function(out){`,
-    `          if (done) return; done = true; clearTimeout(timer);`,
-    `          host.innerHTML = out.svg;`,
-    `          var pre = el.closest("pre") || el;`,
-    `          pre.parentNode.replaceChild(host, pre);`,
-    `        }).catch(function(){ if(done) return; done = true; clearTimeout(timer); failures++; markError(el); });`,
-    `      } catch(e){ if(!done){ done = true; clearTimeout(timer); failures++; markError(el); } }`,
-    `    });`,
-    `  }`,
-    // 構文エラー/タイムアウト時は当該ブロックを元コード表示へ戻しエラーマーク（要件6.2）。
-    `  function markError(el){`,
-    `    var pre = el.closest("pre") || el;`,
-    `    if (pre && pre.classList) pre.classList.add("pika-block-error");`,
-    `  }`,
-    `  function init(){ runHighlight(); runKatex(); runMermaid(); setTimeout(reportFailures, BLOCK_TIMEOUT_MS + 50); }`,
-    `  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);`,
-    `  else init();`,
-    `})();`,
-    `// nonce=${safeNonce}`,
-  ].join("\n");
-}
+// 信頼 JS（Mermaid/KaTeX/highlight.js）の初期化スクリプトの**実行時の正本は Rust 側**
+// `crates/pika-core/src/render/mod.rs` の `TRUSTED_JS_INIT`（`wrap_preview_document` が別WebView 文書へ
+// inline 注入する）。信頼 JS と同梱アセットは custom protocol 経由で別WebView 内に閉じ、メイン WebView の
+// JS ワールドを一切経由しない（HTML/JS を invoke で返さない＝design doc 6章）。かつてここに同等処理を
+// 生成する `buildTrustedJsInit` の TS 写しがあったが、ランタイム未使用でドリフト源になるため削除した。
+// 危険オプション封じ（Mermaid securityLevel:strict / KaTeX trust:false・strict:true・maxExpand 制限 /
+// 各ブロック個別描画・約1秒タイムアウトで元コードへ復帰）は Rust 側 `TRUSTED_JS_INIT` を正本とする。
 
 /**
  * モード切替の占有解決（要件6.1・ui-design 8章「3モード×差分トグル直交」）。
