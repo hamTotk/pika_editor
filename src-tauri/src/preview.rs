@@ -12,8 +12,8 @@
 
 use include_dir::{include_dir, Dir};
 use pika_core::render::{
-    check_image_bytes, check_svg_bytes, confine_under, join_under, prepare_html_preview,
-    prepare_markdown_preview, resolve_local_ref, rewrite_local_image_refs,
+    check_image_bytes, check_svg_bytes, collect_external_hosts, confine_under, join_under,
+    prepare_html_preview, prepare_markdown_preview, resolve_local_ref, rewrite_local_image_refs,
     wrap_preview_document_with, ExternalResourceAllow, GuardDecision, LocalRefDecision,
     PreviewFeatures, PreviewFlavor, PreviewResponse, PreviewTheme, DEFAULT_IMAGE_MAX_PIXELS,
     DEFAULT_SVG_MAX_ELEMENTS, DEFAULT_SVG_MAX_PIXELS,
@@ -749,55 +749,6 @@ fn scan_markdown_external(content: &str) -> HtmlHazards {
     }
 }
 
-/// 素の文書から外部参照ホスト（`https://<host>`）を重複排除して収集する（要件6.2/6.3・2.4）。
-///
-/// オプトイン許可（[`validate_allow_hosts`] が後段で https のみ受理して再検証）する候補なので、
-/// **`https://` のみ**収集する（`http://` は盗聴/プライバシーのため対象外＝既定遮断のまま）。
-/// 防御ではなく UX 補助（実防御は ammonia + CSP）なので走査は簡易でよい:
-/// `https://` 出現位置からホスト部（`/`・`?`・`#`・空白・クォート・`<`/`>` の手前まで）を切り出し、
-/// `validate_one_host` 相当の最終検証は CSP 組立時（[`build_csp`]）が行う（緩く集めて検証で落とす）。
-fn collect_external_hosts(content: &str) -> Vec<String> {
-    let mut hosts: Vec<String> = Vec::new();
-    let bytes = content.as_bytes();
-    let lower = content.to_ascii_lowercase();
-    let mut search_from = 0usize;
-    // 大文字小文字を無視して `https://` を探すため lowercase 側で位置を取り、ホスト抽出は元 content で行う
-    // （ホスト名は ASCII なので大小は host source 比較に影響しないが、元文字列から切り出す）。
-    while let Some(rel) = lower[search_from..].find("https://") {
-        let start = search_from + rel;
-        let host_start = start + "https://".len();
-        // ホスト部の終端を、区切り文字（パス/クエリ/フラグメント/空白/引用/タグ境界）まで進めて決める。
-        let mut end = host_start;
-        while end < bytes.len() {
-            let c = bytes[end] as char;
-            if c == '/'
-                || c == '?'
-                || c == '#'
-                || c == '"'
-                || c == '\''
-                || c == '<'
-                || c == '>'
-                || c == ')'
-                || c == ']'
-                || c.is_whitespace()
-            {
-                break;
-            }
-            end += 1;
-        }
-        let host = &content[host_start..end];
-        if !host.is_empty() {
-            let normalized = format!("https://{host}");
-            if !hosts.contains(&normalized) {
-                hosts.push(normalized);
-            }
-        }
-        // 次の検索開始位置（最低でも 1 進めて無限ループを防ぐ）。
-        search_from = end.max(start + "https://".len());
-    }
-    hosts
-}
-
 /// HTML プレビューの危険検知結果（要件6.3・通知バー文言の根拠）。
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct HtmlHazards {
@@ -893,77 +844,6 @@ mod tests {
         assert!(!h.has_external_ref);
         assert!(!h.has_meta_refresh);
         assert!(h.external_hosts.is_empty());
-    }
-
-    #[test]
-    fn 外部ホスト収集_https_のみを重複排除して集める() {
-        // 要件6.2/6.3・2.4: オプトイン許可候補は https のみ。http は盗聴/プライバシーのため除外する。
-        let hosts = collect_external_hosts(
-            "<img src=\"https://www.w3.org/logo.png\"> \
-             <link href='https://cdn.example.com/x.css'> \
-             <img src=\"http://insecure.example/a.png\"> \
-             <img src=\"https://www.w3.org/another.svg\">",
-        );
-        // www.w3.org は重複排除され 1 件、cdn.example.com が 1 件。http は含めない。
-        assert!(
-            hosts.contains(&"https://www.w3.org".to_string()),
-            "w3.org が収集されない: {hosts:?}"
-        );
-        assert!(
-            hosts.contains(&"https://cdn.example.com".to_string()),
-            "cdn が収集されない: {hosts:?}"
-        );
-        assert!(
-            !hosts.iter().any(|h| h.contains("insecure.example")),
-            "http ホストが混入した: {hosts:?}"
-        );
-        // 重複排除: www.w3.org は 1 回だけ。
-        assert_eq!(
-            hosts
-                .iter()
-                .filter(|h| h.as_str() == "https://www.w3.org")
-                .count(),
-            1,
-            "重複排除されていない: {hosts:?}"
-        );
-        // 収集したホストは https のみ・パス/クエリを含まない（CSP の host source 形式）。
-        for h in &hosts {
-            assert!(h.starts_with("https://"), "https 以外が混入: {h}");
-            assert!(!h["https://".len()..].contains('/'), "パスが残った: {h}");
-        }
-    }
-
-    #[test]
-    fn 外部ホスト収集_ポート付きとフラグメント_クエリを正しく切る() {
-        let hosts = collect_external_hosts(
-            "see https://example.com:8443/path?q=1#frag and https://cdn.test/a",
-        );
-        assert!(
-            hosts.contains(&"https://example.com:8443".to_string()),
-            "ポート付きホストが取れない: {hosts:?}"
-        );
-        assert!(
-            hosts.contains(&"https://cdn.test".to_string()),
-            "ホストが取れない: {hosts:?}"
-        );
-    }
-
-    #[test]
-    fn 外部ホスト収集_収集結果は_csp_検証を通る() {
-        // 緩く集めて検証で落とす規約（要件6.2）: collect の出力は build_csp/validate_allow_hosts が
-        // 受理できる host source 形式（https のみ・パス/クエリ/区切りなし）であることを担保する。
-        use pika_core::render::{validate_allow_hosts, ExternalResourceAllow};
-        let hosts = collect_external_hosts(
-            "<img src=\"https://www.w3.org/Icons/valid-html401.png\"> \
-             <img src=\"https://cdn.example.com:443/lib/font.woff2\">",
-        );
-        let allow = ExternalResourceAllow {
-            hosts: hosts.clone(),
-        };
-        assert!(
-            validate_allow_hosts(&allow).is_ok(),
-            "収集ホストが CSP 検証で落ちた: {hosts:?}"
-        );
     }
 
     #[test]

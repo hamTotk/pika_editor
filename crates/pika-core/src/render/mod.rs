@@ -17,7 +17,10 @@ pub mod guard;
 pub mod path;
 pub mod sanitize;
 
-pub use csp::{build_csp, generate_nonce, validate_allow_hosts, ExternalResourceAllow, Nonce};
+pub use csp::{
+    build_csp, collect_external_hosts, generate_nonce, validate_allow_hosts, ExternalResourceAllow,
+    Nonce,
+};
 pub use guard::{
     check_image_bytes, check_image_pixels, check_svg, check_svg_bytes, has_long_line,
     image_dimensions, BlockReason, GuardDecision, DEFAULT_HTML_TIMEOUT_MS,

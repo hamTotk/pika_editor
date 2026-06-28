@@ -50,8 +50,11 @@ pub fn persist_object(snap_dir: &Path, hash: &str, content: &str) {
     if target.exists() {
         return; // write-once（content-addressed＝同一ハッシュは同一内容）。
     }
-    let compressed = zstd_compress(content.as_bytes());
-    let _ = atomic_write(&target, &compressed);
+    // zstd 圧縮は panic させず Result で受ける。失敗時（メモリ zstd では実際には起きない）は object を
+    // 書かずに諦める＝既存の `atomic_write` 失敗時と同じ best-effort 挙動（観測上は不変・データ安全側）。
+    if let Ok(compressed) = zstd_compress(content.as_bytes()) {
+        let _ = atomic_write(&target, &compressed);
+    }
 }
 
 /// 退避 object の自己記述メタを書く（index 破損復元の素＝最後の砦）。

@@ -38,9 +38,11 @@ pub const MAX_OPEN_BYTES: u64 = 500 * 1024 * 1024;
 
 /// 行長ガードの閾値（文字数）。1 行がこれを**超える**とサイズと独立にハイライト/折返しを自動オフ。
 ///
-/// AI 出力の単一行巨大 JSON/JSONL 対策（要件2.2 行長ガード）。値の単一 source は
-/// [`crate::render::guard::DEFAULT_LONG_LINE_CHARS`]（同値を参照し二重定義のドリフトを断つ＝eval low）。
-pub const LONG_LINE_CHARS: usize = crate::render::guard::DEFAULT_LONG_LINE_CHARS;
+/// AI 出力の単一行巨大 JSON/JSONL 対策（要件2.2 行長ガード）。値の単一 source は中立な最下層
+/// [`crate::limits::DEFAULT_LONG_LINE_CHARS`]（同値を参照し二重定義のドリフトを断つ＝eval low）。
+/// 旧来 `crate::render::guard` を参照していたが、編集系（huge）→ 描画系（render）の**上向き依存**に
+/// なるため limits へ寄せた（レイヤー依存を一方向に保つ＝S3）。
+pub const LONG_LINE_CHARS: usize = crate::limits::DEFAULT_LONG_LINE_CHARS;
 
 // 10MB 閾値の三者一致を**コンパイル時**に担保する（eval low data: 単一源化）。
 // 段階制境界（[`STAGE1_THRESHOLD_BYTES`]）・内容保存境界（[`crate::snapshot::policy::DEFAULT_CONTENT_LIMIT_BYTES`]）・
@@ -172,7 +174,7 @@ pub fn degrade_flags(size_bytes: u64, text: &str) -> DegradeFlags {
 ///
 /// 改行を含まない巨大 1 行（AI 出力の単一行 JSON/JSONL）を検出する。文字数（grapheme でなく
 /// char）で数え、ハイライト/折返しの自動オフ判定に使う（巨大ファイルでは呼び出し側が先頭サンプル
-/// を渡す前提）。閾値は [`crate::render::guard::DEFAULT_LONG_LINE_CHARS`] と同値。
+/// を渡す前提）。閾値は [`crate::limits::DEFAULT_LONG_LINE_CHARS`] と同値。
 ///
 /// **注記（[`crate::render::guard::has_long_line`] とは別実装のまま統合しない）**: 本関数は単独 CR
 /// （`\n` を伴わない `\r`＝旧 Mac 改行）を行長に**数えない**（`docs/acceptance-findings.md`「CR は

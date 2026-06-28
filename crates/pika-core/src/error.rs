@@ -13,6 +13,10 @@ pub enum PikaError {
     /// データルート/パスの解決に失敗。
     #[error("パス解決に失敗: {0}")]
     PathResolution(String),
+    /// 内部処理（zstd 圧縮など）の失敗。通常は起きないが、`panic`=abort を避けて `Result` で
+    /// 安全側（データを失わない＝退避を書かずに諦める）へ倒すための変種。
+    #[error("内部エラー: {0}")]
+    Internal(String),
 }
 
 /// コア公開 API の戻り型。
@@ -33,5 +37,6 @@ mod tests {
             PikaError::PathResolution("y".into()).to_string(),
             "パス解決に失敗: y"
         );
+        assert_eq!(PikaError::Internal("z".into()).to_string(), "内部エラー: z");
     }
 }

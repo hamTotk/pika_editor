@@ -10,16 +10,20 @@
 //! 本モジュールは Tauri/wry/画像デコーダを一切知らない純粋ロジック（cargo test の決定論ゲート対象）。
 //! 画像の寸法（width/height）・SVG の要素数/推定ピクセル数は呼び出し側がヘッダ/パースから供給する。
 
-/// 画像の総ピクセル数の既定上限（要件2.2: 6000万px）。これを**超える**とデコードせず誘導。
-pub const DEFAULT_IMAGE_MAX_PIXELS: u64 = 60_000_000;
+/// 画像の総ピクセル数の既定上限（要件2.2: 6000万px）／1 行の長さガード（要件2.2: 10万字）。
+///
+/// 正準定義は中立な最下層 [`crate::limits`] にあり（編集系 [`crate::huge`]・非テキスト判定
+/// [`crate::nontext`] も参照するため、描画系に置くと「編集系 → 描画系」の上向き依存になる）、ここでは
+/// **再エクスポートのみ**行う。これにより既存参照点 `render::guard::DEFAULT_IMAGE_MAX_PIXELS` /
+/// `DEFAULT_LONG_LINE_CHARS`（src-tauri は `pika_core::render` 経由で import）は不変に解決できる。
+pub use crate::limits::{DEFAULT_IMAGE_MAX_PIXELS, DEFAULT_LONG_LINE_CHARS};
+
 /// SVG の展開ピクセル数相当の既定上限（要件2.2: 8000万px）。
 pub const DEFAULT_SVG_MAX_PIXELS: u64 = 80_000_000;
 /// SVG の要素数の既定上限（要件2.2: 5万要素）。
 pub const DEFAULT_SVG_MAX_ELEMENTS: u64 = 50_000;
 /// HTML レンダリングのタイムアウト（要件2.2: 10 秒）。描画側へ供給する値。
 pub const DEFAULT_HTML_TIMEOUT_MS: u64 = 10_000;
-/// 1 行の長さガード（要件2.2: 10万字超でハイライト/折返し自動オフ）。
-pub const DEFAULT_LONG_LINE_CHARS: usize = 100_000;
 
 /// 暴走ガードの判定結果（要件2.2）。
 #[derive(Debug, Clone, PartialEq, Eq)]
