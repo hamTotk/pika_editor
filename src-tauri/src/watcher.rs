@@ -520,11 +520,14 @@ fn advance_baseline(
 ///
 /// **固まらない原則（design doc 1章）**: 重い再帰列挙（[`enumerate_fingerprints`]）を必ず**ロック外**で
 /// 行う。手順は『短いロックで (root, ready, excluded) を読む→未ルート/ベースライン未構築なら 0 で早期
-/// return→（`status` 指定時）watch-mode を emit→**ロック外で列挙**→再ロックで baseline 比較＋前進
-/// （#14）→ロック解放後に changes 非空なら fs-changed を emit→検知件数を返す』。
+/// return→（`status` 指定時）watch-mode を emit→**ロック外で列挙**→再ロックで **root 不変＋ready を再検証**
+/// （列挙中の切替/停止なら 0 で早期 return）→baseline 比較＋前進（#14）→ロック解放後に changes 非空なら
+/// fs-changed を emit→検知件数を返す』。
 ///
 /// 旧実装では `resync_now` だけがロックを保持したまま列挙していた（固まらない原則違反）。3 経路を本関数へ
 /// 統合してこれを解消し、ready 判定・emit ペイロード形・二重 emit 防止（baseline 前進）を 1 か所に集約する。
+/// 列挙をロック外へ出した分、再ロック後の root/ready 再検証で「列挙中にフォルダを開き直したら別ルートの
+/// baseline を汚染する」競合を塞ぐ（旧 `resync_now` の全期間ロック保持と同じ不変条件を回復）。
 /// `status` は watch-mode のステータス文言（F5・オーバーフローは Some、ポーリングは毎ティック出さず None）。
 fn resync_and_emit(
     inner: &Arc<Mutex<WatcherInner>>,
@@ -552,6 +555,14 @@ fn resync_and_emit(
     let current = enumerate_fingerprints(&root, &excluded);
     let (count, changes) = match inner.lock() {
         Ok(mut g) => {
+            // 列挙中にフォルダ切替/停止が起きていないか再検証する。root が差し替わっている／
+            // baseline が未準備に戻っている場合、別ルートで集めた current を現 baseline と突き合わせると
+            // 偽の created/removed を撒き baseline を汚染する。旧 resync_now は列挙ごとロック保持でこの窓が
+            // 無かった。再ロック後に root 不変＋ready を確認し、崩れていれば何もせず 0 を返す
+            // （spawn_baseline_build の破棄判定と同じ作法）。
+            if g.root.as_deref() != Some(root.as_path()) || !g.baseline_ready {
+                return 0;
+            }
             let outcome = resync_against_baseline(&g.baseline, &current);
             let count = outcome.total();
             advance_baseline(&mut g.baseline, &current, &outcome);
