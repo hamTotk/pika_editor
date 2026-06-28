@@ -19,6 +19,7 @@ import {
   onOpenRequest,
   takeStartupOpenRequest,
   hashContent,
+  fileDiskHash,
   noteRecent,
   showPreview,
   hidePreview,
@@ -89,7 +90,13 @@ import {
   tabsEl,
   hiddenUnreadBadge,
 } from "./ui/dom";
-import { promptText, confirmModal, confirmDiscardModal, isModalOpen } from "./ui/modal";
+import {
+  promptText,
+  confirmModal,
+  confirmDiscardModal,
+  conflictModal,
+  isModalOpen,
+} from "./ui/modal";
 import { openContextMenu, type ContextItem } from "./ui/context-menu";
 import { type OpenTab, type AppShellState } from "./app/types";
 import { buildMenuSpecs, encodingLabel } from "./ui/menu-specs";
@@ -1030,9 +1037,73 @@ async function onSave(): Promise<void> {
   const path = state.active;
   const content = state.editor.getContent();
   const tab = state.tabs.find((t) => t.path === path);
+  // 保存前の外部変更（衝突）検知（修正4・最上位原則「データを失わない」）。ディスク現内容のハッシュが
+  // 最後に読込/保存した内容（tab.contentHash）と食い違う＝外部変更あり。無確認のサイレント上書きを避け、
+  // 自前モーダルで［退避して上書き／別名で保存／再読込で破棄／キャンセル］を選ばせる（window.confirm 不可）。
+  if (await detectSaveConflict(path, tab)) {
+    const choice = await conflictModal(
+      `「${tab?.title ?? basename(path)}」はディスク上で外部から変更されています。\n` +
+        `［退避して上書き］は外部変更を退避してから保存します（変更は失われません）。どうしますか？`,
+    );
+    if (choice === "cancel") return; // 何もしない（編集も外部変更もそのまま）。
+    if (choice === "saveAs") {
+      await onSaveAs(); // 外部変更を残し、別パスへ保存。
+      return;
+    }
+    if (choice === "reload") {
+      await reloadActiveFromDisk(path, tab); // ディスク内容で再読込し自分の編集を破棄（保存しない）。
+      return;
+    }
+    // "overwrite": 通常保存へ続行（backend の stash_incoming_before_overwrite が外部変更を退避してから上書き）。
+  }
   await withBusy(async () => {
     await saveOnce(path, content, tab, false);
   });
+}
+
+/**
+ * 保存前の外部変更（衝突）検知（修正4）。ディスク現内容のハッシュ（fileDiskHash）が、タブが最後に
+ * 読込/保存した内容のハッシュ（tab.contentHash）と食い違えば外部変更あり＝true。
+ *
+ * - content_hash が未確定（空）なら基準が無いので衝突判定しない（誤検知を避け通常保存）。
+ * - ディスク不在（新規/削除済み＝null）は衝突なし（新規保存）。一致＝外部変更なし。不一致＝衝突。
+ * - 取得失敗時は衝突なし扱いで通常保存（保存自体は backend の退避先行が最後の砦＝データを失わない）。
+ */
+async function detectSaveConflict(path: string, tab: OpenTab | undefined): Promise<boolean> {
+  if (!tab || !tab.contentHash) return false;
+  try {
+    const diskHash = await fileDiskHash(path);
+    return diskHash !== null && diskHash !== tab.contentHash;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * アクティブタブをディスク内容で再読込し、自分の編集を破棄する（衝突モーダルの［再読込で破棄］・修正4）。
+ * 外部変更を正として取り込み、未読/衝突通知をクリアする（保存はしない）。
+ */
+async function reloadActiveFromDisk(path: string, tab: OpenTab | undefined): Promise<void> {
+  if (!state.editor || state.active !== path) return;
+  try {
+    const content = await readFile(path);
+    state.editor.reloadExternal(content);
+    // 検索バーを開いたまま再読込された場合、件数/ハイライトを新内容へ追従させる（stale 化を防ぐ）。
+    searchController?.refresh();
+    if (tab) {
+      tab.dirty = false;
+      tab.draft = undefined; // 編集破棄＝退避バッファも不要。
+    }
+    void captureTabHash(path, content); // 復元基準ハッシュを新内容へ更新。
+    state.unread.clearFile(path);
+    notices.dismiss("conflict", path); // 衝突は解消（再読込で取り込んだ）。
+    refreshTabs();
+    refreshTree();
+    refreshStatus();
+    notify("ディスクの内容で再読込しました（未保存の編集は破棄）", "info");
+  } catch (e) {
+    notify(`再読込に失敗しました: ${String(e)}`, "error");
+  }
 }
 
 /**
@@ -1092,6 +1163,8 @@ async function saveOnce(
     void captureTabHash(path, content);
     // 自身の保存では未読を付けない（backend のハッシュ一致抑制と二重で担保）。
     state.unread.clearFile(path);
+    // 外部変更の衝突通知（修正4）は保存（退避→上書き）で解消したので消す。
+    notices.dismiss("conflict", path);
     refreshTabs();
     refreshTree();
     refreshStatus(); // 差分あり数（差分 N）を更新。
@@ -1324,7 +1397,7 @@ function applyHostVisibility(occ: ReturnType<typeof resolveOccupancy>): void {
 
 /**
  * 左右並置（split）の出し分け（ui-design 8章）。occ は直交占有の結果なので、
- *  - プレビュー＋差分（preview/split で差分ON）→ 左＝レンダリング／右＝テキスト差分。
+ *  - プレビュー＋差分（preview/split で差分ON）→ 左＝テキスト差分／右＝レンダリング（修正5 要件改定）。
  *  - 分割＋差分OFF（split で showEditor && showPreview）→ 左＝エディタ／右＝プレビュー。
  *  - それ以外（単独占有）→ data-split を外し既存の単独レイアウト（grid-row:2 を 1 要素が占有）に戻す。
  */
@@ -1665,9 +1738,20 @@ function onExternalChange(changes: import("./ipc").FsChange[]): void {
 async function autoReloadCleanTabs(changes: import("./ipc").FsChange[]): Promise<void> {
   if (!state.active || !state.editor) return;
   const activeTab = state.tabs.find((t) => t.path === state.active);
-  if (!activeTab || activeTab.dirty) return; // 未保存変更があれば自動リロードしない。
+  if (!activeTab) return;
   const hit = changes.find((c) => c.kind === "modified" && c.path === state.active);
   if (!hit) return;
+  // 未保存（dirty）タブは自動リロードせず（編集保持）、外部変更（衝突）を通知バーで提示する（修正4）。
+  // 旧実装は dirty なら無言 return で、その後の保存が衝突を提示せずサイレント上書きしうる欠陥があった。
+  // 黙らずユーザーに気づかせる（通知は kind="conflict"・path 単位で 1 回に集約＝連続変更で増殖しない）。
+  if (activeTab.dirty) {
+    notices.push(
+      "conflict",
+      state.active,
+      "このファイルはディスク上で外部から変更されています。保存時に退避/上書き/再読込を選べます。",
+    );
+    return;
+  }
   try {
     const content = await readFile(state.active);
     state.editor.reloadExternal(content);
@@ -1679,6 +1763,8 @@ async function autoReloadCleanTabs(changes: import("./ipc").FsChange[]): Promise
     void captureTabHash(state.active, content);
     // 自動リロードで現在タブを見たので未読は解除（外部変更を反映済み）。
     state.unread.clearFile(state.active);
+    // クリーンタブは外部変更を取り込んだので衝突通知は不要（万一残っていれば消す）。
+    notices.dismiss("conflict", state.active);
     refreshTabs();
     refreshTree();
   } catch (e) {

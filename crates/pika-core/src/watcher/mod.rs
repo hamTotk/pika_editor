@@ -12,18 +12,21 @@
 //! モジュール構成（design doc 4章 watcher の責務をサブモジュールへ分解）:
 //! - [`event`] — 抽象 raw event 型・[`FsChange`]（合成結果）・[`FileId`]（rename 補強）
 //! - [`debounce`] — デバウンス/合体・静穏期間＋mtime/サイズ安定での確定読み判定
-//! - [`self_save`] — 自己保存抑制（ハッシュ一致主条件・ワンショット・時刻窓は補助安全弁）
+//! - [`self_save`] — 自己保存抑制（ハッシュ一致主条件・時刻窓内は複数イベントを抑制・GC は補助安全弁）
 //! - [`rename`] — rename 旧名/新名ペア正規化（FileId 補強・スワップ/往復/上書き/片側欠落）
 //! - [`overflow`] — オーバーフロー再同期（全再列挙→mtime/サイズ→ハッシュ比較）
+//! - [`temp`] — pika 一時ファイル（`*.pika.tmp`）判定（監視・列挙からの除外＝自己保存抑制の前段）
 
 pub mod debounce;
 pub mod event;
 pub mod overflow;
 pub mod rename;
 pub mod self_save;
+pub mod temp;
 
 pub use debounce::{Debouncer, PendingState};
 pub use event::{FileId, FsChange, FsChangeKind, RawFsEvent, RawFsEventKind};
 pub use overflow::{resync_against_baseline, FileFingerprint, ResyncOutcome};
 pub use rename::{normalize_renames, RenameResolution};
 pub use self_save::{SaveToken, SaveTokenStore, SuppressDecision};
+pub use temp::is_pika_temp;

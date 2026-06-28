@@ -196,7 +196,8 @@ const markdownMarkStyles = {
  */
 const pikaHighlightStyle = HighlightStyle.define([
   // ── Markdown マークアップ ───────────────────────────────
-  // 見出しは色＋太字。h1〜h3 のみ僅かなサイズ差で階層を示す（h4 以降は本文サイズのまま色＋太字）。
+  // 見出しは色＋太字で階層を示す。ソース表示の文字サイズは本文と同じ（修正2: cm-tok-h1/h2/h3 は
+  // CSS 側で font-size:1em に戻す＝サイズで階層を出さない）。クラス割当はレベル識別のため残す。
   { tag: tags.heading1, class: "cm-tok-heading cm-tok-h1" },
   { tag: tags.heading2, class: "cm-tok-heading cm-tok-h2" },
   { tag: tags.heading3, class: "cm-tok-heading cm-tok-h3" },

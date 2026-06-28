@@ -69,6 +69,7 @@ fn run() {
         commands::save_app_state,
         commands::restore_app_state,
         commands::hash_content,
+        commands::file_disk_hash,
         commands::note_recent,
         commands::path_kind,
         commands::open_in_default_app,

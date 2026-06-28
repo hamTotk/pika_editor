@@ -15,7 +15,8 @@
 use notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind, RenameMode};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use pika_core::watcher::{
-    Debouncer, FsChange, FsChangeKind, RawFsEvent, RawFsEventKind, SaveTokenStore,
+    is_pika_temp, Debouncer, FsChange, FsChangeKind, RawFsEvent, RawFsEventKind, SaveTokenStore,
+    SuppressDecision,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -369,6 +370,11 @@ fn handle_notify_event(
             continue;
         }
         let path_str = path.to_string_lossy().to_string();
+        // pika 自身のアトミック書込が作る一時ファイル（*.pika.tmp）は監視・合成・baseline から完全除外する
+        // （要件7.1・修正1）。除外しないと一時ファイルの Create/Modify/Remove がツリー/未読を汚す。
+        if is_pika_temp(&path_str) {
+            continue;
+        }
         let (kind, is_rename) = match &event.kind {
             EventKind::Create(
                 CreateKind::Any | CreateKind::File | CreateKind::Folder | CreateKind::Other,
@@ -404,21 +410,11 @@ fn handle_notify_event(
             continue;
         }
 
-        // 自己保存抑制: 内容ハッシュ一致ならワンショットで抑制（未読を付けない）。
-        // #13: ハッシュ採取と decide を 1 つの critical section に閉じ込め、ロック外で採った
-        // stale なハッシュで判定する TOCTOU 窓を消す（hash_file は対象 1 ファイルの read のみで
-        // ロック保持は短時間＝固まらない原則の範囲内）。
-        if matches!(kind, RawFsEventKind::Modified | RawFsEventKind::Created) {
-            if let Ok(mut g) = inner.lock() {
-                let disk_hash = hash_file(path);
-                if matches!(
-                    g.save_tokens.decide(&path_str, disk_hash.as_deref(), now),
-                    pika_core::watcher::SuppressDecision::Suppress
-                ) {
-                    continue;
-                }
-            }
-        }
+        // 自己保存抑制はここ（イベント受信時）では行わず、合成後の単一関門 [`drain_and_emit`] で
+        // 一括判定する（修正1）。アトミック置換保存は対象パスへ Removed/Modified/Created/rename-to の
+        // **複数イベント**を撒くため、Modified|Created だけを受信時に抑制する旧方式では Removed/rename-to が
+        // 素通りして取り消し線（未読 removed）を立てていた。デバウンス後の合成結果（種別合体済み）に対し
+        // 現ディスク内容ハッシュ＝保存後ハッシュで抑制する方が、全種別を覆う堅い関門になる。
         debouncer.feed(&raw);
     }
 }
@@ -444,37 +440,70 @@ fn drain_and_emit(
         }
     }
 
-    if changes.is_empty() {
+    // 自己保存抑制＋偽Removed除去＋トークンGC＋baseline前進を **1 つの critical section** で行う（修正1・#14）。
+    // - 自己保存抑制（単一関門）: 各 change の対象 path に保存トークンがあり、現ディスク内容ハッシュが
+    //   保存後ハッシュと一致するなら捨てる。Created/Modified だけでなく Removed/rename-to(Created) も覆う
+    //   （アトミック置換が撒く複数の自己イベントを全部飲む＝取り消し線の根因を塞ぐ）。`hash_file` の I/O は
+    //   トークンがある path に限って行い（`contains` で短絡）、ロック保持中の不要なファイル読みを避ける
+    //   （#13 TOCTOU はハッシュ採取と decide を同一ロックに閉じ込めて解消・固まらない範囲）。
+    // - 偽Removed: アトミック置換で実体が消えていない Removed（まだ存在する）は取り消し線にせず Modified に
+    //   倒す（単発 stat のみ＝再帰列挙ではない）。
+    // - GC: 窓超過の保存トークンを掃除する（decide はワンショット消費しないため）。
+    let emit_changes: Vec<FsChange> = match inner.lock() {
+        Ok(mut g) => {
+            g.save_tokens.gc_expired(now);
+            let mut kept: Vec<FsChange> = Vec::with_capacity(changes.len());
+            for c in changes {
+                // 自己保存抑制（トークンがある path のみハッシュ採取）。
+                if g.save_tokens.contains(&c.path) {
+                    let disk_hash = hash_file(Path::new(&c.path));
+                    if matches!(
+                        g.save_tokens.decide(&c.path, disk_hash.as_deref(), now),
+                        SuppressDecision::Suppress
+                    ) {
+                        continue; // 自己保存イベント＝未読を付けない（emit しない）。
+                    }
+                }
+                // 偽Removed の補正: 実体がまだ存在する Removed は内容変更に倒す（置換で消えていない）。
+                let c = if matches!(c.kind, FsChangeKind::Removed)
+                    && Path::new(&c.path).exists()
+                {
+                    FsChange::modified(c.path)
+                } else {
+                    c
+                };
+                // baseline 台帳を前進（自己保存以外の外部変更。再同期と整合・#14）。
+                match &c.kind {
+                    FsChangeKind::Removed => {
+                        g.baseline.remove(&c.path);
+                    }
+                    FsChangeKind::Renamed { from } => {
+                        if let Some(entry) = g.baseline.remove(from) {
+                            g.baseline.insert(c.path.clone(), entry);
+                        }
+                    }
+                    FsChangeKind::Modified | FsChangeKind::Created => {
+                        // FsChange は mtime/size を持たないので stat のみで採取（全文 read しない）。
+                        // content_hash 空でも次回 prescreen は mtime+size で短絡＝再 emit しない。
+                        if let Some(fp) = fingerprint(Path::new(&c.path)) {
+                            g.baseline
+                                .insert(c.path.clone(), fingerprint_to_baseline_entry(&fp));
+                        }
+                    }
+                }
+                kept.push(c);
+            }
+            kept
+        }
+        // ロック毒化時は emit しない（安全側＝偽の未読を撒かない）。
+        Err(_) => return,
+    };
+
+    if emit_changes.is_empty() {
         return;
     }
 
-    // ベースライン台帳を変更内容で前進させる（自己保存以外の外部変更。再同期と整合）。
-    // #14: Modified/Created も前進させないと、イベント経路で報告済みの変更を F5/overflow が再検知する。
-    if let Ok(mut g) = inner.lock() {
-        for c in &changes {
-            match &c.kind {
-                FsChangeKind::Removed => {
-                    g.baseline.remove(&c.path);
-                }
-                FsChangeKind::Renamed { from } => {
-                    if let Some(entry) = g.baseline.remove(from) {
-                        g.baseline.insert(c.path.clone(), entry);
-                    }
-                }
-                FsChangeKind::Modified | FsChangeKind::Created => {
-                    // FsChange は mtime/size を持たないので stat のみで採取（全文 read しない）。
-                    // content_hash 空でも次回 prescreen は mtime+size で短絡＝再 emit しない
-                    // （fingerprint() は content_hash=None を返すので変換結果の content_hash は空文字）。
-                    if let Some(fp) = fingerprint(Path::new(&c.path)) {
-                        g.baseline
-                            .insert(c.path.clone(), fingerprint_to_baseline_entry(&fp));
-                    }
-                }
-            }
-        }
-    }
-
-    let dto: Vec<FsChangeDto> = changes.into_iter().map(Into::into).collect();
+    let dto: Vec<FsChangeDto> = emit_changes.into_iter().map(Into::into).collect();
     let _ = app.emit("fs-changed", FsChangedPayload { changes: dto });
 }
 
@@ -651,8 +680,14 @@ fn walk(root: &Path, excluded: &[String]) -> Vec<(String, FileFingerprint)> {
                     if is_placeholder(&p) {
                         continue;
                     }
+                    let p_str = p.to_string_lossy().to_string();
+                    // pika 自身の一時ファイル（*.pika.tmp）は baseline/再同期列挙から除外する（修正1・要件7.1）。
+                    // 列挙に載せると保存中の一瞬で baseline へ入り、置換後に偽 Removed を生む。
+                    if is_pika_temp(&p_str) {
+                        continue;
+                    }
                     if let Some(fp) = fingerprint(&p) {
-                        out.push((p.to_string_lossy().to_string(), fp));
+                        out.push((p_str, fp));
                     }
                 }
                 _ => {}

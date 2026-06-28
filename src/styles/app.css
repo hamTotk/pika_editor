@@ -599,24 +599,25 @@ body.window-maximized #resize-top {
   position: relative;
 }
 
-/* プレビュー＋差分の左右並置（ui-design 8章「左＝整形プレビュー／右＝テキスト差分」）。
+/* プレビュー＋差分の左右並置（ui-design 8章「左＝テキスト差分／右＝整形プレビュー」・修正5 要件改定）。
    row2（grid-row:2）を 2 カラムに割り、DOM 順（diff-host が先）に依存せず
-   grid-column で preview を左・diff を右へ明示配置する。単独占有時は data-split が外れ
+   grid-column で diff を左・preview を右へ明示配置する。単独占有時は data-split が外れ
    既存レイアウト（grid-row:2 を 1 要素が占有）に戻る（不変）。 */
 #editor-pane[data-split="preview-diff"] {
   grid-template-columns: 1fr 1fr;
 }
 
-#editor-pane[data-split="preview-diff"] #preview-host {
-  grid-row: 2;
-  grid-column: 1;
-}
-
 #editor-pane[data-split="preview-diff"] #diff-host {
   grid-row: 2;
+  grid-column: 1;
+  /* 中央の区切り線。プレビューは権限ゼロ別WebView が #preview-host の矩形を覆うため preview 側の
+     border は隠れる。境界を覆われない差分（DOM）側の右端へ引く（editor-preview と同作法・色非依存・要件11.5）。 */
+  border-right: 1px solid var(--border-1);
+}
+
+#editor-pane[data-split="preview-diff"] #preview-host {
+  grid-row: 2;
   grid-column: 2;
-  /* 差分側は左に細い境界を引き、左右の区切りを明示（色非依存の罫線・要件11.5）。 */
-  border-left: 1px solid var(--border-1);
 }
 
 /* 分割（差分OFF）の左右並置（ui-design 8章「左＝エディタ／右＝整形プレビュー」）。
@@ -987,15 +988,13 @@ body.window-maximized #resize-top {
   color: var(--syntax-heading);
   font-weight: 700;
 }
-/* 見出しレベル差は僅かなサイズで階層を示す（行の高さを大きく崩さない範囲）。 */
-.cm-tok-h1 {
-  font-size: 1.18em;
-}
-.cm-tok-h2 {
-  font-size: 1.1em;
-}
+/* 見出し（h1〜h3）はソース表示では本文と同じ文字サイズにする（修正2・ユーザー決定）。
+   階層感は .cm-tok-heading の色（--syntax-heading）＋太字で出す（サイズでは出さない）。
+   クラス（cm-tok-h1/h2/h3）は editor/index.ts が割り当てたまま残し、ここで通常サイズへ戻すだけ。 */
+.cm-tok-h1,
+.cm-tok-h2,
 .cm-tok-h3 {
-  font-size: 1.05em;
+  font-size: 1em;
 }
 .cm-tok-strong {
   color: var(--text-1);

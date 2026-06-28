@@ -56,6 +56,16 @@ pub fn hash_normalized_lf_str(content: &str) -> String {
     hash_normalized_lf(content.as_bytes())
 }
 
+/// ディスク生バイト列を **エンコーディング判定→デコード→LF 正規化ハッシュ** して返す（外部変更検知）。
+///
+/// 保存前の外部変更検知（`src-tauri` の `file_disk_hash` command）が、タブの content_hash
+/// （デコード済みテキストの [`hash_normalized_lf`]）と**同一規則**で突き合わせられるよう、ディスクバイトを
+/// [`crate::encoding::decode`] でデコードしてからハッシュする。`read_to_string`（UTF-8 限定）に依存しないため
+/// **UTF-16/Shift_JIS の外部変更も検知できる**（修正4: 無確認のサイレント上書きを防ぐ＝データを失わない）。
+pub fn hash_disk_bytes_normalized_lf(bytes: &[u8]) -> String {
+    hash_normalized_lf(crate::encoding::decode(bytes).text.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +111,34 @@ mod tests {
     #[test]
     fn 巨大ファイル閾値は_10mb() {
         assert_eq!(HUGE_FILE_THRESHOLD_BYTES, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn ディスクバイトハッシュはエンコーディング非依存() {
+        // 修正4: 同じ論理内容を UTF-8 と UTF-16LE(BOM) で表しても、decode→LF 正規化ハッシュは一致する
+        // （read_to_string の UTF-8 限定に依存しない＝UTF-16 の外部変更も検知できる）。
+        let text = "日本語\nABC\n";
+        let utf8 = text.as_bytes().to_vec();
+        // UTF-16LE は BOM を付けて判定を確定させる（encoding 判定が UTF-16LE を選ぶ）。
+        let mut utf16_bom: Vec<u8> = vec![0xFF, 0xFE];
+        for u in text.encode_utf16() {
+            utf16_bom.extend_from_slice(&u.to_le_bytes());
+        }
+        assert_eq!(
+            hash_disk_bytes_normalized_lf(&utf8),
+            hash_disk_bytes_normalized_lf(&utf16_bom),
+            "UTF-8 と UTF-16LE(BOM) で同一内容ならディスクハッシュが一致する"
+        );
+        // タブ content_hash（デコード済みテキストの hash_content）と同一規則であること。
+        assert_eq!(
+            hash_disk_bytes_normalized_lf(&utf8),
+            hash_normalized_lf_str(text),
+            "ディスクハッシュは hash_content（デコード済みテキストのハッシュ）と一致する"
+        );
+        // CRLF と LF も同値（LF 正規化）。
+        assert_eq!(
+            hash_disk_bytes_normalized_lf(b"a\r\nb\n"),
+            hash_disk_bytes_normalized_lf(b"a\nb\n"),
+        );
     }
 }

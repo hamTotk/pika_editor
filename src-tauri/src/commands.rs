@@ -291,6 +291,25 @@ pub fn hash_content(content: String) -> String {
     hash_normalized_lf(content.as_bytes())
 }
 
+/// 指定パスのディスク現内容の LF 正規化ハッシュを返す（外部変更検知・要件7.2/7.3・修正4）。
+///
+/// frontend が保存前に `tab.contentHash`（最後に読込/保存した内容のハッシュ）と突き合わせ、外部変更
+/// （衝突）を検知して自前モーダル（退避上書き/別名/再読込/キャンセル）を出すのに使う。無確認のサイレント
+/// 上書きを防ぐ（最上位原則「データを失わない」）。`verify_read` で封じ込め、`encoding::decode`
+/// （read_file/open_document と同一）でデコードしてから `hash_content`/snapshot と**同一規則**
+/// （`hash_disk_bytes_normalized_lf`＝LF 正規化＋XxHash64）でハッシュする＝**エンコーディング非依存**
+/// （UTF-16/Shift_JIS の外部変更も検知できる）。実体が無い（新規/削除済み）・読めない・封じ込め外は `None`
+/// （frontend は None を「衝突なし＝通常保存」と扱う。実書込は save_document の verify_write が再検証する）。
+#[tauri::command]
+pub fn file_disk_hash(
+    path: String,
+    access: State<'_, crate::access::AccessControl>,
+) -> Option<String> {
+    let canon = access.verify_read(&path).ok()?;
+    let bytes = std::fs::read(&canon).ok()?;
+    Some(pika_core::hashing::hash_disk_bytes_normalized_lf(&bytes))
+}
+
 /// F5（要件7.1/11.2）= オンデマンドの全体再スキャン＋再同期。検知した変更件数を返す。
 /// ポーリング/オーバーフロー再同期と同じ pika-core::watcher の処理を共有する。
 #[tauri::command]
