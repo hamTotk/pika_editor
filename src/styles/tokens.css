@@ -38,6 +38,13 @@ html[data-theme="light"] {
   --alert: #a8602a;
   /* accent/警告色の塗り上に載せる前景（白固定）。app.css の生 #fff を置換する単一源。 */
   --on-accent: #fff;
+  /* 文章選択の配色（pika 独自トークン・ui-mock.html にミラー無し＝--syntax-* と同じ例外・2026-06-28）。
+     --accent/--text-1 参照なのでライト/ダーク自動追従（dark 等の各ブロックで再定義不要）。背景は
+     半透明の青で塗り、文字色は地のテキスト色を維持する＝ダークでも背景に色が透けて「白潰れ」しない。
+     editor/index.ts（.cm-selectionBackground/::selection）・app.css（グローバル ::selection）・
+     render の BASE_CSS（プレビュー別WebView）が参照する単一源。 */
+  --selection-bg: color-mix(in srgb, var(--accent) 35%, transparent);
+  --selection-fg: var(--text-1);
   /* 構文ハイライトの文字列リテラル色（ui-mock .tok-s）。app.css の生16進を置換する単一源。 */
   --syntax-string: #8a6a3a;
   /* 構文ハイライト拡張色（ユーザー要望でモノトーン基調から色数・粒度を強化・md/HTML/コード共通）。

@@ -764,8 +764,16 @@ export function createEditor(
           ".cm-cursor, .cm-dropCursor": {
             borderLeftColor: "var(--accent)",
           },
-          "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": {
-            backgroundColor: "var(--bg-active)",
+          // 選択は半透明の青（--selection-bg）。drawSelection の描画層（本文の背面）なので本文色は
+          // --text-1 のまま透けて見える＝ダークでも白潰れしない。
+          "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
+            backgroundColor: "var(--selection-bg)",
+          },
+          // ネイティブ ::selection（IME 合成中など drawSelection の描画層が出ない場面の保険）。
+          // 背景は同じ選択青、文字は地色（--selection-fg）を明示して既定の白文字化を防ぐ。
+          "::selection": {
+            backgroundColor: "var(--selection-bg)",
+            color: "var(--selection-fg)",
           },
         }),
       ],

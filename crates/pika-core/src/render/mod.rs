@@ -303,6 +303,7 @@ body{margin:0;padding:16px;font-family:\"Segoe UI\",\"Meiryo\",\"Yu Gothic UI\",
 line-height:1.6;word-wrap:break-word;overflow-wrap:anywhere;\
 background:var(--pk-bg);color:var(--pk-fg)}\
 a{color:var(--pk-accent)}\
+::selection{background:color-mix(in srgb,var(--pk-accent,Highlight) 35%,transparent);color:var(--pk-fg,CanvasText)}\
 img{max-width:100%;height:auto}\
 pre{overflow:auto}\
 :not(pre)>code{background:var(--pk-sunken)}\
@@ -316,6 +317,7 @@ border-left:3px solid var(--pk-accent,Highlight);background:var(--pk-sunken,tran
 font-size:.8em;color:var(--pk-accent,Highlight);padding:.2em 0}\
 @media (forced-colors: active){\
 body{background:Canvas;color:CanvasText}\
+::selection{background:Highlight;color:HighlightText}\
 a{color:LinkText}\
 th,td,blockquote,hr{border-color:CanvasText}\
 .pika-block-error{border-left-color:Highlight;background:Canvas}\
