@@ -153,10 +153,10 @@ pub fn acquire_or_forward(app: &AppHandle, forward_args: &[String]) -> InstanceR
 #[cfg(windows)]
 mod windows_impl {
     use super::OpenRequestPayload;
+    use crate::util::to_wide;
     use pika_core::ipc::{
         build_pipe_name, decide_role, parse_incoming_message, InstanceRole, MAX_MESSAGE_BYTES,
     };
-    use std::os::windows::ffi::OsStrExt;
     use std::ptr;
     use tauri::{AppHandle, Emitter, Manager};
     use windows_sys::Win32::Foundation::{
@@ -211,7 +211,10 @@ mod windows_impl {
         };
 
         // CreateNamedPipe（FIRST_PIPE_INSTANCE）の成否を原子的ロックとする（design doc 9章）。
-        match create_server_pipe(&pipe_name) {
+        match create_pipe_instance(
+            &pipe_name,
+            PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        ) {
             Some(handle) => {
                 // ロック獲得＝サーバー。リスナースレッドを起動して常駐する。
                 spawn_listener(app.clone(), pipe_name, handle);
@@ -225,21 +228,27 @@ mod windows_impl {
         }
     }
 
-    /// CreateNamedPipe を FIRST_PIPE_INSTANCE で生成する。既に存在すれば失敗（None）＝クライアント役割。
-    fn create_server_pipe(pipe_name: &str) -> Option<HANDLE> {
+    /// ユーザー限定 DACL 付き named pipe インスタンスを `open_mode` 指定で生成する（生成2経路の統合）。
+    ///
+    /// - サーバー獲得（初回）: `PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE` を渡す。既に存在すれば
+    ///   失敗（None）＝クライアント役割。この成否を単一インスタンスの原子的ロックとする（design doc 9章）。
+    /// - 次接続用（リスナーのループ）: 素の `PIPE_ACCESS_INBOUND` を渡す（FIRST_PIPE_INSTANCE は付けない）。
+    ///
+    /// `pipe_type`/同時接続数/バッファ/DACL（owner-only）/`PIPE_REJECT_REMOTE_CLIENTS` は両経路で不変。
+    fn create_pipe_instance(pipe_name: &str, open_mode: u32) -> Option<HANDLE> {
         let name_w = to_wide(pipe_name);
-        let mut sa = security_attributes()?;
+        let sa = security_attributes()?;
         // SAFETY: name_w は NUL 終端。sa はこの関数スコープで有効。
         let handle = unsafe {
             CreateNamedPipeW(
                 name_w.as_ptr(),
-                PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                open_mode,
                 PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1, // 同時接続は 1（クライアントは即書込→切断する短命接続）。
                 READ_BUF as u32,
                 READ_BUF as u32,
                 0,
-                &mut sa.attrs,
+                &sa.attrs,
             )
         };
         // SDDL から確保した security descriptor を解放する（成否に関わらず）。
@@ -287,7 +296,7 @@ mod windows_impl {
                     DisconnectNamedPipe(handle);
                     CloseHandle(handle);
                 }
-                match create_next_instance(&pipe_name) {
+                match create_pipe_instance(&pipe_name, PIPE_ACCESS_INBOUND) {
                     Some(h) => handle = h,
                     None => break, // パイプを作り直せない異常時はリスナーを畳む（アプリ本体は継続）。
                 }
@@ -345,10 +354,10 @@ mod windows_impl {
             return;
         }
         // メッセージモードに設定して 1 メッセージとして書き込む。
-        let mut mode = PIPE_READMODE_MESSAGE;
+        let mode = PIPE_READMODE_MESSAGE;
         // SAFETY: handle は有効。
         unsafe {
-            SetNamedPipeHandleState(handle, &mut mode, ptr::null_mut(), ptr::null_mut());
+            SetNamedPipeHandleState(handle, &mode, ptr::null_mut(), ptr::null_mut());
         }
         let bytes = json.as_bytes();
         let mut written: u32 = 0;
@@ -362,36 +371,6 @@ mod windows_impl {
                 ptr::null_mut(),
             );
             CloseHandle(handle);
-        }
-    }
-
-    /// 次接続用にパイプの追加インスタンスを生成する（FIRST_PIPE_INSTANCE は付けない）。
-    fn create_next_instance(pipe_name: &str) -> Option<HANDLE> {
-        let name_w = to_wide(pipe_name);
-        let mut sa = security_attributes()?;
-        // SAFETY: name_w は NUL 終端。sa は関数スコープで有効。
-        let handle = unsafe {
-            CreateNamedPipeW(
-                name_w.as_ptr(),
-                PIPE_ACCESS_INBOUND,
-                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                1,
-                READ_BUF as u32,
-                READ_BUF as u32,
-                0,
-                &mut sa.attrs,
-            )
-        };
-        if !sa.descriptor.is_null() {
-            // SAFETY: LocalAlloc 由来。
-            unsafe {
-                LocalFree(sa.descriptor as _);
-            }
-        }
-        if handle == INVALID_HANDLE_VALUE {
-            None
-        } else {
-            Some(handle)
         }
     }
 
@@ -493,14 +472,6 @@ mod windows_impl {
             LocalFree(sid_str as _);
         }
         Some(s)
-    }
-
-    /// UTF-8 → NUL 終端 UTF-16（Win32 境界変換）。
-    fn to_wide(s: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
     }
 
     /// NUL 終端ワイド文字列ポインタを String へ。

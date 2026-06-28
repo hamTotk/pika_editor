@@ -173,20 +173,21 @@ pub fn load_settings(toml_text: &str) -> SettingsLoad {
         &mut warnings,
     );
 
-    // 整数の per-field 抽出（型/値域不正なら既定維持＋警告）。
-    extract_u64(
+    // 整数の per-field 抽出（型/値域不正なら既定維持＋警告）。スロット型ごとの値域は
+    // `TryFrom<i64>` が担う（u64/usize は負値で失敗・u8 は 0..=255 以外で失敗＝従来の手書き範囲と等価）。
+    extract_int(
         &table,
         "huge_file_threshold_bytes",
         &mut s.huge_file_threshold_bytes,
         &mut warnings,
     );
-    extract_usize(
+    extract_int(
         &table,
         "long_line_chars",
         &mut s.long_line_chars,
         &mut warnings,
     );
-    extract_u8(&table, "tab_width", &mut s.tab_width, &mut warnings);
+    extract_int(&table, "tab_width", &mut s.tab_width, &mut warnings);
 
     // 文字列配列の per-field 抽出（配列でない/要素が文字列でないなら既定維持＋警告）。
     extract_string_array(&table, "excluded_dirs", &mut s.excluded_dirs, &mut warnings);
@@ -218,37 +219,23 @@ fn extract_bool(table: &toml::Table, key: &str, slot: &mut bool, warnings: &mut 
     }
 }
 
-/// u64 を抽出する。負値/型不正/範囲外は既定維持＋警告。
-fn extract_u64(table: &toml::Table, key: &str, slot: &mut u64, warnings: &mut Vec<String>) {
-    match table.get(key) {
-        None => {}
-        Some(v) => match v.as_integer() {
-            // TOML 整数は i64。負値は u64 へ収まらない＝値域不正として既定維持＋警告。
-            Some(i) if i >= 0 => *slot = i as u64,
-            _ => warnings.push(key.to_string()),
-        },
-    }
-}
-
-/// usize を抽出する。負値/型不正は既定維持＋警告。
-fn extract_usize(table: &toml::Table, key: &str, slot: &mut usize, warnings: &mut Vec<String>) {
-    match table.get(key) {
-        None => {}
-        Some(v) => match v.as_integer() {
-            Some(i) if i >= 0 => *slot = i as usize,
-            _ => warnings.push(key.to_string()),
-        },
-    }
-}
-
-/// u8 を抽出する。負値/型不正/255 超は既定維持＋警告。
-fn extract_u8(table: &toml::Table, key: &str, slot: &mut u8, warnings: &mut Vec<String>) {
-    match table.get(key) {
-        None => {}
-        Some(v) => match v.as_integer() {
-            Some(i) if (0..=255).contains(&i) => *slot = i as u8,
-            _ => warnings.push(key.to_string()),
-        },
+/// 整数を抽出する（u64/usize/u8 共通・型/値域不正は既定維持＋警告）。
+///
+/// TOML 整数は i64。スロット型 `T` の `TryFrom<i64>` が値域検査を兼ねる:
+/// - `u64`/`usize`: 負値で失敗（従来の `i >= 0` ガードと等価。x64 では usize==u64 で範囲も一致）。
+/// - `u8`: 0..=255 以外で失敗（従来の `(0..=255).contains(&i)` と等価）。
+///
+/// キー不在は何もしない（部分指定＝正常）。型不正（非整数）や値域外は既定維持＋警告。
+fn extract_int<T: TryFrom<i64>>(
+    table: &toml::Table,
+    key: &str,
+    slot: &mut T,
+    warnings: &mut Vec<String>,
+) {
+    let Some(v) = table.get(key) else { return };
+    match v.as_integer().and_then(|i| T::try_from(i).ok()) {
+        Some(n) => *slot = n,
+        None => warnings.push(key.to_string()),
     }
 }
 

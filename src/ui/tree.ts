@@ -14,16 +14,16 @@
 // 絵文字は使わない（ui-design 7章: シェブロン＋種別アイコン＋名前＋状態マーク）。
 import type { TreeEntry } from "../ipc";
 import { UNREAD_MARK, type UnreadStore } from "./unread";
+import { pathKey } from "../util/path";
+import { applyRovingTabindex, collectByRole } from "./roving";
 
 const host = () => document.getElementById("tree") as HTMLElement;
 
 /** 子フォルダを ipc 経由で遅延取得する関数（副作用なし列挙＝ipc.listDir を渡す想定）。 */
 type FetchChildren = (path: string) => Promise<TreeEntry[]>;
 
-/** パス区切りを正規化する（Windows の \ と / を吸収し展開集合/キャッシュのキーを安定させる）。 */
-function normPath(path: string): string {
-  return path.replace(/\\/g, "/");
-}
+// パス区切りの正規化（Windows の \ と / を吸収し展開集合/キャッシュのキーを安定させる・**大小保持**）は
+// util/path.pathKey を使う（backend 索引キー突合のため大小は潰さない）。
 
 /**
  * ツリーの描画状態（再構築をまたいで保持する単一源）。
@@ -81,7 +81,7 @@ export async function reloadTreeDir(
   opts?: { expand?: boolean },
 ): Promise<void> {
   if (!treeState.fetch) return;
-  const key = normPath(dirPath);
+  const key = pathKey(dirPath);
   if (opts?.expand) treeState.expanded.add(key);
   if (!treeState.expanded.has(key)) {
     // 折りたたみ中＝見た目に出ないのでキャッシュを捨てるだけ（次回展開で新内容を取り直す）。
@@ -115,7 +115,7 @@ export function resetTreeExpansion(): void {
  * `path` 自身と `path + "/"` プレフィクスを持つ全キー（子孫）を expanded/childCache から消す。
  */
 export function pruneTreeDir(path: string): void {
-  const key = normPath(path);
+  const key = pathKey(path);
   const prefix = `${key}/`;
   for (const k of Array.from(treeState.expanded)) {
     if (k === key || k.startsWith(prefix)) treeState.expanded.delete(k);
@@ -148,8 +148,8 @@ function rebuild(): void {
 function appendSubtree(ul: HTMLElement, entry: TreeEntry, depth: number): void {
   const li = makeItem(entry, depth);
   ul.appendChild(li);
-  if (entry.is_dir && treeState.expanded.has(normPath(entry.path))) {
-    const children = treeState.childCache.get(normPath(entry.path)) ?? [];
+  if (entry.is_dir && treeState.expanded.has(pathKey(entry.path))) {
+    const children = treeState.childCache.get(pathKey(entry.path)) ?? [];
     for (const child of children) {
       appendSubtree(ul, child, depth + 1);
     }
@@ -165,7 +165,7 @@ function makeItem(entry: TreeEntry, depth: number): HTMLLIElement {
   // 段階インデント（ui-design 7章 indent1=24px/indent2=42px 目安）。深さ可変なので CSS の calc で
   // base + depth * 段差を算出する（CSS 変数 --depth に深さを渡す）。
   li.style.setProperty("--depth", String(depth));
-  const expanded = entry.is_dir && treeState.expanded.has(normPath(entry.path));
+  const expanded = entry.is_dir && treeState.expanded.has(pathKey(entry.path));
   // ディレクトリは aria-expanded を**実値**で付与する（T2 must: 展開 true / 折りたたみ false）。
   if (entry.is_dir) {
     li.setAttribute("aria-expanded", expanded ? "true" : "false");
@@ -256,7 +256,7 @@ function makeItem(entry: TreeEntry, depth: number): HTMLLIElement {
  */
 async function toggleExpand(entry: TreeEntry): Promise<void> {
   if (!entry.is_dir) return;
-  const key = normPath(entry.path);
+  const key = pathKey(entry.path);
   if (treeState.expanded.has(key)) {
     // 折りたたみ: 集合から外して再構築（子 DOM が消える）。キャッシュは保持して再展開を速くする。
     treeState.expanded.delete(key);
@@ -363,8 +363,9 @@ function initRovingTabindex(ul: HTMLElement, focusPath?: string): void {
     const idx = items.findIndex((it) => it.dataset.path === focusPath);
     if (idx >= 0) target = idx;
   }
+  // tabIndex は共通土台で 1 つだけ 0 に。aria-selected はツリー固有（focusPath 指定時のみ true）なので個別に当てる。
+  applyRovingTabindex(items, target);
   items.forEach((it, i) => {
-    it.tabIndex = i === target ? 0 : -1;
     it.setAttribute("aria-selected", i === target && focusPath ? "true" : "false");
   });
   // キーボード展開/折りたたみ直後はフォーカスも当該行へ戻す（操作位置を見失わない＝要件11.5）。
@@ -375,7 +376,7 @@ function initRovingTabindex(ul: HTMLElement, focusPath?: string): void {
 
 /** ツリー内の treeitem 一覧（DOM 順＝展開された子も含む）。 */
 function treeItems(ul: HTMLElement): HTMLElement[] {
-  return Array.from(ul.querySelectorAll<HTMLElement>('[role="treeitem"]'));
+  return collectByRole(ul, "treeitem");
 }
 
 /**
@@ -383,13 +384,10 @@ function treeItems(ul: HTMLElement): HTMLElement[] {
  * Tab で戻ってきたとき直前に操作した行へ戻れるよう、tabIndex=0 はツリー内に常に 1 つだけ保つ。
  */
 function selectItem(li: HTMLElement): void {
-  const ul = host();
-  for (const node of treeItems(ul)) {
-    node.setAttribute("aria-selected", "false");
-    node.tabIndex = -1;
-  }
+  const items = treeItems(host());
+  for (const node of items) node.setAttribute("aria-selected", "false");
   li.setAttribute("aria-selected", "true");
-  li.tabIndex = 0;
+  applyRovingTabindex(items, li);
 }
 
 /**
@@ -403,7 +401,7 @@ function onItemKeydown(e: KeyboardEvent, li: HTMLElement, entry: TreeEntry): voi
   const ul = host();
   const items = treeItems(ul);
   const idx = items.indexOf(li);
-  const expanded = entry.is_dir && treeState.expanded.has(normPath(entry.path));
+  const expanded = entry.is_dir && treeState.expanded.has(pathKey(entry.path));
   switch (e.key) {
     case "ArrowDown": {
       e.preventDefault();

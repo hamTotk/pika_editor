@@ -16,26 +16,6 @@ use std::collections::BTreeMap;
 /// ファイルごとの退避上限（最新10件 LRU＝要件9.2）。
 pub const MAX_STASH_PER_FILE: usize = 10;
 
-/// スナップショット層のエラー（最上位原則: 退避結合の失敗を握り潰さない＝呼び出し側へ Result で返す）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SnapshotError {
-    /// 退避（object 保存）に失敗。ベースラインを進めてはならない（未読維持＝データを失わない）。
-    StashFailed(String),
-    /// 内容を保存しない方針（機密/10MB以上/画像）への内容ベースライン化を要求された。
-    ContentNotStorable(String),
-}
-
-impl std::fmt::Display for SnapshotError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SnapshotError::StashFailed(m) => write!(f, "退避に失敗（ベースライン未更新）: {m}"),
-            SnapshotError::ContentNotStorable(m) => write!(f, "内容を保存できない対象: {m}"),
-        }
-    }
-}
-
-impl std::error::Error for SnapshotError {}
-
 /// ベースライン参照（ファイルごとに常に1件＝要件9.2）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BaselineRef {

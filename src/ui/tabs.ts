@@ -8,6 +8,7 @@
 // 1 つだけ tabIndex=0）＋ ←/→ でタブ移動・Home/End で先頭/末尾（WAI-ARIA tablist パターン）。
 // バッジの状態は aria-label にテキスト化して読み上げ到達を確実にする（要件11.5）。
 import { UNREAD_MARK, type UnreadStore } from "./unread";
+import { collectByRole } from "./roving";
 
 const host = () => document.getElementById("tabs") as HTMLElement;
 
@@ -187,9 +188,9 @@ function onTabKeydown(
   btn: HTMLButtonElement,
   onActivate: (path: string) => void,
 ): void {
-  const tabs = Array.from(host().querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+  const tabs = collectByRole(host(), "tab");
   const idx = tabs.indexOf(btn);
-  let target: HTMLButtonElement | undefined;
+  let target: HTMLElement | undefined;
   switch (e.key) {
     case "ArrowRight":
       target = tabs[(idx + 1) % tabs.length];

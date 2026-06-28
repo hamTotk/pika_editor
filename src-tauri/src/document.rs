@@ -10,9 +10,10 @@ use pika_core::encoding::{self, SaveOutcome, TextEncoding};
 use pika_core::huge::{degrade_flags, FileStage};
 use pika_core::range::{align_to_lines, window_around, DEFAULT_WINDOW_BYTES};
 use pika_core::search::{self, Cancel, SearchOptions};
+// 座標変換（byte→UTF-16）・バイト整形の純粋ロジックは core::util へ移設済み（cargo test 済み）。
+use pika_core::util::{byte_to_utf16_offsets, human_bytes};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::State;
 
@@ -92,6 +93,28 @@ fn line_ending_dto(le: encoding::LineEnding) -> &'static str {
     }
 }
 
+/// `verify_read` で封じ込めてから対象の実体パス（String）とサイズ（バイト）を返す共通前処理。
+///
+/// open_document / reopen_document_with_encoding / read_range が共有する
+/// 「`verify_read` → `to_string_lossy` → `metadata().len()`」の定型を 1 箇所へ集約する
+/// （#5 封じ込め＋巨大ファイル段階制の入力 size を単一源化）。canonicalize 済み実体パスを文字列で
+/// 返し、以後の I/O は実体パスで行う（封じ込め後の単一表現）。エラー文言（"メタデータ取得に失敗: …"）は
+/// 3 経路で一致していたものをそのまま保持する（挙動不変）。`verify_read` のエラーは `?` で素通し。
+///
+/// 注: `read_file`（commands.rs）は metadata 失敗時に**前置なしの素エラー**（`e.to_string()`）を返す
+/// 別契約のため、ここには合流させない（観測エラー文字列を変えない＝外部挙動不変）。
+fn verify_read_with_size(
+    access: &crate::access::AccessControl,
+    path: &str,
+) -> Result<(String, u64), String> {
+    let canon = access.verify_read(path)?;
+    let path = canon.to_string_lossy().to_string();
+    let size = std::fs::metadata(&path)
+        .map_err(|e| format!("メタデータ取得に失敗: {e}"))?
+        .len();
+    Ok((path, size))
+}
+
 /// 文書を開く（巨大ファイル段階制＋エンコーディング自動判定・要件2.2/5.2）。
 ///
 /// #5: 先頭で `access.verify_read` を通し、ワークスペース配下/許可ファイルへ封じ込める
@@ -106,11 +129,7 @@ pub fn open_document(
     // normalize_path_key（`\`→`/` のみ・`\\?\` は吸収しない）で揃えるため、ベースラインは
     // open_workspace の直下ループ／compute_file_diff と同じ**非 canonical パス**で張る必要がある（指摘6）。
     let raw_path = path.clone();
-    let canon = access.verify_read(&path)?;
-    let path = canon.to_string_lossy().to_string();
-    let size = std::fs::metadata(&path)
-        .map_err(|e| format!("メタデータ取得に失敗: {e}"))?
-        .len();
+    let (path, size) = verify_read_with_size(&access, &path)?;
     let stage = FileStage::from_size(size);
 
     // 上限超は開かずエラー（要件2.2 上限）。
@@ -131,40 +150,26 @@ pub fn open_document(
 
     // 第2段階（読み取り専用ビューア）は全量を読まず、段階だけ返す（range 読取はフロントが要求）。
     if stage.needs_virtual_viewer() {
-        let degrade = degrade_flags(size, "");
-        return Ok(OpenedDocument {
-            stage: stage_to_dto(stage).into(),
-            degrade: to_degrade_dto(degrade),
-            text: String::new(),
-            encoding: enc_to_dto(TextEncoding::Utf8).into(),
-            has_bom: false,
-            line_ending: "none".into(),
-            decode_warning: false,
-            size_bytes: size,
-        });
+        return Ok(opened_document_virtual(stage, size));
     }
 
     // 通常/第1段階: 全量読みエンコーディング判定（第1段階でも編集は通常通り＝中心体験死守）。
     let bytes = std::fs::read(&path).map_err(|e| format!("読み込みに失敗: {e}"))?;
     let decoded = encoding::decode(&bytes);
-    // 段階制（サイズ）と行長ガード（内容）の両方を反映した縮退フラグ。
-    let degrade = degrade_flags(size, &decoded.text);
     // 全既読スタート（要件8.1・指摘6）: 開いた瞬間の内容を非クロバーでベースライン化する。
     // open_workspace の直下ループはルート直下しか張らないため、サブフォルダを展開して開いたファイルは
     // ベースライン不在になり compute_file_diff が誤って「差分非対象」を返していた。ここで開いた時点
     // （編集前）の内容を直下ファイルと同じ全既読スタートへ揃える（以後の編集は差分として正しく出る）。
     // 非クロバー＆policy 準拠（機密/巨大はハッシュのみ＝差分非対象のまま）。索引キー整合のため raw_path で張る。
+    // 縮退フラグ計算（degrade_flags）は副作用が無いので ensure_baseline の後に helper 内で行う（挙動不変）。
     snapshot.ensure_baseline(&raw_path, &decoded.text, size);
-    Ok(OpenedDocument {
-        stage: stage_to_dto(stage).into(),
-        degrade: to_degrade_dto(degrade),
-        text: decoded.text,
-        encoding: enc_to_dto(decoded.encoding).into(),
-        has_bom: decoded.has_bom,
-        line_ending: line_ending_dto(decoded.line_ending).into(),
-        decode_warning: decoded.had_decode_warning,
-        size_bytes: size,
-    })
+    let decode_warning = decoded.had_decode_warning;
+    Ok(opened_document_from_decoded(
+        stage,
+        size,
+        decoded,
+        decode_warning,
+    ))
 }
 
 /// 指定エンコーディングで文書を開き直す（要件5.6 Reopen・自動判定の誤り/曖昧をユーザー選択で上書き）。
@@ -180,12 +185,11 @@ pub fn reopen_document_with_encoding(
     encoding: String,
     access: State<'_, crate::access::AccessControl>,
 ) -> Result<OpenedDocument, String> {
-    let canon = access.verify_read(&path)?;
-    let path = canon.to_string_lossy().to_string();
+    // 封じ込め＋サイズ取得は open_document/read_range と共通（verify_read→metadata→size）。
+    // エンコーディング検証（dto_to_enc）は実体解決後に行う（正当フローでは frontend が固定 4 種から
+    // 渡すため常に妥当・順序差は実害なし）。
+    let (path, size) = verify_read_with_size(&access, &path)?;
     let enc = dto_to_enc(&encoding)?;
-    let size = std::fs::metadata(&path)
-        .map_err(|e| format!("メタデータ取得に失敗: {e}"))?
-        .len();
     let stage = FileStage::from_size(size);
     // 編集テキストを持つ段階のみ再オープン対象（第2段階以降は仮想ビューア＝再デコード対象外）。
     if !stage.can_open() || stage.needs_virtual_viewer() {
@@ -198,17 +202,8 @@ pub fn reopen_document_with_encoding(
             enc.label()
         )
     })?;
-    let degrade = degrade_flags(size, &decoded.text);
-    Ok(OpenedDocument {
-        stage: stage_to_dto(stage).into(),
-        degrade: to_degrade_dto(degrade),
-        text: decoded.text,
-        encoding: enc_to_dto(decoded.encoding).into(),
-        has_bom: decoded.has_bom,
-        line_ending: line_ending_dto(decoded.line_ending).into(),
-        decode_warning: false,
-        size_bytes: size,
-    })
+    // 指定エンコーディングでの再オープンは decode_warning を常に false にする（自動判定の警告は出さない）。
+    Ok(opened_document_from_decoded(stage, size, decoded, false))
 }
 
 fn to_degrade_dto(f: pika_core::huge::DegradeFlags) -> DegradeFlagsDto {
@@ -219,6 +214,49 @@ fn to_degrade_dto(f: pika_core::huge::DegradeFlags) -> DegradeFlagsDto {
         highlight_off: f.highlight_off,
         wrap_off: f.wrap_off,
         editing_off: f.editing_off,
+    }
+}
+
+/// 編集テキストを持つ段階（normal/stage1）の [`OpenedDocument`] を組み立てる共通ヘルパ。
+///
+/// open_document（自動判定）と reopen_document_with_encoding（指定エンコーディング）が共有する。
+/// 段階/縮退フラグ/エンコーディング/改行分類の DTO 化定型を 1 箇所へ集約し、**invoke 戻り JSON の
+/// フィールド構成（名前・型・値）を単一源**にする（frontend 型との齟齬を防ぐ）。`decode_warning` のみ
+/// 呼び出し側指定（自動判定は `decoded.had_decode_warning`／指定オープンは常に `false`）。
+/// 縮退フラグは段階制（サイズ）と行長ガード（内容）の両方を反映する（呼び出し側と同一の `degrade_flags`）。
+fn opened_document_from_decoded(
+    stage: FileStage,
+    size: u64,
+    decoded: encoding::DecodedFile,
+    decode_warning: bool,
+) -> OpenedDocument {
+    let degrade = degrade_flags(size, &decoded.text);
+    OpenedDocument {
+        stage: stage_to_dto(stage).into(),
+        degrade: to_degrade_dto(degrade),
+        text: decoded.text,
+        encoding: enc_to_dto(decoded.encoding).into(),
+        has_bom: decoded.has_bom,
+        line_ending: line_ending_dto(decoded.line_ending).into(),
+        decode_warning,
+        size_bytes: size,
+    }
+}
+
+/// 仮想化ビューア段階（`needs_virtual_viewer`＝第2段階）の [`OpenedDocument`] を組み立てる共通ヘルパ。
+///
+/// 内容は返さず段階のみ（CM6 へ全量ロードしない＝固まらない）。テキスト空・UTF-8・BOM なし・改行 none・
+/// 警告なしで、frontend は段階を見て range 読取ビューアへ切り替える（戻り JSON 形は従来と完全一致）。
+fn opened_document_virtual(stage: FileStage, size: u64) -> OpenedDocument {
+    OpenedDocument {
+        stage: stage_to_dto(stage).into(),
+        degrade: to_degrade_dto(degrade_flags(size, "")),
+        text: String::new(),
+        encoding: enc_to_dto(TextEncoding::Utf8).into(),
+        has_bom: false,
+        line_ending: "none".into(),
+        decode_warning: false,
+        size_bytes: size,
     }
 }
 
@@ -244,6 +282,9 @@ pub struct UnmappableDto {
 /// しない＝最上位原則「データを失わない」）。保存はアトミック書込（一時ファイル→置換）。
 ///
 /// - `force_utf8=true`: 「UTF-8で保存」選択肢（要件5.6）。BOM なし UTF-8 で書き出す。
+// Tauri コマンドの引数は IPC 契約（frontend の invoke 引数）と注入 State に 1:1 対応するため
+// 平坦な署名が必須で、構造体へまとめると IPC 契約が変わる（挙動変更）。よって引数数は許容する。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn save_document(
     path: String,
@@ -300,7 +341,9 @@ pub fn save_document(
     // 自己保存抑制（save_file と同規則）: 書き出すバイト列のハッシュをトークン登録してから書く。
     let saved_hash = pika_core::hashing::hash_normalized_lf(&bytes);
     watcher.register_self_save(&path, &saved_hash);
-    atomic_write(&path, &bytes).map_err(|e| {
+    // アトミック書込は src-tauri 共通プリミティブ（一時ファイル→fsync→MoveFileExW 単一置換）へ集約した。
+    // 退避先行（stash_incoming_before_overwrite）はこの直前に済んでいる（順序は不変）。
+    crate::fs_atomic::atomic_write(std::path::Path::new(&path), &bytes).map_err(|e| {
         crate::diagnostic::record(
             pika_core::diagnostic::LogLevel::Error,
             "document",
@@ -315,76 +358,6 @@ pub fn save_document(
         status: "saved".into(),
         unmappable: Vec::new(),
     })
-}
-
-/// アトミック書込（一時ファイル→単一アトミック置換・属性/ACL は OS の置換挙動に委ねる・要件12.1）。
-///
-/// 同一ディレクトリに一時ファイルを作って書き込み、`fsync` 後に元パスへ**単一の置換 API**で差し替える
-/// （途中クラッシュ/電源断でも元ファイルが半端にならない＝最上位原則「データを失わない」）。
-///
-/// Windows では `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` を使い、既存ファイルを
-/// **1 回のシステムコールでアトミックに置換**する（旧実装の `remove_file→rename` 2 段は、間でクラッシュ
-/// すると元ファイル消失・新ファイル未配置で対象パスが消える窓があったため廃止＝eval high data 対応）。
-/// 置換に失敗したときは一時ファイルを必ず後始末し、元ファイルは触らない（消さない）。
-fn atomic_write(path: &str, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let target = std::path::Path::new(path);
-    let dir = target.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let file_name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "pika.tmp".into());
-    let tmp = dir.join(format!(".{file_name}.pika.tmp"));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    if let Err(e) = replace_atomically(&tmp, target) {
-        // 置換に失敗したら一時ファイルを後始末し、元ファイルは一切触らない（半端な状態を作らない）。
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
-}
-
-/// 一時ファイルを元パスへ単一アトミック操作で置換する（最上位原則「データを失わない」）。
-///
-/// Windows: `MoveFileExW` 1 呼び出しで既存を置換（クラッシュ窓を作らない）。元が存在しない新規作成も
-/// 同 API で成立する（`MOVEFILE_REPLACE_EXISTING` は対象不在でもエラーにしない）。
-/// 非 Windows: `std::fs::rename`（POSIX rename は同一ボリュームでアトミック置換）。
-#[cfg(windows)]
-fn replace_atomically(tmp: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    fn wide(p: &std::path::Path) -> Vec<u16> {
-        p.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
-    let from = wide(tmp);
-    let to = wide(target);
-    // SAFETY: from/to はヌル終端の有効な UTF-16 パス。MoveFileExW は同期 API で所有権を移さない。
-    let ok = unsafe {
-        MoveFileExW(
-            from.as_ptr(),
-            to.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn replace_atomically(tmp: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
-    std::fs::rename(tmp, target)
 }
 
 /// 仮想化ビューアの 1 ウィンドウ（行境界整列済みテキスト＋実バイト範囲）。
@@ -412,11 +385,8 @@ pub fn read_range(
     access: State<'_, crate::access::AccessControl>,
 ) -> Result<RangeWindowDto, String> {
     // #5: 範囲読取も封じ込めを通す（仮想化ビューアで任意パスを読めないようにする）。
-    let canon = access.verify_read(&path)?;
-    let path = canon.to_string_lossy().to_string();
-    let size = std::fs::metadata(&path)
-        .map_err(|e| format!("メタデータ取得に失敗: {e}"))?
-        .len();
+    // 封じ込め＋サイズ取得は open_document/reopen と共通（verify_read→metadata→size）。
+    let (path, size) = verify_read_with_size(&access, &path)?;
     let win = window.unwrap_or(DEFAULT_WINDOW_BYTES);
     let raw_range = window_around(center, win, size);
     let mut file = std::fs::File::open(&path).map_err(|e| format!("開けません: {e}"))?;
@@ -473,37 +443,6 @@ pub struct MatchDto {
     pub utf16_end: usize,
 }
 
-/// 昇順のバイトオフセット列を、対応する UTF-16 コードユニットオフセット列へ一括変換する（O(L) 単一パス）。
-///
-/// CM6 は UTF-16 コードユニットで位置を扱うため、pika-core が返すバイトオフセットを UTF-16 へ写す。
-/// `byte_offsets` は **char 境界**かつ**昇順**である前提（`search_all` のマッチ群は前方走査で昇順なので
-/// `[start_0, end_0, start_1, end_1, …]` は全境界が昇順になる）。`text.char_indices()` を **1 回**走査
-/// しながら「現バイト位置→累積 UTF-16 ユニット数」を進め、ソート済みの境界バイト列を順に消化する。
-///
-/// per-match `text[..b].encode_utf16().count()` は O(N·L)（N マッチ × L 文字長）で禁止。本実装は走査と
-/// 境界消化が単調前進するため全体 O(L)（`text` の char 数）に収まる。末尾 `text.len()` の境界も正しく返す。
-fn byte_to_utf16_offsets(text: &str, byte_offsets: &[usize]) -> Vec<usize> {
-    let mut out = Vec::with_capacity(byte_offsets.len());
-    let mut idx = 0usize; // 次に解決する byte_offsets のインデックス。
-    let mut utf16_pos = 0usize; // 直前までに走査した char の累積 UTF-16 ユニット数。
-    for (b, ch) in text.char_indices() {
-        // `b` はこの char の開始バイト＝char 境界。`b` 以下の保留境界をここで確定する
-        // （`utf16_pos` は byte `b` より前の全 char 分の UTF-16 ユニット数）。境界は昇順前提なので、
-        // `==` だけでなく `<=` を消化して前提が崩れても出力数を保つ（防御的・無限ループ防止）。
-        while idx < byte_offsets.len() && byte_offsets[idx] <= b {
-            out.push(utf16_pos);
-            idx += 1;
-        }
-        utf16_pos += ch.len_utf16();
-    }
-    // 末尾の境界（最終 char の直後＝`text.len()`）は走査後の累積値で確定する。
-    while idx < byte_offsets.len() {
-        out.push(utf16_pos);
-        idx += 1;
-    }
-    out
-}
-
 /// 検索結果 DTO（要件5.4: 件数・全ヒット・上限/キャンセル）。
 #[derive(Debug, Serialize)]
 pub struct SearchResultDto {
@@ -514,12 +453,11 @@ pub struct SearchResultDto {
 
 /// 検索/置換のキャンセルトークン置き場（要件5.4「キャンセル可能」）。
 ///
-/// 同時に走る検索/置換は 1 本（フロントの検索バー）想定。`generation` で世代を進め、古い検索を
-/// キャンセルする（新しい検索を始めたら前のをキャンセル＝UI が固まらない）。
+/// 同時に走る検索/置換は 1 本（フロントの検索バー）想定。新しい検索を始めたら直前のトークンを
+/// 差し替えてキャンセルする（前の検索を打ち切り＝UI が固まらない）。
 #[derive(Default)]
 pub struct SearchCancelService {
     current: Mutex<Option<Cancel>>,
-    generation: AtomicU64,
 }
 
 impl SearchCancelService {
@@ -533,7 +471,6 @@ impl SearchCancelService {
         if let Some(prev) = cur.replace(token.clone()) {
             prev.cancel();
         }
-        self.generation.fetch_add(1, Ordering::SeqCst);
         token
     }
 }
@@ -657,99 +594,5 @@ pub fn replace_one(
             end: 0,
             next: 0,
         }),
-    }
-}
-
-/// バイト数を人間可読に（エラー文言用・"512.0 MB" 等）。
-fn human_bytes(n: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
-    let mut v = n as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < UNITS.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    format!("{v:.1} {}", UNITS[i])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 参照実装: byte_offsets を 1 件ずつ `encode_utf16().count()` で変換する（O(N·L)）。
-    /// 単一パス版の出力がこれと一致することをサロゲート混在で確認する（速度ではなく正しさの照合用）。
-    fn naive(text: &str, byte_offsets: &[usize]) -> Vec<usize> {
-        byte_offsets
-            .iter()
-            .map(|&b| text[..b].encode_utf16().count())
-            .collect()
-    }
-
-    #[test]
-    fn utf16変換_asciiはbyteと一致する() {
-        // ASCII は 1 char = 1 byte = 1 UTF-16 ユニットなので byte と同値。
-        let text = "abcdef";
-        let offsets = [0usize, 1, 3, 6];
-        assert_eq!(byte_to_utf16_offsets(text, &offsets), vec![0, 1, 3, 6]);
-        assert_eq!(byte_to_utf16_offsets(text, &offsets), naive(text, &offsets));
-    }
-
-    #[test]
-    fn utf16変換_日本語bmpは1ユニット() {
-        // "あいう" は各 char utf8=3 / utf16=1。byte 0/3/6/9 → utf16 0/1/2/3。
-        let text = "あいう";
-        let offsets = [0usize, 3, 6, 9];
-        assert_eq!(byte_to_utf16_offsets(text, &offsets), vec![0, 1, 2, 3]);
-        assert_eq!(byte_to_utf16_offsets(text, &offsets), naive(text, &offsets));
-    }
-
-    #[test]
-    fn utf16変換_絵文字サロゲートを複数マッチ混在で正しく写す() {
-        // "a😀bb😀cc"。"😀" は utf8=4 / utf16=2（サロゲートペア）。
-        // バイト配置: a=0 / 😀=1..5 / b=5 / b=6 / 😀=7..11 / c=11 / c=12 / 末尾=13。
-        // "bb"（byte 5..7）を検索した想定のマッチ群を模す。1 件目 bb=5..7。
-        let text = "a😀bb😀cc";
-        assert_eq!(text.len(), 13); // 1 + 4 + 1 + 1 + 4 + 1 + 1
-                                    // [start_0, end_0] = "bb" の byte 範囲。サロゲートを跨いだ後の位置。
-        let offsets = [5usize, 7];
-        let got = byte_to_utf16_offsets(text, &offsets);
-        // a(1) + 😀(2) = utf16 3 で "bb" 開始、+2 で end=5。
-        assert_eq!(got, vec![3, 5]);
-        assert_eq!(got, naive(text, &offsets));
-
-        // さらに "cc"（byte 11..13）も含む昇順列で、サロゲートを 2 回跨いでも一致する。
-        let offsets2 = [5usize, 7, 11, 13];
-        let got2 = byte_to_utf16_offsets(text, &offsets2);
-        // cc 開始 utf16 = a1 + 😀2 + bb2 + 😀2 = 7、end=9。
-        assert_eq!(got2, vec![3, 5, 7, 9]);
-        assert_eq!(got2, naive(text, &offsets2));
-    }
-
-    #[test]
-    fn utf16変換_空オフセット列と末尾境界() {
-        // 空入力 → 空出力。
-        assert_eq!(byte_to_utf16_offsets("abc", &[]), Vec::<usize>::new());
-        // 末尾境界 text.len() を正しく返す（最終 char の直後）。
-        let text = "a😀"; // byte len = 5、utf16 len = 1 + 2 = 3。
-        assert_eq!(text.len(), 5);
-        let offsets = [0usize, 1, 5];
-        let got = byte_to_utf16_offsets(text, &offsets);
-        assert_eq!(got, vec![0, 1, 3]); // a 開始=0 / 😀 開始=1 / 末尾=3。
-        assert_eq!(got, naive(text, &offsets));
-        // 空文字列の末尾境界（len=0）も 0 を返す。
-        assert_eq!(byte_to_utf16_offsets("", &[0]), vec![0]);
-    }
-
-    #[test]
-    fn search_in_textのutf16はマッチ群で一括変換と一致する() {
-        // search_in_text が組む昇順バイト列（[start,end,...]）を byte_to_utf16_offsets が正しく写すこと
-        // を、サロゲート混在テキストで直接確認する（command の組み立てロジックの回帰防止）。
-        let text = "x😀foo😀foo";
-        // "foo"（byte 5..8 と byte 12..15）の 2 マッチを想定した昇順バイト列。
-        let byte_offsets = [5usize, 8, 12, 15];
-        let utf16 = byte_to_utf16_offsets(text, &byte_offsets);
-        // x1 + 😀2 = 3 で 1 件目開始、+3 = 6 で end。😀2 を挟み 8 で 2 件目開始、+3 = 11 で end。
-        assert_eq!(utf16, vec![3, 6, 8, 11]);
-        assert_eq!(utf16, naive(text, &byte_offsets));
     }
 }

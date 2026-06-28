@@ -12,8 +12,8 @@
 
 use include_dir::{include_dir, Dir};
 use pika_core::render::{
-    check_image_bytes, check_svg_bytes, confine_under, join_under, prepare_html_preview,
-    prepare_markdown_preview, resolve_local_ref, rewrite_local_image_refs,
+    check_image_bytes, check_svg_bytes, collect_external_hosts, confine_under, join_under,
+    prepare_html_preview, prepare_markdown_preview, resolve_local_ref, rewrite_local_image_refs,
     wrap_preview_document_with, ExternalResourceAllow, GuardDecision, LocalRefDecision,
     PreviewFeatures, PreviewFlavor, PreviewResponse, PreviewTheme, DEFAULT_IMAGE_MAX_PIXELS,
     DEFAULT_SVG_MAX_ELEMENTS, DEFAULT_SVG_MAX_PIXELS,
@@ -499,11 +499,8 @@ pub fn handle_preview_request(
         // （ロック保持のまま FS I/O すると他の preview 操作が詰まるため）。
         drop(inner);
         // 機密判定の設定 sensitive_patterns（和集合・既定は外せない＝U2b-2）を state から取る。
-        // state 未登録時は空 patterns＝既定のみで安全側（機密判定を弱めない不変条件）。
-        let sensitive_patterns = app
-            .try_state::<std::sync::Arc<crate::settings_service::SettingsService>>()
-            .map(|s| s.snapshot().sensitive_patterns)
-            .unwrap_or_default();
+        // 取得は asset 側と共通の単一源（state 未登録時は空 patterns＝既定のみで安全側・弱めない）。
+        let sensitive_patterns = crate::settings_service::sensitive_patterns_of(app);
         return local_resource_response(&doc, reference, &sensitive_patterns);
     }
 
@@ -513,8 +510,9 @@ pub fn handle_preview_request(
 /// サニタイズ済み HTML 本体を CSP ヘッダ付きで返す（design doc 6章）。
 ///
 /// pika-core のサニタイズ済み body は `<head>`/`<!DOCTYPE>` を持たない**フラグメント**なので、
-/// 別WebView へ配信する前に [`wrap_preview_document`]（pika-core・cargo test 済み）で
-/// 完全 HTML 文書（charset utf-8・最小 base CSS）にラップする。**body は一字一句改変しない**。
+/// 別WebView へ配信する前に [`wrap_preview_document_with`]（pika-core・cargo test 済み）で
+/// 完全 HTML 文書（charset utf-8・最小 base CSS）にラップする（設定の機能ゲートを features で渡す）。
+/// **body は一字一句改変しない**。
 /// CSP は引き続きレスポンスヘッダで強制し、文書内 `<meta>` には依存しない（design doc 6章）。
 fn document_response(doc: &PreparedDoc, features: PreviewFeatures) -> Response<Vec<u8>> {
     // テーマ配色を別WebView 文書へ降ろす（Stage ③・design doc 10章）。系統B では prepare_preview が
@@ -528,15 +526,14 @@ fn document_response(doc: &PreparedDoc, features: PreviewFeatures) -> Response<V
         features,
     );
     // CSP は pika-core が組んだ値（既定外部遮断・nonce・オプトイン緩和は img/font のみ）。
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CONTENT_SECURITY_POLICY, &doc.response.csp)
-        // クリックジャッキング/MIME スニッフィング/参照漏れの追加防御。
-        .header("X-Content-Type-Options", "nosniff")
-        .header(header::REFERRER_POLICY, "no-referrer")
-        .body(html.into_bytes())
-        .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "応答組立失敗"))
+    // nosniff は ok_response_builder が一元付与する。CSP/Referrer-Policy（クリックジャッキング/
+    // 参照漏れの追加防御）はこの経路固有なのでここで続けて付ける（値は現行と完全一致）。
+    finish_response(
+        ok_response_builder("text/html; charset=utf-8")
+            .header(header::CONTENT_SECURITY_POLICY, &doc.response.csp)
+            .header(header::REFERRER_POLICY, "no-referrer"),
+        html.into_bytes(),
+    )
 }
 
 /// ローカル参照（画像/CSS）を封じ込め検証して返す（要件6.2/6.3/9.1・design doc 6章）。
@@ -576,12 +573,10 @@ fn local_resource_response(
     }
     // 多層防御: 非機密名のシンボリックリンクが基準内の機密ファイルを指すケースを、
     // 解決後の実体名でも機密判定して弾く（要件9.1「機密は custom protocol からも配信拒否」）。
-    // 機密判定は既定 ∪ 設定 sensitive_patterns（既定は外せない＝U2b-2）。
-    if pika_core::snapshot::policy::is_sensitive_with(
-        &resolved.to_string_lossy(),
-        sensitive_patterns,
-    ) {
-        return error_response(StatusCode::FORBIDDEN, "機密ファイルの配信拒否");
+    // 機密判定は既定 ∪ 設定 sensitive_patterns（既定は外せない＝U2b-2）。serve_verified_image と
+    // 同一の防御段（共通 deny_if_sensitive・403）を共有する。
+    if let Some(resp) = deny_if_sensitive(&resolved, sensitive_patterns) {
+        return resp;
     }
 
     let Ok(bytes) = std::fs::read(&resolved) else {
@@ -602,10 +597,8 @@ fn local_resource_response(
     // 同一 WebView セッション内で繰り返し読まれるプレビュー素材へ控えめなキャッシュを効かせる（#53）。
     // Range 非対応（プレビュー画像/CSS にシークは不要＝scope 外。実機での挙動確認は系統C）。
     // 条件付き応答（304・If-None-Match 突合）は実装しない（シグネチャ非変更・max-age で十分）。
-    let mut builder = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header("X-Content-Type-Options", "nosniff")
+    // nosniff は ok_response_builder が一元付与。Cache-Control（5 分・控えめ）は経路固有なので続けて付ける。
+    let mut builder = ok_response_builder(content_type)
         // 5 分（控えめ）。素材は同一セッション内で繰り返し読まれる。
         .header(header::CACHE_CONTROL, "max-age=300");
     // mtime+サイズから弱い実体タグを付ける。取得失敗時は ETag を省略する（Cache-Control だけ付く）。
@@ -620,9 +613,7 @@ fn local_resource_response(
             builder = builder.header(header::ETAG, format!("\"{mtime_ms:x}-{size:x}\""));
         }
     }
-    builder
-        .body(bytes)
-        .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "応答組立失敗"))
+    finish_response(builder, bytes)
 }
 
 /// ローカルリソース配信前の暴走ガード（要件2.2）。Content-Type で画像/SVG を判別し pika-core で判定する。
@@ -692,14 +683,70 @@ fn asset_response(reference: &str) -> Response<Vec<u8>> {
     };
 
     let content_type = guess_content_type(std::path::Path::new(reference));
+    // nosniff は ok_response_builder が一元付与。アセット応答自体に CSP は付けない（ドキュメントの
+    // レスポンスヘッダ CSP が読み込み可否を統制する）。長期キャッシュ（immutable）はここで続けて付ける。
+    finish_response(
+        ok_response_builder(content_type)
+            // 同梱アセットはビルドで固定（再現性は vendor.lock）。長期キャッシュ可。
+            .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        file.contents().to_vec(),
+    )
+}
+
+/// 200 OK レスポンスのビルダーを起こす共通ヘルパ（Content-Type ＋ nosniff を必ず付与）。
+///
+/// **全配信に `X-Content-Type-Options: nosniff` を一元付与する不変条件をここで保証する**
+/// （preview/asset の OK 応答が重複して起こしていた builder を単一源化＝U3）。CSP/Cache-Control/
+/// ETag/Referrer-Policy 等の経路固有ヘッダは呼び出し側が続けて `.header(...)` で付け、最後に
+/// [`finish_response`] で本体を載せて確定する。値はすべて呼び出し側が現行と同一文字列で渡す
+/// （キャッシュ文言・CSP は不変）。
+///
+/// `pub(crate)`: pika-asset:// の配信ヘルパ（[`crate::asset`]）も同じ起こし方を共用する。
+pub(crate) fn ok_response_builder(content_type: &str) -> tauri::http::response::Builder {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
+        // 全配信に nosniff を一元付与（MIME スニッフィング防御の不変条件をここで保証）。
         .header("X-Content-Type-Options", "nosniff")
-        // 同梱アセットはビルドで固定（再現性は vendor.lock）。長期キャッシュ可。
-        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-        .body(file.contents().to_vec())
+}
+
+/// ビルダーに本体を載せてレスポンスを確定する（組立失敗時は 500＋空本文へ縮退・単一源）。
+///
+/// `.body(...).unwrap_or_else(|_| error_response(INTERNAL_SERVER_ERROR, "応答組立失敗"))` の
+/// 定型を 1 箇所へ集約する（preview/asset の全 OK 応答が共用）。
+///
+/// `pub(crate)`: pika-asset:// の配信ヘルパ（[`crate::asset`]）も共用する。
+pub(crate) fn finish_response(
+    builder: tauri::http::response::Builder,
+    body: Vec<u8>,
+) -> Response<Vec<u8>> {
+    builder
+        .body(body)
         .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "応答組立失敗"))
+}
+
+/// 解決済み実体パスが機密判定に当たれば 403 を返す共通配信前ガード（preview/asset 単一源）。
+///
+/// 機密判定は既定 ∪ 設定 `sensitive_patterns`（**既定は外せない**＝U2b-2）。当たらなければ `None`。
+/// `serve_verified_image`（pika-asset://）と `local_resource_response`（pika-preview:///local/）が
+/// **同一の防御段（実体名で `is_sensitive_with` → 403）**を共有し、判定順序・ステータス・拒否文言を
+/// 単一源で揃える（弱い方へ倒さない＝最も厳しい挙動を 1 箇所で保証）。空 patterns でも既定機密
+/// （`.env` 等）は拒否される（`is_sensitive_with` が常に既定を内包）。
+pub(crate) fn deny_if_sensitive(
+    resolved: &std::path::Path,
+    sensitive_patterns: &[String],
+) -> Option<Response<Vec<u8>>> {
+    if pika_core::snapshot::policy::is_sensitive_with(
+        &resolved.to_string_lossy(),
+        sensitive_patterns,
+    ) {
+        Some(error_response(
+            StatusCode::FORBIDDEN,
+            "機密ファイルの配信拒否",
+        ))
+    } else {
+        None
+    }
 }
 
 /// エラーレスポンス（本文を最小化し情報漏れを避ける）。
@@ -746,55 +793,6 @@ fn scan_markdown_external(content: &str) -> HtmlHazards {
         has_meta_refresh: false,
         external_hosts,
     }
-}
-
-/// 素の文書から外部参照ホスト（`https://<host>`）を重複排除して収集する（要件6.2/6.3・2.4）。
-///
-/// オプトイン許可（[`validate_allow_hosts`] が後段で https のみ受理して再検証）する候補なので、
-/// **`https://` のみ**収集する（`http://` は盗聴/プライバシーのため対象外＝既定遮断のまま）。
-/// 防御ではなく UX 補助（実防御は ammonia + CSP）なので走査は簡易でよい:
-/// `https://` 出現位置からホスト部（`/`・`?`・`#`・空白・クォート・`<`/`>` の手前まで）を切り出し、
-/// `validate_one_host` 相当の最終検証は CSP 組立時（[`build_csp`]）が行う（緩く集めて検証で落とす）。
-fn collect_external_hosts(content: &str) -> Vec<String> {
-    let mut hosts: Vec<String> = Vec::new();
-    let bytes = content.as_bytes();
-    let lower = content.to_ascii_lowercase();
-    let mut search_from = 0usize;
-    // 大文字小文字を無視して `https://` を探すため lowercase 側で位置を取り、ホスト抽出は元 content で行う
-    // （ホスト名は ASCII なので大小は host source 比較に影響しないが、元文字列から切り出す）。
-    while let Some(rel) = lower[search_from..].find("https://") {
-        let start = search_from + rel;
-        let host_start = start + "https://".len();
-        // ホスト部の終端を、区切り文字（パス/クエリ/フラグメント/空白/引用/タグ境界）まで進めて決める。
-        let mut end = host_start;
-        while end < bytes.len() {
-            let c = bytes[end] as char;
-            if c == '/'
-                || c == '?'
-                || c == '#'
-                || c == '"'
-                || c == '\''
-                || c == '<'
-                || c == '>'
-                || c == ')'
-                || c == ']'
-                || c.is_whitespace()
-            {
-                break;
-            }
-            end += 1;
-        }
-        let host = &content[host_start..end];
-        if !host.is_empty() {
-            let normalized = format!("https://{host}");
-            if !hosts.contains(&normalized) {
-                hosts.push(normalized);
-            }
-        }
-        // 次の検索開始位置（最低でも 1 進めて無限ループを防ぐ）。
-        search_from = end.max(start + "https://".len());
-    }
-    hosts
 }
 
 /// HTML プレビューの危険検知結果（要件6.3・通知バー文言の根拠）。
@@ -892,77 +890,6 @@ mod tests {
         assert!(!h.has_external_ref);
         assert!(!h.has_meta_refresh);
         assert!(h.external_hosts.is_empty());
-    }
-
-    #[test]
-    fn 外部ホスト収集_https_のみを重複排除して集める() {
-        // 要件6.2/6.3・2.4: オプトイン許可候補は https のみ。http は盗聴/プライバシーのため除外する。
-        let hosts = collect_external_hosts(
-            "<img src=\"https://www.w3.org/logo.png\"> \
-             <link href='https://cdn.example.com/x.css'> \
-             <img src=\"http://insecure.example/a.png\"> \
-             <img src=\"https://www.w3.org/another.svg\">",
-        );
-        // www.w3.org は重複排除され 1 件、cdn.example.com が 1 件。http は含めない。
-        assert!(
-            hosts.contains(&"https://www.w3.org".to_string()),
-            "w3.org が収集されない: {hosts:?}"
-        );
-        assert!(
-            hosts.contains(&"https://cdn.example.com".to_string()),
-            "cdn が収集されない: {hosts:?}"
-        );
-        assert!(
-            !hosts.iter().any(|h| h.contains("insecure.example")),
-            "http ホストが混入した: {hosts:?}"
-        );
-        // 重複排除: www.w3.org は 1 回だけ。
-        assert_eq!(
-            hosts
-                .iter()
-                .filter(|h| h.as_str() == "https://www.w3.org")
-                .count(),
-            1,
-            "重複排除されていない: {hosts:?}"
-        );
-        // 収集したホストは https のみ・パス/クエリを含まない（CSP の host source 形式）。
-        for h in &hosts {
-            assert!(h.starts_with("https://"), "https 以外が混入: {h}");
-            assert!(!h["https://".len()..].contains('/'), "パスが残った: {h}");
-        }
-    }
-
-    #[test]
-    fn 外部ホスト収集_ポート付きとフラグメント_クエリを正しく切る() {
-        let hosts = collect_external_hosts(
-            "see https://example.com:8443/path?q=1#frag and https://cdn.test/a",
-        );
-        assert!(
-            hosts.contains(&"https://example.com:8443".to_string()),
-            "ポート付きホストが取れない: {hosts:?}"
-        );
-        assert!(
-            hosts.contains(&"https://cdn.test".to_string()),
-            "ホストが取れない: {hosts:?}"
-        );
-    }
-
-    #[test]
-    fn 外部ホスト収集_収集結果は_csp_検証を通る() {
-        // 緩く集めて検証で落とす規約（要件6.2）: collect の出力は build_csp/validate_allow_hosts が
-        // 受理できる host source 形式（https のみ・パス/クエリ/区切りなし）であることを担保する。
-        use pika_core::render::{validate_allow_hosts, ExternalResourceAllow};
-        let hosts = collect_external_hosts(
-            "<img src=\"https://www.w3.org/Icons/valid-html401.png\"> \
-             <img src=\"https://cdn.example.com:443/lib/font.woff2\">",
-        );
-        let allow = ExternalResourceAllow {
-            hosts: hosts.clone(),
-        };
-        assert!(
-            validate_allow_hosts(&allow).is_ok(),
-            "収集ホストが CSP 検証で落ちた: {hosts:?}"
-        );
     }
 
     #[test]

@@ -2,29 +2,28 @@
 // 判定の決定論部分は pika-core::nontext と同規則。ここは DOM 提示（画像簡易ビュー・「既定アプリで
 // 開く」誘導・寸法プリチェックの結果反映）を担う（実描画は系統C で検証）。
 
-/** 画像拡張子（要件12.2）。pika-core::nontext::classify_extension と同じ集合。 */
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// 【Rust 正本との同期責務】下の IMAGE_EXTS / TEXT_EXTS / classifyExtension(=classify_file_name) は
+// **pika-core::nontext の写し**で、Rust 側が正典。判定を backend 一本化せず TS に複製しているのは、
+// 種別判定がツリー描画・タブ生成のホットパスで毎エントリ呼ばれるため invoke を増やすと「固まらない」
+// 原則に反するから（ユーザー判断: TS 内で重複解消＋同期コメント明確化・backend 一本化はしない）。
+// **ここを増減/変更したら必ず pika-core::nontext の対応集合・3ルールと一致させること。**
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+
+/** 画像拡張子（要件12.2）。pika-core::nontext::classify_extension の IMAGE_EXTS と一致させる（要 同期）。 */
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"];
 
-/** 画像の総ピクセル数上限（要件2.2/12.2＝6000万px）。pika-core::nontext::MAX_IMAGE_PIXELS と同値。 */
-export const MAX_IMAGE_PIXELS = 60_000_000;
-
-/** 拡張子（ドット付き/なし可）が画像か。 */
-export function isImageExt(name: string): boolean {
-  const dot = name.lastIndexOf(".");
-  if (dot < 0) return false;
-  return IMAGE_EXTS.includes(name.slice(dot + 1).toLowerCase());
-}
-
-/**
- * 既知テキスト拡張子（要件12.2）。**pika-core::nontext::classify_extension の TEXT_EXTS の写し。要 同期**。
- * 上流（Rust）が正典。ここを増減したら必ず Rust 側 TEXT_EXTS と一致させる（isImageExt が IMAGE_EXTS を
- * 複製しているのと同じ作法＝判定の二重化を許す代わりに同期責務を明示する）。
- */
+/** 既知テキスト拡張子（要件12.2）。pika-core::nontext::classify_extension の TEXT_EXTS と一致させる（要 同期）。 */
 const TEXT_EXTS = [
   "md", "markdown", "html", "htm", "txt", "json", "jsonl", "csv", "tsv", "xml",
   "yaml", "yml", "toml", "rs", "ts", "js", "tsx", "jsx", "css", "py", "c",
   "cpp", "h", "hpp", "go", "java", "sh", "log",
 ];
+
+/** ファイル名から拡張子（最後のドット以降・小文字化）を取り出す（拡張子判定の単一源）。 */
+function extOf(name: string): string {
+  return name.slice(name.lastIndexOf(".") + 1).toLowerCase();
+}
 
 /**
  * ファイル名からファイル種別を分類する（要件12.2）。
@@ -42,7 +41,7 @@ export function classifyExtension(name: string): "text" | "image" | "unsupported
   // 2. dotfile（先頭 `.` で、それ以降にドットが無い）はテキストへ寄せる。
   if (name.startsWith(".") && !name.slice(1).includes(".")) return "text";
   // 3. それ以外は最後のドット以降の拡張子（小文字化）で従来判定。
-  const ext = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
+  const ext = extOf(name);
   if (IMAGE_EXTS.includes(ext)) return "image";
   if (TEXT_EXTS.includes(ext)) return "text";
   return "unsupported";
