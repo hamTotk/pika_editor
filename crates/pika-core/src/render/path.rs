@@ -164,9 +164,8 @@ pub fn rewrite_local_image_refs(html: &str, local_prefix: &str) -> String {
             out.push_str(&rewrite_img_tag(tag, local_prefix));
             i = tag_end;
         } else {
-            // 非対象バイトはそのまま透過（UTF-8 連続バイトも 1 バイトずつ push して問題ない＝
-            // push(char) ではなく元スライスのバイト境界で出力するため、ここは ASCII 1 バイトのみ）。
-            // 安全のため char 単位で進める。
+            // 非対象バイトは元スライスのまま透過する。UTF-8 マルチバイト文字を分割しないよう、
+            // バイト先頭の char 長（utf8_char_len）単位で切り出して進める。
             let ch_len = utf8_char_len(bytes[i]);
             out.push_str(&html[i..i + ch_len]);
             i += ch_len;

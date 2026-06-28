@@ -60,9 +60,14 @@ pub fn hash_normalized(content: &str) -> String {
 }
 
 /// 内容を zstd 圧縮する（永続化前の object 圧縮＝要件9.1「圧縮して保存」）。
-pub fn zstd_compress(content: &[u8]) -> Vec<u8> {
-    // zstd::encode_all はメモリ上で完結し失敗は内部 I/O エラーのみ（スライス入力では実質起きない）。
-    zstd::encode_all(content, DEFAULT_ZSTD_LEVEL).expect("zstd 圧縮（メモリ）は失敗しない")
+///
+/// `zstd::encode_all` はメモリ上で完結し、失敗は内部 I/O エラーのみ（スライス入力では実質起きない）。
+/// それでも `expect` で **panic=abort** させず [`crate::Result`] で返し、呼び出し側（退避の永続化）が
+/// 「圧縮できなければ object を書かずに諦める」へ安全に倒せるようにする（最上位原則「データを失わない」
+/// ＝最後の砦を堅牢化）。**メモリ zstd は実際には失敗しないため観測挙動は不変**。
+pub fn zstd_compress(content: &[u8]) -> crate::Result<Vec<u8>> {
+    zstd::encode_all(content, DEFAULT_ZSTD_LEVEL)
+        .map_err(|e| crate::PikaError::Internal(format!("zstd 圧縮に失敗: {e}")))
 }
 
 /// zstd 圧縮された object を復元する。破損時は `None`（呼び出し側が他 object/メタへフォールバック）。
@@ -89,7 +94,7 @@ mod tests {
     #[test]
     fn zstd_は往復で元に戻る() {
         let original = "今日は晴れ。\nThe quick brown fox.\n".repeat(50);
-        let comp = zstd_compress(original.as_bytes());
+        let comp = zstd_compress(original.as_bytes()).expect("メモリ zstd 圧縮は失敗しない");
         let back = zstd_decompress(&comp).unwrap();
         assert_eq!(back, original.as_bytes());
     }

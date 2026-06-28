@@ -31,7 +31,9 @@ use tauri::http::{header, Request, Response, StatusCode};
 use tauri::{Manager, State, UriSchemeContext, Wry};
 
 use crate::access::AccessControl;
-use crate::preview::{error_response, guess_content_type};
+use crate::preview::{
+    deny_if_sensitive, error_response, finish_response, guess_content_type, ok_response_builder,
+};
 
 /// 画像配信 custom protocol のスキーム名（実体 `http://pika-asset.localhost/`）。
 pub const ASSET_SCHEME: &str = "pika-asset";
@@ -184,11 +186,9 @@ pub fn image_info(
 /// 空 patterns でも既定機密（`.env` 等）は 403 になる（is_sensitive_with が常に既定を内包＝弱めない）。
 fn serve_verified_image(resolved: &Path, sensitive_patterns: &[String]) -> Response<Vec<u8>> {
     // (1) 機密再判定（多層防御・実体名で判定）。既定 ∪ 設定 sensitive_patterns（既定は外せない＝U2b-2）。
-    if pika_core::snapshot::policy::is_sensitive_with(
-        &resolved.to_string_lossy(),
-        sensitive_patterns,
-    ) {
-        return error_response(StatusCode::FORBIDDEN, "機密ファイルの配信拒否");
+    // local_resource_response と同一の防御段（共通 deny_if_sensitive・403）を共有する。
+    if let Some(resp) = deny_if_sensitive(resolved, sensitive_patterns) {
+        return resp;
     }
 
     // (2) ファイル上限を metadata で先に弾く（巨大ファイルは中身を読まない＝固まらない）。
@@ -212,15 +212,13 @@ fn serve_verified_image(resolved: &Path, sensitive_patterns: &[String]) -> Respo
         );
     }
 
-    // (5) OK 配信。Content-Type は拡張子由来・nosniff・控えめキャッシュ（同一セッションで繰り返し読む）。
+    // (5) OK 配信。Content-Type は拡張子由来・nosniff（共通 builder が一元付与）・控えめキャッシュ
+    // （同一セッションで繰り返し読む）。応答組立は preview と共通の finish_response へ集約。
     let content_type = guess_content_type(resolved);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header("X-Content-Type-Options", "nosniff")
-        .header(header::CACHE_CONTROL, "max-age=300")
-        .body(bytes)
-        .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "応答組立失敗"))
+    finish_response(
+        ok_response_builder(content_type).header(header::CACHE_CONTROL, "max-age=300"),
+        bytes,
+    )
 }
 
 /// `pika-asset://`（実体 `http://pika-asset.localhost/`）の custom protocol ハンドラ（要件12.2・U3）。
@@ -257,11 +255,8 @@ pub fn handle_asset_request(
     };
 
     // 機密判定の設定 sensitive_patterns（和集合・既定は外せない＝U2b-2）を state から取る。
-    // state 未登録時は空 patterns＝既定のみで安全側（機密判定を弱めない不変条件）。
-    let sensitive_patterns = app
-        .try_state::<std::sync::Arc<crate::settings_service::SettingsService>>()
-        .map(|s| s.snapshot().sensitive_patterns)
-        .unwrap_or_default();
+    // 取得は preview 側と共通の単一源（state 未登録時は空 patterns＝既定のみで安全側・弱めない）。
+    let sensitive_patterns = crate::settings_service::sensitive_patterns_of(app);
 
     serve_verified_image(&resolved, &sensitive_patterns)
 }
@@ -312,7 +307,7 @@ mod tests {
         // 判定側がファイルを全読みしないこと（プレフィックス長以下しか読まない）も確認する（指摘2）。
         let dir = temp_dir("prefix");
         let mut body = png_header(640, 480);
-        body.extend(std::iter::repeat(0u8).take(200_000)); // プレフィックス超のダミー後続バイト。
+        body.extend(std::iter::repeat_n(0u8, 200_000)); // プレフィックス超のダミー後続バイト。
         let path = write_bytes(&dir, "wide.png", &body);
         let prefix = read_prefix(&path, IMAGE_HEADER_PREFIX_BYTES).expect("プレフィックス読取");
         assert!(

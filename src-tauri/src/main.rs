@@ -17,6 +17,7 @@ mod asset;
 mod commands;
 mod diagnostic;
 mod document;
+mod fs_atomic;
 mod jumplist;
 mod preview;
 mod settings_service;
@@ -24,6 +25,7 @@ mod single_instance;
 mod snapshot;
 mod snapshot_persist;
 mod state_store;
+mod util;
 mod watcher;
 mod webview2;
 

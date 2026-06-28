@@ -15,7 +15,6 @@ use pika_core::state::{
     TabState, WorkspaceRestore,
 };
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 /// データルート配下の state.json ファイル名。
@@ -27,10 +26,6 @@ const STATE_FILE: &str = "state.json";
 /// `load_for_update → 加工 → save` の RMW を行う。両者が並行すると後勝ちで一方の更新を取りこぼす
 /// （recent が消える/タブ状態が巻き戻る）。RMW 区間全体をこのロックで囲んで不可分化する。
 static STATE_IO_LOCK: Mutex<()> = Mutex::new(());
-
-/// 一時ファイル名の連番カウンタ（#21 tmp 名衝突回避）。同一 PID 内で複数の save が並行しても
-/// tmp 名が衝突しないよう PID＋連番で一意化する（rename 元の相互上書きを構造的に防ぐ）。
-static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// state.json の RMW を直列化するロックを取得する（#21）。
 ///
@@ -73,38 +68,18 @@ fn state_path(root: &DataRoot) -> PathBuf {
     root.path.join(STATE_FILE)
 }
 
-/// AppState をアトミックに書き込む（一時ファイル→rename。途中クラッシュで旧版を壊さない）。
+/// AppState をアトミックに書き込む（一時ファイル→fsync→単一アトミック置換。途中クラッシュで旧版を壊さない）。
 ///
-/// 完全化（eval low）:
-/// - 一時ファイル名に **PID サフィックス**を付け、SID 取得失敗などで複数プロセスが同居した
-///   稀なケースでも同一 tmp への同時書込・相互上書きを構造的に避ける。
-/// - rename 前に **fsync（sync_all）** して、OS クラッシュ/電源断時にゼロ長/部分書込の
-///   tmp が残ったまま rename される理論リスクを減らす。
+/// 書込プリミティブ（一時ファイル PID＋連番固有名／`sync_all`（fsync）／単一アトミック置換／失敗時の
+/// 一時ファイル後始末）は src-tauri 共通の [`crate::fs_atomic::atomic_write`] へ集約した。旧実装は
+/// `std::fs::rename` 置換だったが、最安全の `MoveFileExW(MOVEFILE_REPLACE_EXISTING|WRITE_THROUGH)`
+/// 単一置換へ**格上げ**統一している（消失窓を作らない＝最上位原則「データを失わない」の強化）。
 pub fn save(root: &DataRoot, state: &AppState) -> Result<(), String> {
     std::fs::create_dir_all(&root.path).map_err(|e| format!("データルート作成に失敗: {e}"))?;
     let json = state.to_json().map_err(|e| format!("{e}"))?;
     let target = state_path(root);
-    // 一時ファイルは PID＋連番固有名（同居プロセス／同一 PID 内の並行 save の tmp 競合を構造的に排除・#21）。
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = target.with_extension(format!("json.{}.{}.tmp", std::process::id(), seq));
-    write_synced(&tmp, json.as_bytes()).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("一時ファイル書込に失敗: {e}")
-    })?;
-    std::fs::rename(&tmp, &target).map_err(|e| {
-        // 置換に失敗したら一時ファイルを残さない（クリーンアップ）。
-        let _ = std::fs::remove_file(&tmp);
-        format!("state.json 置換に失敗: {e}")
-    })?;
-    Ok(())
-}
-
-/// 一時ファイルへ書き込み、fsync してからクローズする（rename 前にディスクへ落とす）。
-fn write_synced(tmp: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::File::create(tmp)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
+    crate::fs_atomic::atomic_write(&target, json.as_bytes())
+        .map_err(|e| format!("state.json の保存に失敗: {e}"))?;
     Ok(())
 }
 

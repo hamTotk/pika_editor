@@ -11,7 +11,8 @@
 
 use pika_core::diff::{compute_diff, DiffTag};
 use pika_core::review::{
-    decide_confirm, decide_rollback, ConfirmDecision, DiffSnapshot, DiskState,
+    decide_confirm, decide_confirm_all, decide_rollback, ConfirmAllOutcome, ConfirmAllTarget,
+    ConfirmDecision, DiffSnapshot, DiskState,
 };
 use pika_core::snapshot::{
     baseline_policy_with, hash_normalized, BaselinePolicy, SnapshotStore, StashKind,
@@ -19,9 +20,8 @@ use pika_core::snapshot::{
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 use tauri::State;
 
 /// 差分 1 行の DTO（フロントの read-only unified レンダラと対応＝要件8.2）。
@@ -287,23 +287,14 @@ impl SnapshotService {
         }
 
         // 未確認の外部変更がディスクにある。incoming として退避してから上書きを許す。
-        let normalized = pika_core::diff::normalize_lf(disk_content);
-        inner.objects.insert(disk_hash.clone(), normalized.clone());
-        let stashed =
-            inner
-                .store
-                .add_stash(&key, StashKind::Incoming, disk_hash.clone(), now_ms(), true);
-        // 索引へ退避が入ったことを確認（入らなければ退避を握り潰さず中断＝データを失わない）。
-        if stashed.stashed_object != disk_hash {
-            return Err("incoming 退避を索引へ登録できませんでした（保存を中断）".into());
-        }
-        // 退避 object とその自己記述メタを永続化してから index を書く（最後の砦を再起動を跨いで残す・#3）。
-        if let Some(dir) = inner.snap_dir.clone() {
-            crate::snapshot_persist::persist_object(&dir, &disk_hash, &normalized);
-            if let Some(meta) = inner.store.object_meta(&disk_hash) {
-                crate::snapshot_persist::persist_meta(&dir, &disk_hash, &meta.clone());
-            }
-        }
+        // 退避（object 登録＋索引追加＋実検証＋object/メタ永続化）は共通フローへ集約した（rollback と共用）。
+        stash_and_persist_locked(
+            &mut inner,
+            &key,
+            StashKind::Incoming,
+            disk_content,
+            "incoming 退避を索引へ登録できませんでした（保存を中断）",
+        )?;
         persist_index_locked(&mut inner);
         Ok(true)
     }
@@ -329,23 +320,14 @@ fn capture_baseline_locked(inner: &mut SnapshotInner, path: &str, content: &str,
     if inner.store.baseline(&key).is_some() {
         return;
     }
-    let hash = hash_normalized(content);
     // 機密判定は設定 sensitive_patterns 和集合（既定は外せない＝U2b-2）。
     match baseline_policy_with(path, size, &inner.sensitive_patterns) {
-        BaselinePolicy::StoreContent => {
-            let normalized = pika_core::diff::normalize_lf(content);
-            inner.objects.insert(hash.clone(), normalized.clone());
+        // 内容ベースライン設定＋object 永続化は共通フローへ集約（confirm/confirm_all と共用）。
+        BaselinePolicy::StoreContent => set_baseline_and_persist(inner, &key, content),
+        BaselinePolicy::HashOnly => {
             inner
                 .store
-                .set_baseline_with_content(&key, hash.clone(), hash.clone());
-            // 内容 object を永続化（再起動でベースライン内容＝差分の素を失わない）。
-            // ※ index と違い object は write-once で小さく、即時永続化がデータ安全網（recover_from_meta）。
-            if let Some(dir) = inner.snap_dir.clone() {
-                crate::snapshot_persist::persist_object(&dir, &hash, &normalized);
-            }
-        }
-        BaselinePolicy::HashOnly => {
-            inner.store.set_baseline_hash_only(&key, hash);
+                .set_baseline_hash_only(&key, hash_normalized(content));
         }
     }
 }
@@ -400,6 +382,93 @@ fn get_object(inner: &mut SnapshotInner, hash: &str) -> Option<String> {
     Some(loaded)
 }
 
+/// object の自己記述メタを永続化する（snap_dir が Some のときだけ・最後の砦の素を残す）。
+///
+/// メタが残っていれば index.json が壊れても `recover_stashes_from_meta` で退避を再生成できる。
+/// 退避（incoming/rollback）・baseline-replace 退避が共用する（重複していた meta 永続化ブロックを集約）。
+fn persist_meta_locked(inner: &SnapshotInner, hash: &str) {
+    let Some(dir) = inner.snap_dir.clone() else {
+        return;
+    };
+    if let Some(meta) = inner.store.object_meta(hash) {
+        crate::snapshot_persist::persist_meta(&dir, hash, &meta.clone());
+    }
+}
+
+/// object 実体とその自己記述メタを永続化する（snap_dir が Some のときだけ）。
+///
+/// 退避フロー（incoming/rollback）の「object＋メタを即時永続化」ブロックを集約する（最後の砦を
+/// 再起動を跨いで残す＝#3）。object は write-once で小さく即時永続化がデータ安全網（recover_from_meta）。
+fn persist_object_and_meta(inner: &SnapshotInner, hash: &str, normalized: &str) {
+    if let Some(dir) = inner.snap_dir.clone() {
+        crate::snapshot_persist::persist_object(&dir, hash, normalized);
+    }
+    persist_meta_locked(inner, hash);
+}
+
+/// 現内容を退避（object 登録＋索引追加＋実検証＋object/メタ永続化）する共通フロー（ロック取得済み）。
+///
+/// `stash_incoming_before_overwrite`（incoming）と `rollback_file`（rollback）が共用する。
+/// content を LF 正規化して object 登録 → `add_stash`（LRU 枠を消費）→ **索引へ実登録されたか検証**
+/// （握り潰さない＝データを失わない）→ object とメタを永続化する。索引登録に失敗したら `err_msg` を
+/// 返し、呼び出し側は破壊的操作（上書き/巻き戻し）を中断する。退避した object ハッシュを返す。
+fn stash_and_persist_locked(
+    inner: &mut SnapshotInner,
+    key: &str,
+    kind: StashKind,
+    content: &str,
+    err_msg: &str,
+) -> Result<String, String> {
+    let hash = hash_normalized(content);
+    let normalized = pika_core::diff::normalize_lf(content);
+    inner.objects.insert(hash.clone(), normalized.clone());
+    let stashed = inner
+        .store
+        .add_stash(key, kind, hash.clone(), crate::util::now_ms(), true);
+    // 索引へ退避が入ったことを確認（入らなければ退避を握り潰さず中断＝データを失わない・#1）。
+    if stashed.stashed_object != hash {
+        return Err(err_msg.to_string());
+    }
+    persist_object_and_meta(inner, &hash, &normalized);
+    Ok(hash)
+}
+
+/// 内容ベースラインを据えて object を永続化する共通フロー（ロック取得済み）。
+///
+/// content を LF 正規化して object 登録 → `set_baseline_with_content`（content_hash=object_hash）→
+/// object 実体を永続化する（再起動で差分の素を失わない・#3）。「内容ベースラインを新しい内容へ進める」
+/// 3経路（capture 初回・confirm 確認済み更新・confirm_all 一括確認）が共用する。
+fn set_baseline_and_persist(inner: &mut SnapshotInner, key: &str, content: &str) {
+    let hash = hash_normalized(content);
+    let normalized = pika_core::diff::normalize_lf(content);
+    inner.objects.insert(hash.clone(), normalized.clone());
+    inner
+        .store
+        .set_baseline_with_content(key, hash.clone(), hash.clone());
+    // ※ index と違い object は write-once で小さく、即時永続化がデータ安全網（recover_from_meta）。
+    if let Some(dir) = inner.snap_dir.clone() {
+        crate::snapshot_persist::persist_object(&dir, &hash, &normalized);
+    }
+}
+
+/// compute_file_diff のフォールバック: ベースライン未取得（open 経路漏れ＝サブフォルダ等）なら
+/// 全既読スタート（要件8.1）として現在内容をベースライン化する（指摘6）。
+///
+/// policy 判定（機密/巨大/画像）は open 経路と同じ**ディスク実サイズ**で行う（指摘7）。`current.len()` は
+/// デコード後 UTF-8 のバイト長で、Shift_JIS 等ではディスク比で膨らみ 10MB 境界を誤判定しうるため、
+/// FS 読みを避ける設計でも稀なフォールバックに限り size 取得の 1 回 stat のみ許容する。新規に取得した
+/// ときだけ index を永続化する（取得済みは早期 return で no-op）。
+fn ensure_diff_baseline_locked(inner: &mut SnapshotInner, path: &str, current: &str) {
+    if inner.store.baseline(&normalize_path_key(path)).is_some() {
+        return;
+    }
+    let disk_size = std::fs::metadata(path)
+        .map(|m| m.len())
+        .unwrap_or(current.len() as u64);
+    capture_baseline_locked(inner, path, current, disk_size);
+    persist_index_locked(inner);
+}
+
 /// ベースライン vs 現在内容の差分を計算する（要件8.2）。
 ///
 /// タブで開いている場合は編集バッファ、開いていない場合はディスク内容を `current` に渡す。
@@ -423,16 +492,7 @@ pub fn compute_file_diff(
     // スタート（要件8.1）として現在内容をベースライン化する。これをしないと「ベースライン不在」を
     // has_baseline_content:false で返し、フロントが誤って「差分非対象（10MB以上/画像/機密）」を
     // 通常ファイルにも出していた（指摘6）。policy は capture が踏襲する（機密/巨大はハッシュのみのまま）。
-    if inner.store.baseline(&key).is_none() {
-        // policy 判定（機密/巨大/画像）は open 経路と同じ**ディスク実サイズ**を使う（指摘7）。current.len() は
-        // デコード後 UTF-8 のバイト長で、Shift_JIS 等ではディスク比で膨らみ 10MB 境界を誤判定しうる。
-        // FS 読みを避ける設計だが、ここは稀なフォールバックなので size 取得の1回 stat のみ許容する。
-        let disk_size = std::fs::metadata(&path)
-            .map(|m| m.len())
-            .unwrap_or(current.len() as u64);
-        capture_baseline_locked(&mut inner, &path, &current, disk_size);
-        persist_index_locked(&mut inner);
-    }
+    ensure_diff_baseline_locked(&mut inner, &path, &current);
 
     let Some(baseline) = inner.store.baseline(&key).cloned() else {
         // capture が失敗してもパニックさせない。全既読スタート相当（差分なし）として返す
@@ -516,20 +576,11 @@ pub fn confirm_file(
             content_hash,
             store_content,
         } => {
+            // store_content の content_hash は decide_confirm が frozen.content_hash（=確定直前に再照合した
+            // disk のハッシュ）を返すため hash_normalized(disk_content) と一致する。よって共通フロー
+            // （disk_content から再計算）で据えても object_hash/content_hash は同値（等価リファクタ）。
             if store_content {
-                let normalized = pika_core::diff::normalize_lf(&disk_content);
-                inner
-                    .objects
-                    .insert(content_hash.clone(), normalized.clone());
-                inner.store.set_baseline_with_content(
-                    &key,
-                    content_hash.clone(),
-                    content_hash.clone(),
-                );
-                // 新ベースライン内容 object を永続化（次回起動で差分の素を失わない・#3）。
-                if let Some(dir) = inner.snap_dir.clone() {
-                    crate::snapshot_persist::persist_object(&dir, &content_hash, &normalized);
-                }
+                set_baseline_and_persist(&mut inner, &key, &disk_content);
             } else {
                 inner.store.set_baseline_hash_only(&key, content_hash);
             }
@@ -578,24 +629,14 @@ pub fn rollback_file(
     decide_rollback(baseline.has_content(), current_storable).map_err(|e| e.to_string())?;
 
     // 現在内容を rollback 退避（退避が最後の砦＝確認ダイアログより退避が先）。
-    let cur_hash = hash_normalized(&disk_content);
-    let normalized = pika_core::diff::normalize_lf(&disk_content);
-    inner.objects.insert(cur_hash.clone(), normalized.clone());
-    let stash = inner
-        .store
-        .add_stash(&key, StashKind::Rollback, cur_hash.clone(), now_ms(), true);
-    // 退避が索引へ入ったことを確認（incoming 同様 release でも実検証＝データを失わない・#1）。
-    // 入らなければ退避を握り潰さず中断する（無退避のまま破壊的上書きをしない）。
-    if stash.stashed_object != cur_hash {
-        return Err("巻き戻し退避を索引へ登録できませんでした（巻き戻し中断）".into());
-    }
-    // 退避 object とメタを永続化（再起動を跨いで巻き戻し退避を残す・#3）。
-    if let Some(dir) = inner.snap_dir.clone() {
-        crate::snapshot_persist::persist_object(&dir, &cur_hash, &normalized);
-        if let Some(meta) = inner.store.object_meta(&cur_hash) {
-            crate::snapshot_persist::persist_meta(&dir, &cur_hash, &meta.clone());
-        }
-    }
+    // 退避（object 登録＋索引追加＋実検証＋object/メタ永続化）は incoming と同じ共通フローへ集約した。
+    stash_and_persist_locked(
+        &mut inner,
+        &key,
+        StashKind::Rollback,
+        &disk_content,
+        "巻き戻し退避を索引へ登録できませんでした（巻き戻し中断）",
+    )?;
 
     // ベースライン内容を返す（呼び出し側がディスク/バッファへ上書きする）。
     // ベースライン object が欠損していたら空内容で上書きさせない＝中断する（#1・最上位原則1）。
@@ -623,45 +664,32 @@ pub struct ConfirmAllResult {
 /// `paths` は実行開始時点でフロントがフリーズした未読集合。各ファイルについて
 /// 確定直前にディスクを再読みして再照合し、変化していないものだけベースラインを更新する。
 /// 更新前ベースライン object は baseline-replace バッチへ一括退避する（ワンクリック一括取り消し可能）。
-#[tauri::command]
-pub fn confirm_all(
-    paths: Vec<String>,
-    snapshot: State<'_, SnapshotService>,
-    access: State<'_, crate::access::AccessControl>,
-) -> Result<ConfirmAllResult, String> {
-    use pika_core::review::{decide_confirm_all, ConfirmAllOutcome, ConfirmAllTarget};
-
-    let mut inner = snapshot.inner.lock().map_err(|_| "snapshot ロック失敗")?;
-
-    // 実行開始時点の未読集合をフリーズしてターゲットを組み立てる（要件8.3）。
-    let now = now_ms();
+/// confirm_all の対象組み立て（フリーズした未読集合→検証済みターゲット＋ディスク内容）。
+///
+/// 各 path について diff_snapshots のフリーズ済み基準を引き、`verify_read` で封じ込めた canon 実体パスを
+/// 読む。差分未提示／封じ込め外／読み取り失敗は **このバッチで確定しない**（per-path で外す＝未読維持・
+/// #2/#5）。索引キーは生パス由来（正規化済み）を維持し、canon は FS 読み専用に使う（confirm_file と同作法。
+/// キーを canon にすると frozen diff_snapshot との照合不変条件が崩れる）。
+fn collect_confirm_all_targets(
+    inner: &SnapshotInner,
+    access: &crate::access::AccessControl,
+    paths: &[String],
+) -> (Vec<ConfirmAllTarget>, HashMap<String, String>) {
     let mut targets: Vec<ConfirmAllTarget> = Vec::new();
-    // (path, disk_content) を退避/object 保存用に保持する。
+    // (key, disk_content) を退避/object 保存用に保持する。
     let mut disk_map: HashMap<String, String> = HashMap::new();
-    for path in &paths {
+    for path in paths {
         let key = normalize_path_key(path);
-        let frozen = match inner.diff_snapshots.get(&key).cloned() {
-            Some(f) => f,
-            None => continue, // 差分未提示のものは対象外（見ていない内容を確定しない）。
+        let Some(frozen) = inner.diff_snapshots.get(&key).cloned() else {
+            continue; // 差分未提示のものは対象外（見ていない内容を確定しない）。
         };
-        // #5: frontend 由来の生パスを無検証で read しない。confirm_file/rollback_file と同じく
-        // verify_read で「ワークスペース配下/許可ファイル」へ封じ込め、canon 実体パスで読む。
-        // 封じ込め外のパスは **このバッチで確定しない**＝未読維持で対象外にする（スキップ）。
-        // バッチ耐性: 単一パスの検証失敗で全体を中断せず残りを処理する（confirm_file 単体は ? で中断するが
-        // confirm_all は per-path で外す方が一括操作として妥当）。索引キーは従来どおり生パス由来を維持し、
-        // canon は FS 読み専用に使う（confirm_file と同じ作法・キーを canon にすると別バグになる）。
-        let canon = match access.verify_read(path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(canon) = access.verify_read(path) else {
+            continue; // 封じ込め外は対象外（未読維持）。
         };
-        // ディスク再読みに失敗したファイルは **このバッチで確定しない**＝未読維持で対象外にする（#2）。
-        // 読み取り失敗を空文字扱いするとベースラインが空内容へ確定しうる（confirm_file は ? で中断する）。
-        let disk_content = match std::fs::read_to_string(&canon) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(disk_content) = std::fs::read_to_string(&canon) else {
+            continue; // ディスク再読み失敗は対象外（空文字確定を避ける・#2）。
         };
-        // FS 操作（読み・mtime・policy）は canon 実体パスで揃える。索引キー `key` は生パス由来の
-        // まま維持する（frozen diff_snapshot との照合不変条件＝confirm_file と同じ作法）。
+        // FS 操作（mtime・policy）は canon 実体パスで揃える。索引キー `key` は生パス由来のまま維持する。
         let canon_str = canon.to_string_lossy();
         let disk = DiskState {
             mtime_ms: file_mtime_ms(&canon_str),
@@ -687,14 +715,26 @@ pub fn confirm_all(
         });
         disk_map.insert(key, disk_content);
     }
+    (targets, disk_map)
+}
 
-    let outcomes = decide_confirm_all(&targets);
+/// confirm_all の outcome 適用（ベースライン更新・baseline-replace 退避・件数集計）。
+///
+/// `Updated` は更新前ベースライン object を baseline-replace バッチへ退避（LRU 枠とは別・要件8.3）し、
+/// 内容ベースラインを差分時点（フリーズ内容＝現ディスク）へ進める。store_content の content_hash は
+/// decide_confirm_all が frozen.content_hash（=disk 一致時のハッシュ）を返すため hash_normalized(disk) と
+/// 一致し、disk_map から共通フローで据えても同値（等価リファクタ）。`SkippedChanged` は未読のまま残す。
+fn apply_confirm_all_outcomes(
+    inner: &mut SnapshotInner,
+    outcomes: Vec<ConfirmAllOutcome>,
+    disk_map: &HashMap<String, String>,
+    now: u64,
+) -> ConfirmAllResult {
     let mut result = ConfirmAllResult {
         updated: 0,
         skipped: 0,
         stashed: 0,
     };
-
     for outcome in outcomes {
         match outcome {
             ConfirmAllOutcome::SkippedChanged { .. } => result.skipped += 1,
@@ -705,6 +745,7 @@ pub fn confirm_all(
                 store_content,
             } => {
                 // 更新前ベースライン object を baseline-replace バッチへ退避（10件枠とは別＝要件8.3）。
+                // object 実体はベースライン化時（capture/confirm）に永続化済みなのでメタのみ残す（一括取消の素・#3）。
                 if let Some(obj) = stash_object {
                     inner.store.add_stash(
                         &rel_path,
@@ -713,36 +754,21 @@ pub fn confirm_all(
                         now,
                         false, // baseline-replace は LRU 枠を消費しない。
                     );
-                    // 退避 object（=従来ベースライン内容）の自己記述メタを永続化（一括取り消しの素・#3）。
-                    // object 実体はベースライン化時（capture/confirm）に既に永続化済み。
-                    if let Some(dir) = inner.snap_dir.clone() {
-                        if let Some(meta) = inner.store.object_meta(&obj) {
-                            crate::snapshot_persist::persist_meta(&dir, &obj, &meta.clone());
-                        }
-                    }
+                    persist_meta_locked(inner, &obj);
                     result.stashed += 1;
                 }
                 // ベースラインを差分時点（フリーズ内容＝現ディスク）へ更新。
                 if store_content {
-                    if let Some(disk) = disk_map.get(&rel_path) {
-                        let normalized = pika_core::diff::normalize_lf(disk);
-                        inner
-                            .objects
-                            .insert(content_hash.clone(), normalized.clone());
-                        // 新ベースライン内容 object を永続化（次回起動で差分の素を失わない・#3）。
-                        if let Some(dir) = inner.snap_dir.clone() {
-                            crate::snapshot_persist::persist_object(
-                                &dir,
-                                &content_hash,
-                                &normalized,
-                            );
-                        }
+                    match disk_map.get(&rel_path) {
+                        // disk_map には対象 path が必ず入っている（collect で同時挿入）。共通フローで据える。
+                        Some(disk) => set_baseline_and_persist(inner, &rel_path, disk),
+                        // 念のためのフォールバック（disk 欠落時は object を持たず content_hash のみ据える）。
+                        None => inner.store.set_baseline_with_content(
+                            &rel_path,
+                            content_hash.clone(),
+                            content_hash,
+                        ),
                     }
-                    inner.store.set_baseline_with_content(
-                        &rel_path,
-                        content_hash.clone(),
-                        content_hash,
-                    );
                 } else {
                     inner.store.set_baseline_hash_only(&rel_path, content_hash);
                 }
@@ -751,7 +777,29 @@ pub fn confirm_all(
             }
         }
     }
+    result
+}
 
+/// 「すべて確認済みにする」（要件8.3）。
+///
+/// `paths` は実行開始時点でフロントがフリーズした未読集合。各ファイルについて
+/// 確定直前にディスクを再読みして再照合し、変化していないものだけベースラインを更新する。
+/// 更新前ベースライン object は baseline-replace バッチへ一括退避する（ワンクリック一括取り消し可能）。
+/// 対象組み立てと outcome 適用は private 関数（[`collect_confirm_all_targets`]/
+/// [`apply_confirm_all_outcomes`]）へ分割し、本体はロック取得→判定→永続化の配線に徹する。
+#[tauri::command]
+pub fn confirm_all(
+    paths: Vec<String>,
+    snapshot: State<'_, SnapshotService>,
+    access: State<'_, crate::access::AccessControl>,
+) -> Result<ConfirmAllResult, String> {
+    let mut inner = snapshot.inner.lock().map_err(|_| "snapshot ロック失敗")?;
+    // 退避 created_at に使う時刻（単調化）。バッチ内の全退避で同一値を使う。
+    let now = crate::util::now_ms();
+    // 実行開始時点の未読集合をフリーズして検証済みターゲットを組み立てる（要件8.3）。
+    let (targets, disk_map) = collect_confirm_all_targets(&inner, &access, &paths);
+    let outcomes = decide_confirm_all(&targets);
+    let result = apply_confirm_all_outcomes(&mut inner, outcomes, &disk_map, now);
     // バッチ全体の更新を1回でまとめて永続化（mutation 完了直前に index を1回・#3）。
     persist_index_locked(&mut inner);
     Ok(result)
@@ -798,34 +846,14 @@ fn file_mtime_ms(path: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// これまでに `now_ms()` が返した最大値（単調性のフロア）。
-///
-/// 退避の created_at_ms は 14日保護（容量GC）の窓判定に使う。クロックが UNIX_EPOCH 前へ
-/// 後退すると `duration_since` が Err → 従来は 0 を返し、created_at_ms=0 の退避が量産されて
-/// GC の14日保護が外れていた（#16）。LRU/押し出し順は pika-core 側の単調増加 seq が主キーなので
-/// 順序は壊れないが、保護窓の壁時計値が後退しないよう本フロアで単調化する。
-static NOW_MS_FLOOR: AtomicU64 = AtomicU64::new(0);
-
-/// 現在時刻（ミリ秒・単調化）。退避の created_at に使う。
-///
-/// 取得失敗（クロック後退）時も 0 へ落とさず、直近に返した値を再利用して単調性を壊さない（#16）。
-fn now_ms() -> u64 {
-    let wall = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .ok();
-    let prev = NOW_MS_FLOOR.load(Ordering::Relaxed);
-    // 壁時計が取れたら prev とのより大きい方、取れなければ prev を採用（後退・0 化を防ぐ）。
-    let value = wall.map(|w| w.max(prev)).unwrap_or(prev);
-    // フロアを前進させる（並行更新でも最大値へ収束させる）。
-    NOW_MS_FLOOR.fetch_max(value, Ordering::Relaxed);
-    value
-}
+// 退避 created_at・時間窓判定の単調化ミリ秒時計（旧 now_ms/NOW_MS_FLOOR）は
+// src-tauri 共通の [`crate::util::now_ms`] へ集約した（watcher.rs と単一実装を共有）。
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::time::SystemTime;
 
     /// テスト用 data_root（衝突回避に nanos＋連番）。
     fn temp_data_root(tag: &str) -> PathBuf {

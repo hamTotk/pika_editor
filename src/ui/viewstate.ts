@@ -29,11 +29,6 @@ const DEGRADE_MESSAGE: Record<DegradeReason, string> = {
   "baseline-pending": "差分基準を取得中です",
 };
 
-/** 縮退理由が手動再有効化できるか（読み取り専用ビューアは段階制で固定・要件2.2）。 */
-export function canReenable(reason: DegradeReason): boolean {
-  return reason !== "read-only-viewer";
-}
-
 /** バックエンドの DegradeFlagsDto（document.rs）から Partial の縮退理由列を組み立てる（要件2.2）。 */
 export function degradeReasonsFromFlags(flags: {
   preview_off: boolean;

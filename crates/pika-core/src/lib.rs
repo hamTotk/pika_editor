@@ -16,6 +16,7 @@ pub mod explorer;
 pub mod hashing;
 pub mod huge;
 pub mod ipc;
+pub mod limits;
 pub mod nontext;
 pub mod notify_queue;
 pub mod path_verify;
@@ -28,7 +29,9 @@ pub mod settings;
 pub mod shortcuts;
 pub mod snapshot;
 pub mod state;
+pub mod util;
 pub mod view_state;
 pub mod watcher;
+pub mod workspace;
 
 pub use error::{PikaError, Result};

@@ -168,6 +168,24 @@ export function renderDiff(host: HTMLElement, diff: FileDiff): DiffHandle {
   let searchMatches: SearchMatch[] = [];
   let currentHitId = -1;
 
+  /**
+   * 検索ヒット [ms,me)（連結表示テキスト上の UTF-16）と li 行の本文範囲（改行を除く content）の重なりを
+   * **行ローカル offset** で返す（重ならなければ null）。computeSpansByLine と filterRenderable が同じ重なり
+   * 規則を共有するための単一源（S5 で Rust 側が正本＝乖離防止）。
+   */
+  function lineContentOverlap(
+    ms: number,
+    me: number,
+    li: number,
+  ): { localS: number; localE: number } | null {
+    const lineStart = lineStarts[li];
+    const lineEnd = lineStart + diff.lines[li].content.length;
+    const os = Math.max(ms, lineStart);
+    const oe = Math.min(me, lineEnd);
+    if (oe <= os) return null;
+    return { localS: os - lineStart, localE: oe - lineStart };
+  }
+
   function computeSpansByLine(matches: SearchMatch[]): Map<number, DiffHitSpan[]> {
     const map = new Map<number, DiffHitSpan[]>();
     matches.forEach((m, hitId) => {
@@ -175,13 +193,9 @@ export function renderDiff(host: HTMLElement, diff: FileDiff): DiffHandle {
       const me = m.utf16_end;
       if (me <= ms) return;
       for (let li = 0; li < lineSegs.length; li++) {
-        const lineStart = lineStarts[li];
-        const lineEnd = lineStart + diff.lines[li].content.length;
-        const os = Math.max(ms, lineStart);
-        const oe = Math.min(me, lineEnd);
-        if (oe <= os) continue;
-        const localS = os - lineStart;
-        const localE = oe - lineStart;
+        const ov = lineContentOverlap(ms, me, li);
+        if (!ov) continue;
+        const { localS, localE } = ov;
         const segs = lineSegs[li];
         let segOff = 0;
         for (let j = 0; j < segs.length; j++) {
@@ -290,11 +304,8 @@ export function renderDiff(host: HTMLElement, diff: FileDiff): DiffHandle {
       const me = m.utf16_end;
       if (me <= ms) return false;
       for (let li = 0; li < diff.lines.length; li++) {
-        const lineStart = lineStarts[li];
-        const lineEnd = lineStart + diff.lines[li].content.length;
-        const os = Math.max(ms, lineStart);
-        const oe = Math.min(me, lineEnd);
-        if (oe > os) return true; // 本文範囲と重なる＝この行に span を作れる。
+        // 本文範囲と重なる＝この行に span を作れる（computeSpansByLine と同じ重なり規則を流用）。
+        if (lineContentOverlap(ms, me, li)) return true;
       }
       return false; // どの行 content とも重ならない（改行/ゼロ幅のみ）＝描画不可。
     });

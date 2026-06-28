@@ -125,20 +125,13 @@ pub fn list_dir(
     enumerate_dir(dir, &settings.snapshot().excluded_dirs)
 }
 
-/// 除外ディレクトリ判定（settings.toml `excluded_dirs` をツリー列挙へ配線）。
-///
-/// `excluded_dirs`（既定 `[".git","node_modules"]`）は**ディレクトリ名**を意味するので、
-/// `is_dir == true` のときだけ判定する（同名のファイルは除外しない）。一致は Windows のパス大小無視に
-/// 合わせて**大文字小文字を無視**する（`.git` も `.GIT` も同一視）。
-/// MVP のため判定は直下名の完全一致のみ（glob・パス全体マッチは対象外＝design doc 15章「足さない」）。
-fn is_excluded_dir(name: &str, is_dir: bool, excluded: &[String]) -> bool {
-    is_dir && excluded.iter().any(|e| e.eq_ignore_ascii_case(name))
-}
-
 /// フォルダ直下のエントリを列挙し、安定順（フォルダ先・名前昇順）で返す。
 /// `open_workspace`（監視開始＋ベースライン取得つき）と `list_dir`（副作用なし展開）で共有する。
 /// `excluded`（settings.toml の `excluded_dirs`）に名前が一致するディレクトリは列挙から除外する。
-/// 自然順/シンボリックリンク循環検出は後続スプリントで workspace モジュールへ移す。
+///
+/// 除外判定（[`pika_core::workspace::is_excluded_dir`]）・安定順比較
+/// （[`pika_core::workspace::compare_tree_entries`]）は core の純粋ロジック（cargo test 済み）に委ね、
+/// ここは `read_dir` の FS I/O と DTO 化に徹する（design doc 3章「command 層は薄い境界」）。
 fn enumerate_dir(dir: &Path, excluded: &[String]) -> Result<Vec<TreeEntry>, String> {
     let mut entries = Vec::new();
     let read = std::fs::read_dir(dir).map_err(|e| format!("読み取りに失敗: {e}"))?;
@@ -147,7 +140,7 @@ fn enumerate_dir(dir: &Path, excluded: &[String]) -> Result<Vec<TreeEntry>, Stri
         let name = ent.file_name().to_string_lossy().to_string();
         let is_dir = p.is_dir();
         // 除外ディレクトリ（.git/node_modules 等）は列挙しない＝lazy 展開も監視もベースラインも対象外になる。
-        if is_excluded_dir(&name, is_dir, excluded) {
+        if pika_core::workspace::is_excluded_dir(&name, is_dir, excluded) {
             continue;
         }
         entries.push(TreeEntry {
@@ -156,8 +149,10 @@ fn enumerate_dir(dir: &Path, excluded: &[String]) -> Result<Vec<TreeEntry>, Stri
             is_dir,
         });
     }
-    // 暫定の安定順（自然順は後続スプリントの workspace モジュールで実装）。
-    entries.sort_by(|a, b| (b.is_dir, &a.name).cmp(&(a.is_dir, &b.name)));
+    // 暫定の安定順（フォルダ先・名前昇順）。比較規則は core の純粋関数に委ねる。
+    entries.sort_by(|a, b| {
+        pika_core::workspace::compare_tree_entries((a.is_dir, &a.name), (b.is_dir, &b.name))
+    });
     Ok(entries)
 }
 
@@ -185,29 +180,26 @@ fn capture_baseline_for(path: &Path, snapshot: &SnapshotService, sensitive_patte
         snapshot.capture_baseline(&path_str, "", size);
         return;
     }
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            // **open_document と同じ encoding::decode** で判定する（指摘6 の direct-children 漏れ）。
-            // 旧実装は String::from_utf8 を使い、Shift_JIS/UTF-16（非UTF-8テキスト）が Err→ハッシュのみへ倒れて
-            // 直下ファイルが誤って「差分非対象」になり、UTF-8 BOM はベースラインに BOM が残って未編集でも偽差分が
-            // 出ていた。decode は BOM を剥がし元エンコーディングを判定するので、テキストは baseline ソースが editor
-            // 内容（open_document の decoded.text / ensure_baseline）と一致し、直下/サブフォルダ・全エンコーディングで
-            // 差分が一貫する（機密/巨大/画像は上の policy 早期 return で既に除外済み）。
-            let decoded = pika_core::encoding::decode(&bytes);
-            if decoded.had_decode_warning {
-                // strict UTF-8 も Shift_JIS 等も判定できず lossy デコードへ倒れた＝テキストでない（バイナリ）。
-                // 旧 from_utf8 Err 分岐の意図（内容を保存しない）を復元する: ロッシーデコードしたバイナリ内容を
-                // data root へ保存せず、バイト由来ハッシュのみベースライン化する（データ最小化#20・肥大/
-                // folder-open コスト回避・第2巡 回帰修正。空文字で確定しない＝#54）。
-                let hash = hash_normalized_lf(&bytes);
-                snapshot.capture_baseline_hash_only(&path_str, &hash);
-            } else {
-                // テキスト（UTF-8/Shift_JIS/UTF-16・BOM 除去済み）: デコード済み内容を保存（差分・巻き戻し可能）。
-                snapshot.capture_baseline(&path_str, &decoded.text, size);
-            }
+    // 読めない（権限/一時ロック等）場合はベースラインを張らない（次回 open で再試行。空文字で確定しない・#54）。
+    if let Ok(bytes) = std::fs::read(path) {
+        // **open_document と同じ encoding::decode** で判定する（指摘6 の direct-children 漏れ）。
+        // 旧実装は String::from_utf8 を使い、Shift_JIS/UTF-16（非UTF-8テキスト）が Err→ハッシュのみへ倒れて
+        // 直下ファイルが誤って「差分非対象」になり、UTF-8 BOM はベースラインに BOM が残って未編集でも偽差分が
+        // 出ていた。decode は BOM を剥がし元エンコーディングを判定するので、テキストは baseline ソースが editor
+        // 内容（open_document の decoded.text / ensure_baseline）と一致し、直下/サブフォルダ・全エンコーディングで
+        // 差分が一貫する（機密/巨大/画像は上の policy 早期 return で既に除外済み）。
+        let decoded = pika_core::encoding::decode(&bytes);
+        if decoded.had_decode_warning {
+            // strict UTF-8 も Shift_JIS 等も判定できず lossy デコードへ倒れた＝テキストでない（バイナリ）。
+            // 旧 from_utf8 Err 分岐の意図（内容を保存しない）を復元する: ロッシーデコードしたバイナリ内容を
+            // data root へ保存せず、バイト由来ハッシュのみベースライン化する（データ最小化#20・肥大/
+            // folder-open コスト回避・第2巡 回帰修正。空文字で確定しない＝#54）。
+            let hash = hash_normalized_lf(&bytes);
+            snapshot.capture_baseline_hash_only(&path_str, &hash);
+        } else {
+            // テキスト（UTF-8/Shift_JIS/UTF-16・BOM 除去済み）: デコード済み内容を保存（差分・巻き戻し可能）。
+            snapshot.capture_baseline(&path_str, &decoded.text, size);
         }
-        // 読めない（権限/一時ロック等）: ベースラインを張らない（次回 open で再試行。空文字で確定しない・#54）。
-        Err(_) => {}
     }
 }
 
@@ -477,30 +469,6 @@ pub fn open_log_folder() -> Result<(), String> {
 // 残す（要件11「Delete＝ごみ箱へ移動」・最上位原則「データを失わない」）。別WebView（プレビュー・権限
 // ゼロ）からの到達は main.rs の発信元ラベル検査で全拒否される。
 
-/// 新規作成する名前を検証する（ファイル名のみ・パス脱出や予約文字の混入を防ぐ）。
-///
-/// `dir` への `join` 前にこれを通し、`..`/区切り文字/Windows 予約文字/制御文字を弾く（封じ込めの一次防御。
-/// 最終的な配下確認は AccessControl::verify_write が親 canonicalize で行う＝多層防御）。
-fn validate_entry_name(name: &str) -> Result<(), String> {
-    let n = name.trim();
-    if n.is_empty() {
-        return Err("名前を入力してください".to_string());
-    }
-    if n == "." || n == ".." {
-        return Err("その名前は使用できません".to_string());
-    }
-    if n.contains('/') || n.contains('\\') {
-        return Err("名前にパス区切り文字（/ \\）は使えません".to_string());
-    }
-    // Windows で使用不可の文字（: * ? " < > |）と制御文字を弾く。
-    if n.chars()
-        .any(|c| (c as u32) < 0x20 || matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
-    {
-        return Err("名前に使用できない文字が含まれています".to_string());
-    }
-    Ok(())
-}
-
 /// ツリーから新規ファイル/フォルダを作る（要件11・design G 右クリックメニュー）。
 ///
 /// `dir` 直下に `name` の空ファイル（`is_dir=false`）/フォルダ（`is_dir=true`）を作成し、作成した絶対パスを
@@ -513,7 +481,9 @@ pub fn create_entry(
     is_dir: bool,
     access: State<'_, crate::access::AccessControl>,
 ) -> Result<String, String> {
-    validate_entry_name(&name)?;
+    // 名前検証（空/`.`/`..`/区切り/予約文字/制御文字の拒否）は core の純粋ロジック（cargo test 済み）。
+    // 確定済みエラー文言を素の String で返すため `?` でそのまま伝播でき、観測文字列は不変。
+    pika_core::workspace::verify_entry_name(&name)?;
     let target = Path::new(&dir).join(name.trim());
     let target_str = target.to_string_lossy().to_string();
     // 親（=dir）がワークスペース配下かを検証する（新規パスは親 canonicalize で封じ込め＝#46）。
@@ -616,7 +586,7 @@ fn move_to_recycle_bin(path: &str) -> Result<(), String> {
     from.push(0);
     // SAFETY: `from` は呼び出し中ずっと生存し二重 NUL 終端。`op` は zeroed 後に必要フィールドのみ設定する。
     let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
-    op.wFunc = FO_DELETE as u32;
+    op.wFunc = FO_DELETE;
     op.pFrom = from.as_ptr();
     // FOF_WANTNUKEWARNING を立て、**ごみ箱へ入れられない対象**（ごみ箱を持たないネットワーク/リムーバブル
     // ドライブ・容量超過等で FOF_ALLOWUNDO が完全削除へフォールバックするケース）では OS 警告を出す（指摘3）。
@@ -638,81 +608,4 @@ fn move_to_recycle_bin(path: &str) -> Result<(), String> {
 #[cfg(not(windows))]
 fn move_to_recycle_bin(_path: &str) -> Result<(), String> {
     Err("この環境ではごみ箱への移動に対応していません".to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_excluded_dir;
-    use super::validate_entry_name;
-
-    /// settings.toml の既定除外リスト（`.git` / `node_modules`）。
-    fn excluded() -> Vec<String> {
-        vec![".git".to_string(), "node_modules".to_string()]
-    }
-
-    #[test]
-    fn 既定の_git_ディレクトリは除外される() {
-        assert!(is_excluded_dir(".git", true, &excluded()));
-        assert!(is_excluded_dir("node_modules", true, &excluded()));
-    }
-
-    #[test]
-    fn 大文字小文字を無視して一致する() {
-        // Windows のパス大小無視に合わせ、.GIT も除外する。
-        assert!(is_excluded_dir(".GIT", true, &excluded()));
-        assert!(is_excluded_dir("Node_Modules", true, &excluded()));
-    }
-
-    #[test]
-    fn 同名のファイルは除外しない() {
-        // excluded_dirs はディレクトリ名の意味なので、同名ファイル（is_dir=false）は弾かない。
-        assert!(!is_excluded_dir("node_modules", false, &excluded()));
-        assert!(!is_excluded_dir(".git", false, &excluded()));
-    }
-
-    #[test]
-    fn 除外リストに無いディレクトリは残る() {
-        assert!(!is_excluded_dir("src", true, &excluded()));
-        assert!(!is_excluded_dir("docs", true, &excluded()));
-    }
-
-    #[test]
-    fn 通常のファイル名は許可される() {
-        assert!(validate_entry_name("memo.md").is_ok());
-        assert!(validate_entry_name("新しいフォルダ").is_ok());
-        assert!(validate_entry_name("  trimmed.txt  ").is_ok());
-    }
-
-    #[test]
-    fn 空やドットのみの名前は拒否される() {
-        assert!(validate_entry_name("").is_err());
-        assert!(validate_entry_name("   ").is_err());
-        assert!(validate_entry_name(".").is_err());
-        assert!(validate_entry_name("..").is_err());
-    }
-
-    #[test]
-    fn パス区切りや予約文字を含む名前は拒否される() {
-        // パス脱出（区切り文字/..）を名前に混ぜられない（封じ込めの一次防御）。
-        assert!(validate_entry_name("a/b.md").is_err());
-        assert!(validate_entry_name("a\\b.md").is_err());
-        assert!(validate_entry_name("..\\evil.md").is_err());
-        // Windows 予約文字。
-        assert!(validate_entry_name("a:b").is_err());
-        assert!(validate_entry_name("a*b").is_err());
-        assert!(validate_entry_name("a?b").is_err());
-        assert!(validate_entry_name("a\"b").is_err());
-        assert!(validate_entry_name("a<b").is_err());
-        assert!(validate_entry_name("a>b").is_err());
-        assert!(validate_entry_name("a|b").is_err());
-        // 制御文字。
-        assert!(validate_entry_name("a\u{0007}b").is_err());
-    }
-
-    #[test]
-    fn 空の除外リストでは何も除外しない() {
-        let empty: Vec<String> = Vec::new();
-        assert!(!is_excluded_dir(".git", true, &empty));
-        assert!(!is_excluded_dir("node_modules", true, &empty));
-    }
 }

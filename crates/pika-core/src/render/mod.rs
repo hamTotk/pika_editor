@@ -17,7 +17,10 @@ pub mod guard;
 pub mod path;
 pub mod sanitize;
 
-pub use csp::{build_csp, generate_nonce, validate_allow_hosts, ExternalResourceAllow, Nonce};
+pub use csp::{
+    build_csp, collect_external_hosts, generate_nonce, validate_allow_hosts, ExternalResourceAllow,
+    Nonce,
+};
 pub use guard::{
     check_image_bytes, check_image_pixels, check_svg, check_svg_bytes, has_long_line,
     image_dimensions, BlockReason, GuardDecision, DEFAULT_HTML_TIMEOUT_MS,
@@ -173,6 +176,10 @@ pub fn prepare_markdown_preview(markdown: &str, allow: &ExternalResourceAllow) -
 
 /// サニタイズ済み body を**最小の完全 HTML 文書**にラップする（別WebView へ直配信する素体）。
 ///
+/// **位置づけ**: 本関数は全機能 ON 固定の薄い委譲（[`wrap_preview_document_with`] へ `PreviewFeatures::all()`
+/// を渡すだけ）。テストと「機能ゲート不要な既定」用の便宜入口であり、**本番（src-tauri）は設定の機能トグルを
+/// 反映するため [`wrap_preview_document_with`] を直接呼ぶ**（旧シグネチャ互換シムでもある）。
+///
 /// 役割（design doc 6章/3章「薄い境界」）: custom protocol が配信するのは `<!DOCTYPE>`/`<head>` を含む
 /// 完全文書である必要がある（フラグメントのままだと charset 未指定で日本語が化け、base CSS も当たらない）。
 /// 本関数は **純粋な String 操作**に徹し、Tauri を一切知らない（cargo test の決定論ゲート対象）。
@@ -255,19 +262,19 @@ pub fn wrap_preview_document_with(
     let mut head_links = String::new();
     if assets.katex {
         // KaTeX CSS の url(fonts/...) は CSS の URL（/assets/katex.min.css）基準で /assets/fonts/... に解決される。
-        head_links.push_str("<link rel=\"stylesheet\" href=\"/assets/katex.min.css\">\n");
+        head_links.push_str(&format!(
+            "<link rel=\"stylesheet\" href=\"{ASSET_KATEX_CSS}\">\n"
+        ));
     }
     if assets.highlight {
         // テーマのダーク判定で hljs CSS を出し分ける（dark→github-dark / light→github・両方 vendor にある）。
         // テーマ不明（None・系統B）のときは従来どおり github-dark 固定（color-scheme:light dark の暗背景前提）。
         let hljs = if themed.is_some_and(|t| !t.dark) {
-            "hljs-github.min.css"
+            ASSET_HLJS_CSS_LIGHT
         } else {
-            "hljs-github-dark.min.css"
+            ASSET_HLJS_CSS_DARK
         };
-        head_links.push_str(&format!(
-            "<link rel=\"stylesheet\" href=\"/assets/{hljs}\">\n"
-        ));
+        head_links.push_str(&format!("<link rel=\"stylesheet\" href=\"{hljs}\">\n"));
     }
 
     let style = build_base_style(themed);
@@ -325,6 +332,17 @@ th,td,blockquote,hr{border-color:CanvasText}\
 
     format!("<style>{root_vars}{BASE_CSS}</style>")
 }
+
+/// 同梱ベンダーアセットのパス（head_link 生成 [`wrap_preview_document_with`] と [`build_asset_scripts`]
+/// が参照する単一 source）。同じパス文字列を 2 箇所に直書きしていた重複を断つ（出力 HTML は不変）。
+const ASSET_KATEX_CSS: &str = "/assets/katex.min.css";
+const ASSET_KATEX_JS: &str = "/assets/katex.min.js";
+const ASSET_KATEX_AUTORENDER_JS: &str = "/assets/katex-auto-render.min.js";
+const ASSET_HIGHLIGHT_JS: &str = "/assets/highlight.min.js";
+const ASSET_MERMAID_JS: &str = "/assets/mermaid.min.js";
+/// hljs の配色 CSS（テーマの dark 判定で出し分ける・両方 vendor にある）。
+const ASSET_HLJS_CSS_LIGHT: &str = "/assets/hljs-github.min.css";
+const ASSET_HLJS_CSS_DARK: &str = "/assets/hljs-github-dark.min.css";
 
 /// 系統A の body で使われている機能（どの同梱アセットを注入すべきか）。
 struct AssetNeeds {
@@ -392,18 +410,18 @@ fn build_asset_scripts(assets: &AssetNeeds, nonce: &str) -> String {
     let mut out = String::new();
     if assets.highlight {
         out.push_str(&format!(
-            "<script nonce=\"{nonce}\" src=\"/assets/highlight.min.js\"></script>\n"
+            "<script nonce=\"{nonce}\" src=\"{ASSET_HIGHLIGHT_JS}\"></script>\n"
         ));
     }
     if assets.katex {
         out.push_str(&format!(
-            "<script nonce=\"{nonce}\" src=\"/assets/katex.min.js\"></script>\n\
-<script nonce=\"{nonce}\" src=\"/assets/katex-auto-render.min.js\"></script>\n"
+            "<script nonce=\"{nonce}\" src=\"{ASSET_KATEX_JS}\"></script>\n\
+<script nonce=\"{nonce}\" src=\"{ASSET_KATEX_AUTORENDER_JS}\"></script>\n"
         ));
     }
     if assets.mermaid {
         out.push_str(&format!(
-            "<script nonce=\"{nonce}\" src=\"/assets/mermaid.min.js\"></script>\n"
+            "<script nonce=\"{nonce}\" src=\"{ASSET_MERMAID_JS}\"></script>\n"
         ));
     }
     // 最後に inline 初期化（per-block 描画・約1秒タイムアウト・危険オプション封じ）を nonce 付きで注入する。

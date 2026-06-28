@@ -17,6 +17,8 @@
 // メニュー定義は **開くたびに評価する関数（build）** にして、checked/disabled/サブ表記（acc）が
 // その時点の state を反映できるようにする（main.ts は state を参照する build を渡す）。
 
+import { applyRovingTabindex } from "./roving";
+
 /** ドロップダウン 1 項目の定義（区切り or 実行項目）。 */
 export type MenuItemSpec =
   | { kind: "separator" }
@@ -77,7 +79,7 @@ export function initMenuBar(
    * これも更新し、最後にフォーカスした .mi が次回 Tab の入口になるようにする。
    */
   function setRoving(active: HTMLElement): void {
-    for (const t of triggers) t.tabIndex = t === active ? 0 : -1;
+    applyRovingTabindex(triggers, active);
   }
   // 初期入口は先頭の .mi（無ければ何もしない）。
   if (triggers.length > 0) setRoving(triggers[0]);
