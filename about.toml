@@ -1,0 +1,46 @@
+# cargo-about 設定 — assets/THIRD_PARTY_NOTICES の Rust クレート節を機械生成する。
+# 使い方: cargo about generate assets/about.hbs（生成手順は installer/README.md / 本ファイル末尾参照）。
+#
+# 方針:
+# - Windows x64 ビルドで実際にリンクされる crate のみ対象（Linux/macOS 専用 crate＝glib/gtk 等を除外）。
+# - ビルド依存・dev 依存は配布物に含まれないため notices 対象外。
+# - ライセンス全文が crate に同梱されていない一部 crate は cargo-about 内蔵の workarounds で補う。
+
+targets = ["x86_64-pc-windows-msvc"]
+
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# workspace のメンバー（pika-core/pika-cli/pika-app＝自社コード・LICENSE で別途網羅）は notices から除外。
+private = { ignore = true }
+
+# 配布する再頒布可能ライセンス（許諾系）。これ以外が出たら生成が失敗するので気付ける。
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "0BSD",
+    "BSL-1.0",
+    "Unlicense",
+    "MIT-0",
+    "CDLA-Permissive-2.0",
+    "OpenSSL",
+]
+
+# ライセンス全文が同梱されていない著名 crate を cargo-about 内蔵のクラリフィケーションで補完する
+# （0.9.0 に登録のある名前のみ。未登録名は WARN になるだけだが整理して残さない）。
+workarounds = [
+    "ring",
+    "rustls",
+    "bitvec",
+    "clap",
+    "tract",
+]

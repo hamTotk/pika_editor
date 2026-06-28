@@ -30,7 +30,28 @@
   },
   "bundle": {
     "active": false,
-    "targets": "all",
-    "icon": ["icons/icon.ico", "icons/icon.png"]
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "publisher": "pika",
+    "copyright": "Copyright (c) 2026 pika contributors",
+    "category": "Productivity",
+    "shortDescription": "Windows 向け超軽量 Markdown/HTML エディタ",
+    "longDescription": "AIエージェントの出力物を確認・差分レビューする伴走ツール。Windows 11 x64 専用・UI は日本語。",
+    "license": "MIT",
+    "licenseFile": "../LICENSE",
+    "resources": {
+      "../assets/THIRD_PARTY_NOTICES": "THIRD_PARTY_NOTICES.txt"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["Japanese"],
+        "displayLanguageSelector": false,
+        "installerHooks": "nsis/hooks.nsh"
+      }
+    }
   }
 }

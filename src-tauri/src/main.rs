@@ -79,6 +79,7 @@ fn run() {
         commands::allow_save_path,
         commands::allow_open_path,
         commands::take_startup_open_request,
+        commands::about_info,
         snapshot::compute_file_diff,
         snapshot::confirm_file,
         snapshot::confirm_all,

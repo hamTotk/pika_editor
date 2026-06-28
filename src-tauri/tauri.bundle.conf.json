@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "//": "バンドル専用オーバーレイ（base tauri.conf.json へ深いマージ）。実バンドル時にのみ使う:",
+  "//build": "cargo tauri build --config src-tauri/tauri.bundle.conf.json",
+  "//why": "externalBin はサイドカー実体（binaries/pika-cli-<triple>.exe）の存在をビルド時検証するため base に置くと cargo build / cargo test（dev ゲート）が壊れる。バンドル時のみ有効化し、単一ソース（NSIS フックが pika-cli.exe --register-shell を呼ぶ）を保つ。",
+  "bundle": {
+    "active": true,
+    "externalBin": ["binaries/pika-cli"]
+  }
+}
