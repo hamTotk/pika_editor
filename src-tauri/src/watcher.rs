@@ -260,44 +260,20 @@ impl WatcherService {
                 .save_tokens
                 .register(path, saved_hash, crate::util::now_ms());
             // 保存後はベースラインも自身の保存内容で更新（自己保存で未読を付けない）。
+            // 変換は fingerprint_to_baseline_entry に集約し、content_hash だけ保存後ハッシュで上書きする
+            // （fingerprint() は内容を読まず content_hash=None＝空のため、保存済みハッシュを明示で詰める）。
             if let Some(fp) = fingerprint(Path::new(path)) {
-                inner.baseline.insert(
-                    path.to_string(),
-                    BaselineEntry {
-                        mtime_ms: fp.mtime_ms,
-                        size: fp.size,
-                        content_hash: saved_hash.to_string(),
-                    },
-                );
+                let mut entry = fingerprint_to_baseline_entry(&fp);
+                entry.content_hash = saved_hash.to_string();
+                inner.baseline.insert(path.to_string(), entry);
             }
         }
     }
 
-    /// F5（要件7.1/11.2）= オンデマンドの全再列挙＋再同期。ポーリングと同じ処理を共有する。
+    /// F5（要件7.1/11.2）= オンデマンドの全再列挙＋再同期。ポーリング/オーバーフローと同じ
+    /// [`resync_and_emit`] を共有する（3経路の重複と「ロック保持中の再帰列挙」を解消・固まらない原則）。
     pub fn resync_now(&self) -> Result<usize, String> {
-        let mut inner = self.inner.lock().map_err(|_| "watcher 状態ロック失敗")?;
-        let Some(root) = inner.root.clone() else {
-            return Ok(0);
-        };
-        if !inner.baseline_ready {
-            // ベースライン構築中は再同期しない（空台帳と突き合わせると全件 created になる）。
-            return Ok(0);
-        }
-        let excluded = inner.excluded_dirs.clone();
-        let _ = self.app.emit("watch-mode", "再同期中...".to_string());
-        let current = enumerate_fingerprints(&root, &excluded);
-        let outcome = resync_against_baseline(&inner.baseline, &current);
-        let count = outcome.total();
-        // #14: baseline を現状へ前進させる（前進させないと F5 が毎回同じ変更を再 emit する）。
-        // 次回 prescreen（mtime+size 一致）で短絡＝再 emit 停止。差分/確認用 baseline とは別物。
-        advance_baseline(&mut inner, &current, &outcome);
-        let changes: Vec<FsChangeDto> =
-            outcome.into_changes().into_iter().map(Into::into).collect();
-        drop(inner);
-        if !changes.is_empty() {
-            let _ = self.app.emit("fs-changed", FsChangedPayload { changes });
-        }
-        Ok(count)
+        Ok(resync_and_emit(&self.inner, &self.app, Some("再同期中...")))
     }
 
     /// raw event を受けて合成し emit するスレッドを起動する。
@@ -318,7 +294,7 @@ impl WatcherService {
                         // 「取りこぼし（バッファ溢れ等）→全再列挙が必要」を意味する（notify 6.1）。
                         // 実オーバーフロー挙動は系統C実機検証が要る（acceptance T-005）。
                         if event.need_rescan() {
-                            do_overflow_resync(&inner, &app);
+                            resync_and_emit(&inner, &app, Some("オーバーフロー再同期中..."));
                         } else {
                             handle_notify_event(
                                 &event,
@@ -332,7 +308,7 @@ impl WatcherService {
                     Ok(Err(e)) => {
                         // notify の Error 経路。オーバーフロー相当なら全再列挙で再同期する（保険）。
                         if is_overflow_error(&e) {
-                            do_overflow_resync(&inner, &app);
+                            resync_and_emit(&inner, &app, Some("オーバーフロー再同期中..."));
                         }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -349,44 +325,26 @@ impl WatcherService {
     }
 
     /// ポーリングフォールバックスレッドを起動する（監視不能 FS。要件7.1）。
+    ///
+    /// 5秒ごとに [`resync_and_emit`] で全再列挙＋再同期する（列挙はロック外＝固まらない原則）。
+    /// 監視ルートが切替/停止されたらこのスレッドの担当 FS ではなくなるので break する
+    /// （`resync_and_emit` は現在ルートを見て働くため、別ルートへ切替わった後も走り続けないよう終端する）。
+    /// ステータス文言（watch-mode）はポーリングでは毎ティック出さない（`None`）。
     fn spawn_polling_loop(&self, root: PathBuf) {
         let app = self.app.clone();
         let inner = Arc::clone(&self.inner);
         thread::spawn(move || loop {
             thread::sleep(POLL_INTERVAL);
-            // ルートが切替/停止されたら終了。除外リストも同じロックで読む（enumerate はロック外なので
-            // ここで clone し、列挙時に再ロックしない＝デッドロックを作らない・設定変更にも追従する）。
-            let (still_root, ready, excluded) = match inner.lock() {
-                Ok(g) => (
-                    g.root.as_ref().map(|r| r == &root).unwrap_or(false),
-                    g.baseline_ready,
-                    g.excluded_dirs.clone(),
-                ),
-                Err(_) => (false, false, default_excluded_dirs()),
+            // ルートが切替/停止されたら終了（このポーリングスレッドの担当 FS ではなくなった）。
+            let still_root = match inner.lock() {
+                Ok(g) => g.root.as_ref().map(|r| r == &root).unwrap_or(false),
+                Err(_) => false,
             };
             if !still_root {
                 break;
             }
-            if !ready {
-                // ベースライン構築中はこのティックを見送る（空台帳との突き合わせを避ける）。
-                continue;
-            }
-            // enumerate はロック外（重い I/O）。比較と baseline 前進は同一ロック内で行う（#14）。
-            let current = enumerate_fingerprints(&root, &excluded);
-            let (count, dto) = match inner.lock() {
-                Ok(mut g) => {
-                    let outcome = resync_against_baseline(&g.baseline, &current);
-                    let count = outcome.total();
-                    advance_baseline(&mut g, &current, &outcome);
-                    let dto: Vec<FsChangeDto> =
-                        outcome.into_changes().into_iter().map(Into::into).collect();
-                    (count, dto)
-                }
-                Err(_) => continue,
-            };
-            if count > 0 {
-                let _ = app.emit("fs-changed", FsChangedPayload { changes: dto });
-            }
+            // ready 判定・列挙・比較・baseline 前進・emit は resync_and_emit に集約（3経路共通）。
+            resync_and_emit(&inner, &app, None);
         });
     }
 }
@@ -505,16 +463,11 @@ fn drain_and_emit(
                 }
                 FsChangeKind::Modified | FsChangeKind::Created => {
                     // FsChange は mtime/size を持たないので stat のみで採取（全文 read しない）。
-                    // content_hash 空でも次回 prescreen は mtime+size で短絡＝再 emit しない。
+                    // content_hash 空でも次回 prescreen は mtime+size で短絡＝再 emit しない
+                    // （fingerprint() は content_hash=None を返すので変換結果の content_hash は空文字）。
                     if let Some(fp) = fingerprint(Path::new(&c.path)) {
-                        g.baseline.insert(
-                            c.path.clone(),
-                            BaselineEntry {
-                                mtime_ms: fp.mtime_ms,
-                                size: fp.size,
-                                content_hash: String::new(),
-                            },
-                        );
+                        g.baseline
+                            .insert(c.path.clone(), fingerprint_to_baseline_entry(&fp));
                     }
                 }
             }
@@ -525,63 +478,93 @@ fn drain_and_emit(
     let _ = app.emit("fs-changed", FsChangedPayload { changes: dto });
 }
 
+/// [`FileFingerprint`]（mtime/size/任意ハッシュ）を baseline 台帳の 1 エントリへ写す。
+///
+/// content_hash は fp 由来（未算出なら空文字＝次回 prescreen は mtime+size で短絡）。
+/// baseline 前進（[`advance_baseline`]）・初回列挙（[`enumerate_baseline`]）・イベント経路の前進
+/// （[`drain_and_emit`]）・自己保存（[`WatcherService::register_self_save`]）で同型だった手書き変換を
+/// 1 か所へ集約する。`BaselineEntry` は pika-core 型のため orphan rule で `From` を実装できず自由関数。
+fn fingerprint_to_baseline_entry(fp: &FileFingerprint) -> BaselineEntry {
+    BaselineEntry {
+        mtime_ms: fp.mtime_ms,
+        size: fp.size,
+        content_hash: fp.content_hash.clone().unwrap_or_default(),
+    }
+}
+
 /// 再同期 outcome で baseline 台帳を現状へ前進させる（#14・二重 emit 防止）。
 ///
 /// watcher の baseline は「変更検知の参照点（last seen）」であり、SnapshotService の
 /// 差分/確認用 baseline とは別物なので、前進させても差分・確認済み・未読の永続（frontend 管理）には
 /// 影響しない。前進させないと F5/ポーリング/オーバーフローが毎回同じ変更を再 emit する。
 /// 次回 prescreen（mtime+size 一致）で短絡させるため content_hash は current 由来でよい（再ハッシュ不要）。
+///
+/// `WatcherInner` 全体ではなく **baseline マップだけ**を受け取る純粋関数にして cargo test で前進規則
+/// （created/modified は current で上書き・removed は削除・current 不在は無視）を直接検証できるようにする。
 fn advance_baseline(
-    inner: &mut WatcherInner,
+    baseline: &mut BTreeMap<String, BaselineEntry>,
     current: &BTreeMap<String, FileFingerprint>,
     outcome: &ResyncOutcome,
 ) {
     for path in outcome.created.iter().chain(outcome.modified.iter()) {
         if let Some(fp) = current.get(path) {
-            inner.baseline.insert(
-                path.clone(),
-                BaselineEntry {
-                    mtime_ms: fp.mtime_ms,
-                    size: fp.size,
-                    content_hash: fp.content_hash.clone().unwrap_or_default(),
-                },
-            );
+            baseline.insert(path.clone(), fingerprint_to_baseline_entry(fp));
         }
     }
     for path in &outcome.removed {
-        inner.baseline.remove(path);
+        baseline.remove(path);
     }
 }
 
-/// オーバーフロー検知時の全再列挙＋再同期（要件7.4・design doc 166行）。
-fn do_overflow_resync(inner: &Arc<Mutex<WatcherInner>>, app: &AppHandle) {
-    // root と除外リストを同じ短いロックで読む（enumerate はロック外なので clone して渡す）。
-    let (root, ready, excluded) = match inner.lock() {
-        Ok(g) => (g.root.clone(), g.baseline_ready, g.excluded_dirs.clone()),
-        Err(_) => return,
+/// resync の 3 経路（F5/ポーリング/オーバーフロー）共通の「全再列挙＋再同期＋emit」。
+///
+/// **固まらない原則（design doc 1章）**: 重い再帰列挙（[`enumerate_fingerprints`]）を必ず**ロック外**で
+/// 行う。手順は『短いロックで (root, ready, excluded) を読む→未ルート/ベースライン未構築なら 0 で早期
+/// return→（`status` 指定時）watch-mode を emit→**ロック外で列挙**→再ロックで baseline 比較＋前進
+/// （#14）→ロック解放後に changes 非空なら fs-changed を emit→検知件数を返す』。
+///
+/// 旧実装では `resync_now` だけがロックを保持したまま列挙していた（固まらない原則違反）。3 経路を本関数へ
+/// 統合してこれを解消し、ready 判定・emit ペイロード形・二重 emit 防止（baseline 前進）を 1 か所に集約する。
+/// `status` は watch-mode のステータス文言（F5・オーバーフローは Some、ポーリングは毎ティック出さず None）。
+fn resync_and_emit(
+    inner: &Arc<Mutex<WatcherInner>>,
+    app: &AppHandle,
+    status: Option<&str>,
+) -> usize {
+    // 短いロックで root/excluded を読む（重い列挙はこの後ロック外で行う＝固まらない原則）。
+    // 未ルート／ベースライン未構築中は再同期しない（空台帳と突き合わせると全件 created の洪水になる）。
+    let (root, excluded) = match inner.lock() {
+        Ok(g) => {
+            let Some(root) = g.root.clone() else {
+                return 0;
+            };
+            if !g.baseline_ready {
+                return 0;
+            }
+            (root, g.excluded_dirs.clone())
+        }
+        Err(_) => return 0,
     };
-    let Some(root) = root else { return };
-    if !ready {
-        // ベースライン構築中はオーバーフロー再同期を見送る（構築完了後に通常検知へ戻る）。
-        return;
+    if let Some(msg) = status {
+        let _ = app.emit("watch-mode", msg.to_string());
     }
-    let _ = app.emit("watch-mode", "オーバーフロー再同期中...".to_string());
-    // enumerate はロック外。比較と baseline 前進は再ロックして同一ロック内で行う（#14）。
+    // enumerate はロック外（重い I/O）。比較と baseline 前進は再ロックして同一ロック内で行う（#14）。
     let current = enumerate_fingerprints(&root, &excluded);
-    let (count, dto) = match inner.lock() {
+    let (count, changes) = match inner.lock() {
         Ok(mut g) => {
             let outcome = resync_against_baseline(&g.baseline, &current);
             let count = outcome.total();
-            advance_baseline(&mut g, &current, &outcome);
-            let dto: Vec<FsChangeDto> =
+            advance_baseline(&mut g.baseline, &current, &outcome);
+            let changes: Vec<FsChangeDto> =
                 outcome.into_changes().into_iter().map(Into::into).collect();
-            (count, dto)
+            (count, changes)
         }
-        Err(_) => return,
+        Err(_) => return 0,
     };
-    if count > 0 {
-        let _ = app.emit("fs-changed", FsChangedPayload { changes: dto });
+    if !changes.is_empty() {
+        let _ = app.emit("fs-changed", FsChangedPayload { changes });
     }
+    count
 }
 
 /// notify の Error がオーバーフロー（ERROR_NOTIFY_ENUM_DIR 相当）か。
@@ -614,14 +597,7 @@ fn is_excluded(path: &Path, excluded: &[String]) -> bool {
 fn enumerate_baseline(root: &Path, excluded: &[String]) -> BTreeMap<String, BaselineEntry> {
     let mut map = BTreeMap::new();
     for (path, fp) in walk(root, excluded) {
-        map.insert(
-            path,
-            BaselineEntry {
-                mtime_ms: fp.mtime_ms,
-                size: fp.size,
-                content_hash: fp.content_hash.unwrap_or_default(),
-            },
-        );
+        map.insert(path, fingerprint_to_baseline_entry(&fp));
     }
     map
 }
@@ -845,5 +821,108 @@ mod tests {
         assert!(is_excluded(Path::new("/ws/DIST/x"), &ex));
         let ex_git = default_excluded_dirs();
         assert!(is_excluded(Path::new("/ws/.GIT/HEAD"), &ex_git));
+    }
+
+    fn fp(mtime: u64, size: u64, hash: Option<&str>) -> FileFingerprint {
+        FileFingerprint {
+            mtime_ms: mtime,
+            size,
+            content_hash: hash.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn fingerprint変換_ハッシュ無しは空文字になる() {
+        // fingerprint() は内容を読まず content_hash=None を返す＝変換結果は空文字（prescreen は
+        // mtime+size で短絡する）。drain_and_emit/enumerate_baseline と同じ扱いを保証する。
+        assert_eq!(
+            fingerprint_to_baseline_entry(&fp(100, 20, None)),
+            BaselineEntry {
+                mtime_ms: 100,
+                size: 20,
+                content_hash: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn fingerprint変換_ハッシュ有りはそのまま写す() {
+        assert_eq!(
+            fingerprint_to_baseline_entry(&fp(7, 8, Some("abc"))),
+            BaselineEntry {
+                mtime_ms: 7,
+                size: 8,
+                content_hash: "abc".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn baseline前進_新規と変更を現状で上書きし削除を消す() {
+        // #14: created/modified は current の mtime/size/hash で上書き、removed は削除する。
+        let mut baseline: BTreeMap<String, BaselineEntry> = BTreeMap::new();
+        baseline.insert(
+            "gone.md".into(),
+            BaselineEntry {
+                mtime_ms: 1,
+                size: 1,
+                content_hash: "g".into(),
+            },
+        );
+        baseline.insert(
+            "chg.md".into(),
+            BaselineEntry {
+                mtime_ms: 1,
+                size: 1,
+                content_hash: "old".into(),
+            },
+        );
+
+        let mut current: BTreeMap<String, FileFingerprint> = BTreeMap::new();
+        current.insert("chg.md".into(), fp(2, 2, Some("new")));
+        current.insert("new.md".into(), fp(3, 3, None));
+
+        let outcome = ResyncOutcome {
+            modified: vec!["chg.md".into()],
+            created: vec!["new.md".into()],
+            removed: vec!["gone.md".into()],
+        };
+
+        advance_baseline(&mut baseline, &current, &outcome);
+
+        // 削除は消える。
+        assert!(!baseline.contains_key("gone.md"));
+        // 変更は current の mtime/size/hash で上書き。
+        assert_eq!(
+            baseline.get("chg.md").unwrap(),
+            &BaselineEntry {
+                mtime_ms: 2,
+                size: 2,
+                content_hash: "new".into(),
+            }
+        );
+        // 新規は current から追加（ハッシュ無し→空文字）。
+        assert_eq!(
+            baseline.get("new.md").unwrap(),
+            &BaselineEntry {
+                mtime_ms: 3,
+                size: 3,
+                content_hash: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn baseline前進_currentに無いcreated_modifiedは追加しない() {
+        // outcome に載っていても current に指紋が無ければ baseline へ入れない（防御的・取得失敗時）。
+        let mut baseline: BTreeMap<String, BaselineEntry> = BTreeMap::new();
+        let current: BTreeMap<String, FileFingerprint> = BTreeMap::new();
+        let outcome = ResyncOutcome {
+            modified: vec!["ghost-mod.md".into()],
+            created: vec!["ghost-new.md".into()],
+            removed: Vec::new(),
+        };
+        advance_baseline(&mut baseline, &current, &outcome);
+        assert!(baseline.is_empty());
     }
 }

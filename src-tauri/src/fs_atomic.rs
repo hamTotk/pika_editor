@@ -106,3 +106,76 @@ fn replace_atomically(tmp: &Path, target: &Path) -> io::Result<()> {
 fn replace_atomically(tmp: &Path, target: &Path) -> io::Result<()> {
     std::fs::rename(tmp, target)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// テスト専用カウンタ（並行実行でも作業ディレクトリ名を衝突させない）。
+    static TEST_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// 一意な作業ディレクトリを作る（PID＋連番）。後始末は各テストの末尾で行う。
+    fn unique_dir() -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        let seq = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        dir.push(format!("pika_fs_atomic_test_{}_{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn atomic_write_書込んだ内容を読み戻せる() {
+        let dir = unique_dir();
+        let target = dir.join("a.txt");
+        atomic_write(&target, b"hello").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"hello");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn atomic_write_既存ファイルを置換する() {
+        let dir = unique_dir();
+        let target = dir.join("b.txt");
+        std::fs::write(&target, b"old-content-longer").unwrap();
+        atomic_write(&target, b"new").unwrap();
+        // 既存内容を残さず置換する（消失窓を作らず最後に丸ごと差し替わる）。
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn atomic_write_対象不在でも新規作成できる() {
+        let dir = unique_dir();
+        let target = dir.join("c.txt");
+        assert!(!target.exists());
+        atomic_write(&target, b"created").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"created");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn atomic_write_親ディレクトリを自動作成する() {
+        let dir = unique_dir();
+        let target = dir.join("nested").join("deep").join("d.txt");
+        assert!(!target.parent().unwrap().exists());
+        atomic_write(&target, b"deep").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"deep");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn atomic_write_成功時に一時ファイルを残さない() {
+        let dir = unique_dir();
+        let target = dir.join("e.txt");
+        atomic_write(&target, b"clean").unwrap();
+        // tmp（.<name>.<pid>.<seq>.pika.tmp）が成功後に残っていないこと。
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|ent| ent.file_name().to_string_lossy().to_string())
+            .filter(|name| name.ends_with(".pika.tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp が残存: {leftovers:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
