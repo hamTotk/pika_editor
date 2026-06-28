@@ -1,0 +1,40 @@
+# cargo-audit 設定（design doc 12章「cargo audit を CI ゲート」）。
+# ここに列挙する advisory は「脆弱性ではない」もの（unmaintained / unsound 等の informational 警告）に
+# 限り、根拠を添えて受容する。実害のある脆弱性（vulnerability）は ignore せず必ず対処する＝新規 CVE で
+# gate が落ちるよう保つ。本ファイルにより `cargo audit --deny warnings` でも決定論的に緑になる。
+#
+# 確認日 2026-06-28: `cargo audit` は vulnerability 0 件（exit 0）。下記 19 件はすべて informational
+# 警告であり Windows x64 ビルドに実害なし。大別すると:
+#   (A) Linux GTK/GDK/ATK/glib スタック … wry/tauri の **Linux 版** 依存。Windows x64 では一切
+#       リンクされない（Cargo.lock は全ターゲット分を載せるため audit は検出する）。
+#   (B) unic-* ファミリ … comrak（Markdown→HTML）の推移的依存。unmaintained のみ。
+#   (C) その他の unmaintained（yaml-rust / proc-macro-error / bincode 1.x）… 推移的依存。
+# 半年〜1年ごとに棚卸しし、対象 crate がメンテ再開/差し替え可能になったら削る。
+
+[advisories]
+ignore = [
+    # (A) Linux GTK/GDK/ATK/glib スタック（Windows x64 では非リンク）。
+    "RUSTSEC-2024-0429", # glib unsound
+    "RUSTSEC-2024-0413", # atk unmaintained
+    "RUSTSEC-2024-0416", # atk-sys unmaintained
+    "RUSTSEC-2024-0412", # gdk unmaintained
+    "RUSTSEC-2024-0418", # gdk-sys unmaintained
+    "RUSTSEC-2024-0411", # gdkwayland-sys unmaintained
+    "RUSTSEC-2024-0417", # gdkx11 unmaintained
+    "RUSTSEC-2024-0414", # gdkx11-sys unmaintained
+    "RUSTSEC-2024-0415", # gtk unmaintained
+    "RUSTSEC-2024-0420", # gtk-sys unmaintained
+    "RUSTSEC-2024-0419", # gtk3-macros unmaintained
+
+    # (B) unic-* ファミリ（comrak の推移的依存・unmaintained のみ）。
+    "RUSTSEC-2025-0080", # unic-common unmaintained
+    "RUSTSEC-2025-0100", # unic-ucd-ident unmaintained
+    "RUSTSEC-2025-0098", # unic-ucd-version unmaintained
+    "RUSTSEC-2025-0081", # unic-char-property unmaintained
+    "RUSTSEC-2025-0075", # unic-char-range unmaintained
+
+    # (C) その他の unmaintained（推移的依存）。
+    "RUSTSEC-2024-0320", # yaml-rust unmaintained
+    "RUSTSEC-2024-0370", # proc-macro-error unmaintained
+    "RUSTSEC-2025-0141", # bincode 1.x unmaintained
+]
