@@ -304,7 +304,9 @@ pub fn save_document(
     // 自己保存抑制（save_file と同規則）: 書き出すバイト列のハッシュをトークン登録してから書く。
     let saved_hash = pika_core::hashing::hash_normalized_lf(&bytes);
     watcher.register_self_save(&path, &saved_hash);
-    atomic_write(&path, &bytes).map_err(|e| {
+    // アトミック書込は src-tauri 共通プリミティブ（一時ファイル→fsync→MoveFileExW 単一置換）へ集約した。
+    // 退避先行（stash_incoming_before_overwrite）はこの直前に済んでいる（順序は不変）。
+    crate::fs_atomic::atomic_write(std::path::Path::new(&path), &bytes).map_err(|e| {
         crate::diagnostic::record(
             pika_core::diagnostic::LogLevel::Error,
             "document",
@@ -319,76 +321,6 @@ pub fn save_document(
         status: "saved".into(),
         unmappable: Vec::new(),
     })
-}
-
-/// アトミック書込（一時ファイル→単一アトミック置換・属性/ACL は OS の置換挙動に委ねる・要件12.1）。
-///
-/// 同一ディレクトリに一時ファイルを作って書き込み、`fsync` 後に元パスへ**単一の置換 API**で差し替える
-/// （途中クラッシュ/電源断でも元ファイルが半端にならない＝最上位原則「データを失わない」）。
-///
-/// Windows では `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` を使い、既存ファイルを
-/// **1 回のシステムコールでアトミックに置換**する（旧実装の `remove_file→rename` 2 段は、間でクラッシュ
-/// すると元ファイル消失・新ファイル未配置で対象パスが消える窓があったため廃止＝eval high data 対応）。
-/// 置換に失敗したときは一時ファイルを必ず後始末し、元ファイルは触らない（消さない）。
-fn atomic_write(path: &str, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let target = std::path::Path::new(path);
-    let dir = target.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let file_name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "pika.tmp".into());
-    let tmp = dir.join(format!(".{file_name}.pika.tmp"));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    if let Err(e) = replace_atomically(&tmp, target) {
-        // 置換に失敗したら一時ファイルを後始末し、元ファイルは一切触らない（半端な状態を作らない）。
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
-}
-
-/// 一時ファイルを元パスへ単一アトミック操作で置換する（最上位原則「データを失わない」）。
-///
-/// Windows: `MoveFileExW` 1 呼び出しで既存を置換（クラッシュ窓を作らない）。元が存在しない新規作成も
-/// 同 API で成立する（`MOVEFILE_REPLACE_EXISTING` は対象不在でもエラーにしない）。
-/// 非 Windows: `std::fs::rename`（POSIX rename は同一ボリュームでアトミック置換）。
-#[cfg(windows)]
-fn replace_atomically(tmp: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    fn wide(p: &std::path::Path) -> Vec<u16> {
-        p.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
-    let from = wide(tmp);
-    let to = wide(target);
-    // SAFETY: from/to はヌル終端の有効な UTF-16 パス。MoveFileExW は同期 API で所有権を移さない。
-    let ok = unsafe {
-        MoveFileExW(
-            from.as_ptr(),
-            to.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn replace_atomically(tmp: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
-    std::fs::rename(tmp, target)
 }
 
 /// 仮想化ビューアの 1 ウィンドウ（行境界整列済みテキスト＋実バイト範囲）。
