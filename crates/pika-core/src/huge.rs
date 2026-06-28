@@ -329,9 +329,9 @@ mod tests {
 
     #[test]
     fn 確定閾値の整合性() {
-        // 第1段階 < 第2段階 < 上限 の順序（段階制が壊れていないこと）。
-        assert!(STAGE1_THRESHOLD_BYTES < STAGE2_THRESHOLD_BYTES);
-        assert!(STAGE2_THRESHOLD_BYTES < MAX_OPEN_BYTES);
+        // 第1段階 < 第2段階 < 上限 の順序（段階制が壊れていないこと）。コンパイル時に検証する。
+        const { assert!(STAGE1_THRESHOLD_BYTES < STAGE2_THRESHOLD_BYTES) };
+        const { assert!(STAGE2_THRESHOLD_BYTES < MAX_OPEN_BYTES) };
         // 第1段階は 10MB 死守（design doc 15章-6 実測ゲート）。
         assert_eq!(STAGE1_THRESHOLD_BYTES, 10 * 1024 * 1024);
     }

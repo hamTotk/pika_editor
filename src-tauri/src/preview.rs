@@ -513,8 +513,9 @@ pub fn handle_preview_request(
 /// サニタイズ済み HTML 本体を CSP ヘッダ付きで返す（design doc 6章）。
 ///
 /// pika-core のサニタイズ済み body は `<head>`/`<!DOCTYPE>` を持たない**フラグメント**なので、
-/// 別WebView へ配信する前に [`wrap_preview_document`]（pika-core・cargo test 済み）で
-/// 完全 HTML 文書（charset utf-8・最小 base CSS）にラップする。**body は一字一句改変しない**。
+/// 別WebView へ配信する前に [`wrap_preview_document_with`]（pika-core・cargo test 済み）で
+/// 完全 HTML 文書（charset utf-8・最小 base CSS）にラップする（設定の機能ゲートを features で渡す）。
+/// **body は一字一句改変しない**。
 /// CSP は引き続きレスポンスヘッダで強制し、文書内 `<meta>` には依存しない（design doc 6章）。
 fn document_response(doc: &PreparedDoc, features: PreviewFeatures) -> Response<Vec<u8>> {
     // テーマ配色を別WebView 文書へ降ろす（Stage ③・design doc 10章）。系統B では prepare_preview が

@@ -5,19 +5,9 @@
 /** 画像拡張子（要件12.2）。pika-core::nontext::classify_extension と同じ集合。 */
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"];
 
-/** 画像の総ピクセル数上限（要件2.2/12.2＝6000万px）。pika-core::nontext::MAX_IMAGE_PIXELS と同値。 */
-export const MAX_IMAGE_PIXELS = 60_000_000;
-
-/** 拡張子（ドット付き/なし可）が画像か。 */
-export function isImageExt(name: string): boolean {
-  const dot = name.lastIndexOf(".");
-  if (dot < 0) return false;
-  return IMAGE_EXTS.includes(name.slice(dot + 1).toLowerCase());
-}
-
 /**
  * 既知テキスト拡張子（要件12.2）。**pika-core::nontext::classify_extension の TEXT_EXTS の写し。要 同期**。
- * 上流（Rust）が正典。ここを増減したら必ず Rust 側 TEXT_EXTS と一致させる（isImageExt が IMAGE_EXTS を
+ * 上流（Rust）が正典。ここを増減したら必ず Rust 側 TEXT_EXTS と一致させる（classifyExtension が IMAGE_EXTS を
  * 複製しているのと同じ作法＝判定の二重化を許す代わりに同期責務を明示する）。
  */
 const TEXT_EXTS = [

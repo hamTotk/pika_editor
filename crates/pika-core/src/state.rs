@@ -21,18 +21,13 @@ use serde::{Deserialize, Serialize};
 pub const STATE_VERSION: u32 = 1;
 
 /// 表示モード（ソース/プレビュー/分割）。ui-design 8章の 3 モードに対応する。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ViewMode {
+    #[default]
     Source,
     Preview,
     Split,
-}
-
-impl Default for ViewMode {
-    fn default() -> Self {
-        ViewMode::Source
-    }
 }
 
 /// 1 タブ分の永続状態（カーソル/スクロール/表示モード/差分トグル）。

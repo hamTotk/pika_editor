@@ -7,6 +7,7 @@
 //! 検出するレジストリキー（Microsoft 公式の Evergreen Runtime 検出方法）:
 //! - HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{GUID}\pv（per-machine / 64bit OS）
 //! - HKCU\SOFTWARE\Microsoft\EdgeUpdate\Clients\{GUID}\pv（per-user）
+//!
 //! GUID = {F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}（Evergreen WebView2 Runtime）。
 
 /// WebView2 Runtime が利用可能かを確認する。

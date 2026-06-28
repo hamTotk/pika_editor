@@ -173,6 +173,10 @@ pub fn prepare_markdown_preview(markdown: &str, allow: &ExternalResourceAllow) -
 
 /// サニタイズ済み body を**最小の完全 HTML 文書**にラップする（別WebView へ直配信する素体）。
 ///
+/// **位置づけ**: 本関数は全機能 ON 固定の薄い委譲（[`wrap_preview_document_with`] へ `PreviewFeatures::all()`
+/// を渡すだけ）。テストと「機能ゲート不要な既定」用の便宜入口であり、**本番（src-tauri）は設定の機能トグルを
+/// 反映するため [`wrap_preview_document_with`] を直接呼ぶ**（旧シグネチャ互換シムでもある）。
+///
 /// 役割（design doc 6章/3章「薄い境界」）: custom protocol が配信するのは `<!DOCTYPE>`/`<head>` を含む
 /// 完全文書である必要がある（フラグメントのままだと charset 未指定で日本語が化け、base CSS も当たらない）。
 /// 本関数は **純粋な String 操作**に徹し、Tauri を一切知らない（cargo test の決定論ゲート対象）。
