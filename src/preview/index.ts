@@ -134,7 +134,7 @@ export async function buildPreview(
 /**
  * モード切替の占有解決（要件6.1・ui-design 8章「3モード×差分トグル直交」）。
  *
- * - プレビュー + 差分ON は自動で分割相当（左=レンダリング・右=テキスト差分）に倒す（要件6.1・spec 非対象でない）。
+ * - プレビュー + 差分ON は自動で分割相当（左=テキスト差分・右=レンダリング・修正5 要件改定）に倒す（要件6.1）。
  * - ソース + 差分ON はエディタ領域に差分面を重ねる。
  * - プレビューのみ/分割でプレビュー WebView を占有する。
  *
@@ -146,7 +146,7 @@ export function resolveOccupancy(mode: ViewMode, diffOn: boolean): {
   showDiff: boolean;
 } {
   if (mode === "preview") {
-    // プレビュー + 差分ON は分割相当（左レンダリング・右テキスト差分）。
+    // プレビュー + 差分ON は分割相当（左テキスト差分・右レンダリング・修正5）。
     return { showPreview: true, showEditor: false, showDiff: diffOn };
   }
   if (mode === "split") {

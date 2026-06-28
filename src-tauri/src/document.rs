@@ -324,7 +324,13 @@ pub fn save_document(
     // 退避が先（CLAUDE.md 判断ガイド・最上位原則）: 破壊的上書きの前に、ディスク上の現内容に未確認の
     // 外部変更があれば incoming 退避する。退避が取れなければ保存を中断する（外部変更を無退避で失わない）。
     // ディスク不在（新規保存）は退避対象なし。読めた場合のみ退避判定する。
-    if let Ok(disk_content) = std::fs::read_to_string(&path) {
+    //
+    // 修正4: ディスク内容の読取を `read_to_string`（UTF-8 限定）から **バイト読み＋encoding::decode** へ
+    // 変えてエンコーディング非依存にする（read_file/open_document/capture_baseline_for と同一）。旧実装は
+    // UTF-16/Shift_JIS のディスク外部変更を read_to_string が Err で読めず、衝突検知（退避）が**素通り**して
+    // サイレント上書きしていた（外部変更の喪失リスク）。decode 経由なら全エンコーディングで退避判定が効く。
+    if let Ok(disk_bytes) = std::fs::read(&path) {
+        let disk_content = encoding::decode(&disk_bytes).text;
         if let Err(e) = snapshot.stash_incoming_before_overwrite(&path, &disk_content, &content) {
             // 退避が取れないまま破壊的上書きをしない（データを失わない）。診断ログへ記録して中断する。
             crate::diagnostic::record(

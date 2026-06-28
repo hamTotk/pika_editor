@@ -210,6 +210,50 @@ export function confirmModal(
 }
 
 /**
+ * 保存前の外部変更（衝突）解決モーダル（修正4・最上位原則「データを失わない」）。
+ *
+ * ディスク上でファイルが外部変更されているのに保存しようとしたときの 4 択。Tauri/WebView2 では
+ * window.confirm がダイアログを出さず即 true を返すため**必ず自前モーダル**（既存 footgun）。
+ * 返り値:
+ * - `"overwrite"`: 外部変更を退避してから上書き（backend の stash_incoming_before_overwrite が退避）。
+ * - `"saveAs"`: 名前を付けて保存（外部変更を残す）。
+ * - `"reload"`: ディスク内容で再読込し自分の編集を破棄（保存しない・danger）。
+ * - `"cancel"`: 何もしない（Esc・外側クリック・キャンセル）。
+ *
+ * 初期フォーカスは既定の「退避して上書き」。Enter はフォーカス中ボタンを尊重し、フォーカス外/既定は
+ * "overwrite"（退避してから上書き＝データを失わない側）へ倒す。IME ガード有効（破棄系を含むため）。
+ */
+export function conflictModal(
+  message: string,
+): Promise<"overwrite" | "saveAs" | "reload" | "cancel"> {
+  return openModal<"overwrite" | "saveAs" | "reload" | "cancel">({
+    message,
+    // 左から キャンセル／再読込で破棄(danger)／別名で保存／退避して上書き(primary・既定を右端に)。
+    buttons: [
+      { label: "キャンセル" },
+      { label: "再読込で破棄", variant: "danger" },
+      { label: "別名で保存" },
+      { label: "退避して上書き", variant: "primary" },
+    ],
+    initialFocus: 3, // 退避して上書き（データを失わない既定）
+    imeGuard: true,
+    cancelValue: "cancel",
+    buttonValue: (index) =>
+      index === 0 ? "cancel" : index === 1 ? "reload" : index === 2 ? "saveAs" : "overwrite",
+    // Enter: キャンセル(0)/再読込(1)/別名(2)はそれを選び、退避して上書き(3)・フォーカス外(-1)は
+    // "overwrite"（外部変更を退避してから上書き＝データを失わない側）。
+    enterValue: (focusedIndex) =>
+      focusedIndex === 0
+        ? "cancel"
+        : focusedIndex === 1
+          ? "reload"
+          : focusedIndex === 2
+            ? "saveAs"
+            : "overwrite",
+  });
+}
+
+/**
  * テーマ準拠の自前三択モーダル（保存して切替／破棄して切替／キャンセル）。
  * 返り値は OK 系ボタンの選択（"save"|"discard"）／Esc・外側クリック・キャンセルは "cancel"。
  * 初期フォーカスは既定の「保存して切替」。Enter はフォーカス中ボタンを尊重し、保存/フォーカス外は "save"

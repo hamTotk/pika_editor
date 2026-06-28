@@ -314,6 +314,17 @@ export function hashContent(content: string): Promise<string> {
 }
 
 /**
+ * 指定パスのディスク現内容の LF 正規化ハッシュを得る（外部変更検知・要件7.2/7.3・修正4）。
+ * 保存前に tab.contentHash（最後に読込/保存した内容のハッシュ）と突き合わせ、外部変更（衝突）を検知して
+ * 自前モーダル（退避上書き/別名/再読込/キャンセル）を出すのに使う。backend が verify_read で封じ込め、
+ * encoding::decode でデコードしてから hashContent と同一規則でハッシュする（エンコーディング非依存＝
+ * UTF-16/Shift_JIS の外部変更も検知）。実体が無い（新規/削除済み）・読めない・封じ込め外は null。
+ */
+export function fileDiskHash(path: string): Promise<string | null> {
+  return invoke<string | null>("file_disk_hash", { path });
+}
+
+/**
  * 最近使った項目（ファイル/フォルダ）を追記し更新後リストを得る（要件10.2・ジャンプリスト）。
  * LRU・重複排除・上限20件は backend(pika-core::recent)。未知バージョン/破損時は空を返す（保全）。
  */

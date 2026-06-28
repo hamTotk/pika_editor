@@ -106,9 +106,14 @@ impl Debouncer {
     ///    - 削除イベントである（削除は安定確認不要）。
     ///    - メタを観測していない FS（取得不能）である（時間のみで確定）。
     ///    - 直近 2 回の (mtime, size) が**同値で安定**している（中途内容でない）。
+    ///    - **メタ観測が 1 回だけ**（単発書き込み）で静穏期間が経過した（修正3）。
     ///
-    /// メタは観測したが安定確認が 1 回ぶんしか取れていない（prev が無い）場合は、
-    /// 安定とみなさず次の `drain` まで保留する（末尾欠損の防止＝データを失わない）。
+    /// 修正3: `echo` のように 1 回で完結する書き込みは notify イベントが 1 件しか出ないことがあり、
+    /// 旧実装は「直近 2 回のメタ一致」を必須にしていたため `prev_meta` が永久に `None` で**永久に未確定→
+    /// emit されない**（開いているクリーンタブへ即時反映されず Ctrl+Z も効かない）欠陥があった。
+    /// 静穏期間の経過自体が「書き込み終了」の十分な証拠なので、単発観測も静穏後は確定とみなす。
+    /// **2 回以上観測してメタが変化し続けている（書き込み継続中）** の `prev != last` は従来どおり
+    /// 未確定を維持する（中途内容で確定しない＝末尾欠損防止・データを失わない）。
     pub fn drain_settled(&mut self, now_ms: u64) -> Vec<FsChange> {
         let ready: Vec<String> = self
             .pending
@@ -144,10 +149,15 @@ impl Debouncer {
         if !st.meta_seen {
             return true;
         }
-        // メタを観測したなら、直近 2 回が同値で安定したことを要求する（中途内容を読まない）。
+        // メタを観測したときの確定判定（修正3）。
         match (st.prev_meta, st.last_meta) {
+            // 直近 2 回が同値で安定＝確定（中途内容でない）。
             (Some(prev), Some(last)) => prev == last,
-            // 安定確認が 1 回ぶんしか無い間は保留（次の drain まで待つ）。
+            // 単発観測（prev 無し）＝1 回で完結した書き込み。静穏期間も過ぎている（上で確認済み）ので
+            // 「書き込み終了」とみなし確定する（永久未確定だった欠陥の修正）。
+            (None, Some(_)) => true,
+            // ここに来るのは (Some, None)＝last を取らずに prev だけある不整合のみ（feed の不変条件上
+            // 起きない）。安全側で未確定にする。
             _ => false,
         }
     }
@@ -240,6 +250,34 @@ mod tests {
         d.feed(&ev("big.md", RawFsEventKind::Modified, 220, 3, 300));
         let out = d.drain_settled(400);
         assert_eq!(out, vec![FsChange::modified("big.md")]);
+    }
+
+    #[test]
+    fn 単発観測_メタ1回_は静穏後に確定する() {
+        // 修正3: echo 等の単発書き込みは notify イベントが 1 件しか出ないことがある。
+        // 旧実装は「直近 2 回のメタ一致」を必須にしていたため prev_meta=None で永久未確定だった。
+        // 静穏期間が経過したら単発観測でも確定する（クリーンタブへ即時反映＝Ctrl+Z 履歴が乗る）。
+        let mut d = Debouncer::with_debounce(100);
+        d.feed(&ev("note.md", RawFsEventKind::Modified, 0, 5, 50));
+        assert_eq!(d.pending_len(), 1);
+        // 静穏期間内（100ms 未満）はまだ確定しない。
+        assert!(d.drain_settled(50).is_empty(), "静穏期間内は単発でも確定しない");
+        // 静穏期間経過後は単発（メタ1回）でも確定する（旧実装は永久未確定だった）。
+        assert_eq!(
+            d.drain_settled(150),
+            vec![FsChange::modified("note.md")],
+            "単発観測は静穏後に確定する（修正3）"
+        );
+        assert_eq!(d.pending_len(), 0);
+    }
+
+    #[test]
+    fn 単発created観測も静穏後に確定する() {
+        // 単発の Created（新規ファイルが 1 イベントで現れた）も静穏後に確定する（修正3）。
+        let mut d = Debouncer::with_debounce(100);
+        d.feed(&ev("new.md", RawFsEventKind::Created, 0, 1, 10));
+        assert!(d.drain_settled(50).is_empty());
+        assert_eq!(d.drain_settled(150), vec![FsChange::created("new.md")]);
     }
 
     #[test]
