@@ -793,14 +793,18 @@ export function createEditor(opts: CreateEditorOptions): EditorHandle {
           },
           // 選択は半透明の青（--selection-bg）。drawSelection の描画層（本文の背面）なので本文色は
           // --text-1 のまま透けて見える＝ダークでも白潰れしない。
+          // CM6 デフォルト baseTheme はフォーカス時に高詳細度セレクタ
+          // （&light.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground）で
+          // 薄紫を当てるため、低詳細度のここでは詳細度負けする。!important で確実に上書きする
+          // （これが無いと選択中＝フォーカス時だけ CM6 既定の薄紫、非フォーカス時のみ青になる）。
           "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
-            backgroundColor: "var(--selection-bg)",
+            backgroundColor: "var(--selection-bg) !important",
           },
-          // ネイティブ ::selection（IME 合成中など drawSelection の描画層が出ない場面の保険）。
-          // 背景は同じ選択青、文字は地色（--selection-fg）を明示して既定の白文字化を防ぐ。
-          "::selection": {
-            backgroundColor: "var(--selection-bg)",
-            color: "var(--selection-fg)",
+          // 本文のネイティブ ::selection は透明にして drawSelection の背面レイヤー一本に絞る。
+          // ネイティブ選択を残すと半透明背景がグリフの前面に二重で重なり、文字が潰れて見える
+          // （グローバル app.css の ::selection が .cm-content へ漏れるのも併せて無効化する）。
+          ".cm-content ::selection, .cm-content::selection": {
+            backgroundColor: "transparent",
           },
         }),
       ],
