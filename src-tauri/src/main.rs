@@ -75,6 +75,7 @@ fn run() {
         commands::delete_entry,
         commands::allow_save_path,
         commands::allow_open_path,
+        commands::take_startup_open_request,
         snapshot::compute_file_diff,
         snapshot::confirm_file,
         snapshot::confirm_all,
@@ -155,6 +156,21 @@ fn run() {
             // パスアクセス制御（任意ファイル読み書き封じ込め・#5/#46）。open_workspace で root を張り、
             // open-request / restore タブで個別ファイルを許可する。I/O command はこのゲートを通す。
             app.manage(access::AccessControl::new());
+            // Part 1（要件3.2/3.4・pull モデル）: 初回起動（サーバー役）の引数オープン要求を保持する。
+            // pika 未起動でファイルをダブルクリックした初回プロセスは自分がサーバーで `open-request`
+            // イベントを受けないため、起動引数から payload を組み、転送パスと同じく AccessControl へ
+            // 個別許可（listener と同じ前処理）してから managed state に載せる。フロントは前回状態復元後に
+            // take_startup_open_request で 1 回だけ引いて開く（引数無しなら None）。
+            let startup_open = single_instance::build_startup_open_request(&forward);
+            if let Some(payload) = &startup_open {
+                let ac = app.state::<access::AccessControl>();
+                for p in &payload.paths {
+                    ac.allow_file(p);
+                }
+            }
+            app.manage(single_instance::StartupOpenRequest(std::sync::Mutex::new(
+                startup_open,
+            )));
             // プレビューサービス（サニタイズ済みレスポンスを世代キーで保持・custom protocol が引く）。
             app.manage(preview::PreviewService::new());
             // 検索/置換のキャンセルトークン置き場（新しい検索で前のを打ち切る＝固まらない・要件5.4）。
@@ -198,6 +214,16 @@ fn run() {
     // add_child 内部のメッセージポンプが回り、setup 内で起きていたデッドロックを回避できる。
     app.run(|app_handle, event| {
         if let tauri::RunEvent::Ready = event {
+            use tauri::Manager;
+            // Part 2（T-017 panic 修正）: 後発プロセス（Client）は setup で early-exit し SettingsService 等を
+            // manage しないまま app.run へ進む。その状態で Ready が来ると `state::<…>()` が
+            // "state() called before manage()" で panic する（転送プロセスのクラッシュ）。未管理なら
+            // 何もせず抜ける（try_state でガード）。preview 生成も同 guard 配下に置く（同様に未管理時は不要）。
+            let Some(service) =
+                app_handle.try_state::<std::sync::Arc<settings_service::SettingsService>>()
+            else {
+                return;
+            };
             // プレビュー別WebView（label "preview"・権限ゼロ）をメイン窓へオーバーレイ生成する
             // （design doc 6章/9章）。capability ファイルに preview を含めないことで Tauri API 到達不能を保つ。
             // 初期は hidden・極小サイズ・about:blank。frontend が show_preview で矩形配置・ナビゲートする。
@@ -207,9 +233,6 @@ fn run() {
             }
             // settings.toml のポーリング監視を起動する（要件10.3 再起動なし反映／10.4 不完全保存の直前維持）。
             // 起動を遅延ブロックしないようイベントループ稼働後のここで始める（最初のポーリングは間隔後）。
-            use tauri::Manager;
-            let service =
-                app_handle.state::<std::sync::Arc<settings_service::SettingsService>>();
             service.spawn_watch(app_handle.clone());
         }
     });

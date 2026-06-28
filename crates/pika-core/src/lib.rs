@@ -12,6 +12,7 @@ pub mod diagnostic;
 pub mod diff;
 pub mod encoding;
 pub mod error;
+pub mod explorer;
 pub mod hashing;
 pub mod huge;
 pub mod ipc;

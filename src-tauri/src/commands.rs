@@ -568,6 +568,20 @@ pub fn allow_open_path(path: String, access: State<'_, crate::access::AccessCont
     access.allow_file(&path);
 }
 
+/// 初回起動（サーバー役）の引数オープン要求を **1 回だけ** 取り出す（要件3.2/3.4・Part 1）。
+///
+/// pika 未起動でファイルをダブルクリックした初回プロセスは自分がサーバーで `open-request` イベントを
+/// 受けないため、起動引数から組んだ payload を managed state（[`crate::single_instance::StartupOpenRequest`]）
+/// に積んである。フロントが前回状態を復元した後にこれを引いて開く。Some を 1 回返したら None にクリアし、
+/// 二重オープンを防ぐ（race-free な pull モデル）。許可登録は setup 側で済んでいる（転送経路と対称）。
+/// 自前 command なので preview 別WebView 由来の invoke は main.rs の発信元ガードで拒否される。
+#[tauri::command]
+pub fn take_startup_open_request(
+    startup: State<'_, crate::single_instance::StartupOpenRequest>,
+) -> Option<crate::single_instance::OpenRequestPayload> {
+    startup.0.lock().ok().and_then(|mut guard| guard.take())
+}
+
 /// ツリーから削除する（要件11「Delete＝ごみ箱へ移動」・design G）。
 ///
 /// **完全削除ではなくごみ箱へ移動**し、復元可能性を残す（最上位原則「データを失わない」）。
