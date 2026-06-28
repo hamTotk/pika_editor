@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 use pika_core::watcher::overflow::{
@@ -256,7 +256,9 @@ impl WatcherService {
     /// watcher イベント側はハッシュ一致をもってワンショットで抑制する（要件7.1）。
     pub fn register_self_save(&self, path: &str, saved_hash: &str) {
         if let Ok(mut inner) = self.inner.lock() {
-            inner.save_tokens.register(path, saved_hash, now_ms());
+            inner
+                .save_tokens
+                .register(path, saved_hash, crate::util::now_ms());
             // 保存後はベースラインも自身の保存内容で更新（自己保存で未読を付けない）。
             if let Some(fp) = fingerprint(Path::new(path)) {
                 inner.baseline.insert(
@@ -397,7 +399,7 @@ fn handle_notify_event(
     rename_buf: &mut Vec<RawFsEvent>,
     _app: &AppHandle,
 ) {
-    let now = now_ms();
+    let now = crate::util::now_ms();
     // 除外リストはワーカースレッドから Arc<Mutex> 経由で読む（set_excluded_dirs で更新されうる）。
     // 1イベントの先頭で1回だけ短く読み、以降の自己保存抑制ロックとは入れ子にしない（デッドロック回避）。
     let excluded = inner
@@ -470,7 +472,7 @@ fn drain_and_emit(
     rename_buf: &mut Vec<RawFsEvent>,
     app: &AppHandle,
 ) {
-    let now = now_ms();
+    let now = crate::util::now_ms();
     let mut changes: Vec<FsChange> = debouncer.drain_settled(now);
 
     // rename バッファに溜まったペアを正規化（時間窓を過ぎたものを確定）。
@@ -734,7 +736,6 @@ fn hash_file(path: &Path) -> Option<String> {
 /// （正常。From↔To のペア化は段2 のパス一意性が主役で、FileId は段1 のスワップ/上書き解決の補強）。
 #[cfg(windows)]
 fn file_id_of(path: &Path) -> Option<pika_core::watcher::FileId> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
@@ -743,7 +744,7 @@ fn file_id_of(path: &Path) -> Option<pika_core::watcher::FileId> {
     };
 
     // パスを NUL 終端 UTF-16 へ変換（Win32 境界・CLAUDE.md「Win32 境界で UTF-16 に変換」）。
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let wide = crate::util::to_wide(path);
 
     // SAFETY: wide は NUL 終端済みの有効な UTF-16 バッファ。属性読取のみ・全共有モードで開く
     // （他プロセスのアクセスを妨げない）。FILE_FLAG_BACKUP_SEMANTICS でディレクトリも開ける。
@@ -787,13 +788,8 @@ fn file_id_of(_path: &Path) -> Option<pika_core::watcher::FileId> {
     None
 }
 
-/// 単調増加に近い現在時刻（ミリ秒）。合成層の時間窓判定に使う。
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+// 合成層の時間窓判定に使う現在時刻（ミリ秒）は src-tauri 共通の [`crate::util::now_ms`] へ集約した
+// （snapshot.rs と単一実装を共有。素朴版→クロック後退に耐える単調版へ格上げ＝堅牢化）。
 
 #[cfg(test)]
 mod tests {

@@ -49,7 +49,7 @@ const MISSING_MESSAGE: &str = "pika の起動には Microsoft Edge WebView2 ラ�
 
 #[cfg(windows)]
 mod windows_impl {
-    use std::os::windows::ffi::OsStrExt;
+    use crate::util::to_wide;
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
@@ -128,13 +128,5 @@ mod windows_impl {
                 MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
             );
         }
-    }
-
-    /// UTF-8 → NUL 終端 UTF-16（Win32 境界変換）。
-    fn to_wide(s: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
     }
 }

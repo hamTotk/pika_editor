@@ -21,7 +21,6 @@ pub fn add_recent(path: &str) {
 
 #[cfg(windows)]
 mod windows_impl {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::Shell::{SHAddToRecentDocs, SHARD_PATHW};
 
     /// `SHAddToRecentDocs(SHARD_PATHW, <wide path>)` で OS の Recent ジャンプリストへ追加する。
@@ -29,10 +28,7 @@ mod windows_impl {
         if path.trim().is_empty() {
             return;
         }
-        let wide: Vec<u16> = std::ffi::OsStr::new(path)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
+        let wide = crate::util::to_wide(path);
         // SAFETY: wide は NUL 終端のパス文字列。SHARD_PATHW は wide ポインタを取る。
         // 失敗時も副作用なし（戻り値は使わない＝ベストエフォート）。
         // SHARD_PATHW は i32 定数だが API は uFlags: u32 を取るのでキャストする。

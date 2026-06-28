@@ -12,7 +12,6 @@
 
 use pika_core::snapshot::{zstd_compress, zstd_decompress, ObjectMeta, SnapshotStore};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 永続 object/メタを置くサブディレクトリ名。
 pub const OBJECTS_DIR: &str = "objects";
@@ -22,9 +21,6 @@ pub const INDEX_FILE: &str = "index.json";
 const OBJ_EXT: &str = "zst";
 /// 自己記述メタの拡張子（`<hash>.meta.json`）。
 const META_EXT: &str = "meta.json";
-
-/// アトミック書込の一時ファイル名連番（同一 PID 内の並行書込で tmp 名を衝突させない）。
-static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// `<snap_dir>/objects` への絶対パスを返す。
 fn objects_dir(snap_dir: &Path) -> PathBuf {
@@ -53,7 +49,7 @@ pub fn persist_object(snap_dir: &Path, hash: &str, content: &str) {
     // zstd 圧縮は panic させず Result で受ける。失敗時（メモリ zstd では実際には起きない）は object を
     // 書かずに諦める＝既存の `atomic_write` 失敗時と同じ best-effort 挙動（観測上は不変・データ安全側）。
     if let Ok(compressed) = zstd_compress(content.as_bytes()) {
-        let _ = atomic_write(&target, &compressed);
+        let _ = crate::fs_atomic::atomic_write(&target, &compressed);
     }
 }
 
@@ -67,7 +63,7 @@ pub fn persist_meta(snap_dir: &Path, hash: &str, meta: &ObjectMeta) {
         return;
     }
     if let Ok(json) = serde_json::to_string(meta) {
-        let _ = atomic_write(&target, json.as_bytes());
+        let _ = crate::fs_atomic::atomic_write(&target, json.as_bytes());
     }
 }
 
@@ -92,7 +88,8 @@ pub fn persist_index(snap_dir: &Path, store: &SnapshotStore) -> Result<(), Strin
         persist_meta(snap_dir, hash, meta);
     }
     let target = snap_dir.join(INDEX_FILE);
-    atomic_write(&target, json.as_bytes())
+    crate::fs_atomic::atomic_write(&target, json.as_bytes())
+        .map_err(|e| format!("index.json の保存に失敗: {e}"))
 }
 
 /// 起動ロード結果（正常ロード／破損復元／初回空）。診断ログ判定に使う。
@@ -198,30 +195,6 @@ pub fn snapshot_dir_for(data_root: &Path, ws_root: &str) -> Result<PathBuf, Stri
     Ok(snap_dir)
 }
 
-/// 一時ファイル→rename のアトミック書込（state_store の write_synced/rename 作法に倣う）。
-fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("ディレクトリ作成に失敗: {e}"))?;
-    }
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = target.with_extension(format!("tmp.{}.{}", std::process::id(), seq));
-    let write_res = (|| -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        Ok(())
-    })();
-    if let Err(e) = write_res {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("一時ファイル書込に失敗: {e}"));
-    }
-    std::fs::rename(&tmp, target).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("置換に失敗: {e}")
-    })
-}
-
 /// データルート最上位に所有者＋SYSTEM 限定の DACL を張る（#3・他ユーザーから退避を遮蔽）。
 ///
 /// 退避スナップショット（最後の砦）にはユーザー文書の旧内容が含まれうる。データルートを
@@ -232,7 +205,6 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), String> {
 /// 非 Windows ビルドでは no-op（`Ok(())`）。
 #[cfg(windows)]
 pub fn harden_data_root_dacl(data_root: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
     use std::ptr;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
@@ -246,10 +218,7 @@ pub fn harden_data_root_dacl(data_root: &Path) -> Result<(), String> {
     const DATA_ROOT_SDDL: &str = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)";
 
     // SDDL → self-relative セキュリティ記述子（LocalAlloc される）。
-    let sddl_w: Vec<u16> = std::ffi::OsStr::new(DATA_ROOT_SDDL)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let sddl_w = crate::util::to_wide(DATA_ROOT_SDDL);
     let mut psd: *mut std::ffi::c_void = ptr::null_mut();
     // SAFETY: sddl_w は NUL 終端。psd は成功時に LocalAlloc されたディスクリプタを受ける。
     let ok = unsafe {
@@ -265,11 +234,7 @@ pub fn harden_data_root_dacl(data_root: &Path) -> Result<(), String> {
     }
 
     // データルートのパスを NUL 終端 UTF-16 へ。
-    let path_w: Vec<u16> = data_root
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let path_w = crate::util::to_wide(data_root);
     // DACL のみ差し替える（所有者/SACL は触らない）。
     // SAFETY: path_w は NUL 終端。psd は直前で得た有効な self-relative SD。
     let applied = unsafe { SetFileSecurityW(path_w.as_ptr(), DACL_SECURITY_INFORMATION, psd) };
