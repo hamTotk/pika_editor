@@ -499,11 +499,8 @@ pub fn handle_preview_request(
         // （ロック保持のまま FS I/O すると他の preview 操作が詰まるため）。
         drop(inner);
         // 機密判定の設定 sensitive_patterns（和集合・既定は外せない＝U2b-2）を state から取る。
-        // state 未登録時は空 patterns＝既定のみで安全側（機密判定を弱めない不変条件）。
-        let sensitive_patterns = app
-            .try_state::<std::sync::Arc<crate::settings_service::SettingsService>>()
-            .map(|s| s.snapshot().sensitive_patterns)
-            .unwrap_or_default();
+        // 取得は asset 側と共通の単一源（state 未登録時は空 patterns＝既定のみで安全側・弱めない）。
+        let sensitive_patterns = crate::settings_service::sensitive_patterns_of(app);
         return local_resource_response(&doc, reference, &sensitive_patterns);
     }
 
@@ -529,15 +526,14 @@ fn document_response(doc: &PreparedDoc, features: PreviewFeatures) -> Response<V
         features,
     );
     // CSP は pika-core が組んだ値（既定外部遮断・nonce・オプトイン緩和は img/font のみ）。
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CONTENT_SECURITY_POLICY, &doc.response.csp)
-        // クリックジャッキング/MIME スニッフィング/参照漏れの追加防御。
-        .header("X-Content-Type-Options", "nosniff")
-        .header(header::REFERRER_POLICY, "no-referrer")
-        .body(html.into_bytes())
-        .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "応答組立失敗"))
+    // nosniff は ok_response_builder が一元付与する。CSP/Referrer-Policy（クリックジャッキング/
+    // 参照漏れの追加防御）はこの経路固有なのでここで続けて付ける（値は現行と完全一致）。
+    finish_response(
+        ok_response_builder("text/html; charset=utf-8")
+            .header(header::CONTENT_SECURITY_POLICY, &doc.response.csp)
+            .header(header::REFERRER_POLICY, "no-referrer"),
+        html.into_bytes(),
+    )
 }
 
 /// ローカル参照（画像/CSS）を封じ込め検証して返す（要件6.2/6.3/9.1・design doc 6章）。
@@ -577,12 +573,10 @@ fn local_resource_response(
     }
     // 多層防御: 非機密名のシンボリックリンクが基準内の機密ファイルを指すケースを、
     // 解決後の実体名でも機密判定して弾く（要件9.1「機密は custom protocol からも配信拒否」）。
-    // 機密判定は既定 ∪ 設定 sensitive_patterns（既定は外せない＝U2b-2）。
-    if pika_core::snapshot::policy::is_sensitive_with(
-        &resolved.to_string_lossy(),
-        sensitive_patterns,
-    ) {
-        return error_response(StatusCode::FORBIDDEN, "機密ファイルの配信拒否");
+    // 機密判定は既定 ∪ 設定 sensitive_patterns（既定は外せない＝U2b-2）。serve_verified_image と
+    // 同一の防御段（共通 deny_if_sensitive・403）を共有する。
+    if let Some(resp) = deny_if_sensitive(&resolved, sensitive_patterns) {
+        return resp;
     }
 
     let Ok(bytes) = std::fs::read(&resolved) else {
@@ -603,10 +597,8 @@ fn local_resource_response(
     // 同一 WebView セッション内で繰り返し読まれるプレビュー素材へ控えめなキャッシュを効かせる（#53）。
     // Range 非対応（プレビュー画像/CSS にシークは不要＝scope 外。実機での挙動確認は系統C）。
     // 条件付き応答（304・If-None-Match 突合）は実装しない（シグネチャ非変更・max-age で十分）。
-    let mut builder = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header("X-Content-Type-Options", "nosniff")
+    // nosniff は ok_response_builder が一元付与。Cache-Control（5 分・控えめ）は経路固有なので続けて付ける。
+    let mut builder = ok_response_builder(content_type)
         // 5 分（控えめ）。素材は同一セッション内で繰り返し読まれる。
         .header(header::CACHE_CONTROL, "max-age=300");
     // mtime+サイズから弱い実体タグを付ける。取得失敗時は ETag を省略する（Cache-Control だけ付く）。
@@ -621,9 +613,7 @@ fn local_resource_response(
             builder = builder.header(header::ETAG, format!("\"{mtime_ms:x}-{size:x}\""));
         }
     }
-    builder
-        .body(bytes)
-        .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "応答組立失敗"))
+    finish_response(builder, bytes)
 }
 
 /// ローカルリソース配信前の暴走ガード（要件2.2）。Content-Type で画像/SVG を判別し pika-core で判定する。
@@ -693,14 +683,70 @@ fn asset_response(reference: &str) -> Response<Vec<u8>> {
     };
 
     let content_type = guess_content_type(std::path::Path::new(reference));
+    // nosniff は ok_response_builder が一元付与。アセット応答自体に CSP は付けない（ドキュメントの
+    // レスポンスヘッダ CSP が読み込み可否を統制する）。長期キャッシュ（immutable）はここで続けて付ける。
+    finish_response(
+        ok_response_builder(content_type)
+            // 同梱アセットはビルドで固定（再現性は vendor.lock）。長期キャッシュ可。
+            .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        file.contents().to_vec(),
+    )
+}
+
+/// 200 OK レスポンスのビルダーを起こす共通ヘルパ（Content-Type ＋ nosniff を必ず付与）。
+///
+/// **全配信に `X-Content-Type-Options: nosniff` を一元付与する不変条件をここで保証する**
+/// （preview/asset の OK 応答が重複して起こしていた builder を単一源化＝U3）。CSP/Cache-Control/
+/// ETag/Referrer-Policy 等の経路固有ヘッダは呼び出し側が続けて `.header(...)` で付け、最後に
+/// [`finish_response`] で本体を載せて確定する。値はすべて呼び出し側が現行と同一文字列で渡す
+/// （キャッシュ文言・CSP は不変）。
+///
+/// `pub(crate)`: pika-asset:// の配信ヘルパ（[`crate::asset`]）も同じ起こし方を共用する。
+pub(crate) fn ok_response_builder(content_type: &str) -> tauri::http::response::Builder {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
+        // 全配信に nosniff を一元付与（MIME スニッフィング防御の不変条件をここで保証）。
         .header("X-Content-Type-Options", "nosniff")
-        // 同梱アセットはビルドで固定（再現性は vendor.lock）。長期キャッシュ可。
-        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-        .body(file.contents().to_vec())
+}
+
+/// ビルダーに本体を載せてレスポンスを確定する（組立失敗時は 500＋空本文へ縮退・単一源）。
+///
+/// `.body(...).unwrap_or_else(|_| error_response(INTERNAL_SERVER_ERROR, "応答組立失敗"))` の
+/// 定型を 1 箇所へ集約する（preview/asset の全 OK 応答が共用）。
+///
+/// `pub(crate)`: pika-asset:// の配信ヘルパ（[`crate::asset`]）も共用する。
+pub(crate) fn finish_response(
+    builder: tauri::http::response::Builder,
+    body: Vec<u8>,
+) -> Response<Vec<u8>> {
+    builder
+        .body(body)
         .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "応答組立失敗"))
+}
+
+/// 解決済み実体パスが機密判定に当たれば 403 を返す共通配信前ガード（preview/asset 単一源）。
+///
+/// 機密判定は既定 ∪ 設定 `sensitive_patterns`（**既定は外せない**＝U2b-2）。当たらなければ `None`。
+/// `serve_verified_image`（pika-asset://）と `local_resource_response`（pika-preview:///local/）が
+/// **同一の防御段（実体名で `is_sensitive_with` → 403）**を共有し、判定順序・ステータス・拒否文言を
+/// 単一源で揃える（弱い方へ倒さない＝最も厳しい挙動を 1 箇所で保証）。空 patterns でも既定機密
+/// （`.env` 等）は拒否される（`is_sensitive_with` が常に既定を内包）。
+pub(crate) fn deny_if_sensitive(
+    resolved: &std::path::Path,
+    sensitive_patterns: &[String],
+) -> Option<Response<Vec<u8>>> {
+    if pika_core::snapshot::policy::is_sensitive_with(
+        &resolved.to_string_lossy(),
+        sensitive_patterns,
+    ) {
+        Some(error_response(
+            StatusCode::FORBIDDEN,
+            "機密ファイルの配信拒否",
+        ))
+    } else {
+        None
+    }
 }
 
 /// エラーレスポンス（本文を最小化し情報漏れを避ける）。

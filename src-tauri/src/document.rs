@@ -93,6 +93,28 @@ fn line_ending_dto(le: encoding::LineEnding) -> &'static str {
     }
 }
 
+/// `verify_read` で封じ込めてから対象の実体パス（String）とサイズ（バイト）を返す共通前処理。
+///
+/// open_document / reopen_document_with_encoding / read_range が共有する
+/// 「`verify_read` → `to_string_lossy` → `metadata().len()`」の定型を 1 箇所へ集約する
+/// （#5 封じ込め＋巨大ファイル段階制の入力 size を単一源化）。canonicalize 済み実体パスを文字列で
+/// 返し、以後の I/O は実体パスで行う（封じ込め後の単一表現）。エラー文言（"メタデータ取得に失敗: …"）は
+/// 3 経路で一致していたものをそのまま保持する（挙動不変）。`verify_read` のエラーは `?` で素通し。
+///
+/// 注: `read_file`（commands.rs）は metadata 失敗時に**前置なしの素エラー**（`e.to_string()`）を返す
+/// 別契約のため、ここには合流させない（観測エラー文字列を変えない＝外部挙動不変）。
+fn verify_read_with_size(
+    access: &crate::access::AccessControl,
+    path: &str,
+) -> Result<(String, u64), String> {
+    let canon = access.verify_read(path)?;
+    let path = canon.to_string_lossy().to_string();
+    let size = std::fs::metadata(&path)
+        .map_err(|e| format!("メタデータ取得に失敗: {e}"))?
+        .len();
+    Ok((path, size))
+}
+
 /// 文書を開く（巨大ファイル段階制＋エンコーディング自動判定・要件2.2/5.2）。
 ///
 /// #5: 先頭で `access.verify_read` を通し、ワークスペース配下/許可ファイルへ封じ込める
@@ -107,11 +129,7 @@ pub fn open_document(
     // normalize_path_key（`\`→`/` のみ・`\\?\` は吸収しない）で揃えるため、ベースラインは
     // open_workspace の直下ループ／compute_file_diff と同じ**非 canonical パス**で張る必要がある（指摘6）。
     let raw_path = path.clone();
-    let canon = access.verify_read(&path)?;
-    let path = canon.to_string_lossy().to_string();
-    let size = std::fs::metadata(&path)
-        .map_err(|e| format!("メタデータ取得に失敗: {e}"))?
-        .len();
+    let (path, size) = verify_read_with_size(&access, &path)?;
     let stage = FileStage::from_size(size);
 
     // 上限超は開かずエラー（要件2.2 上限）。
@@ -132,40 +150,26 @@ pub fn open_document(
 
     // 第2段階（読み取り専用ビューア）は全量を読まず、段階だけ返す（range 読取はフロントが要求）。
     if stage.needs_virtual_viewer() {
-        let degrade = degrade_flags(size, "");
-        return Ok(OpenedDocument {
-            stage: stage_to_dto(stage).into(),
-            degrade: to_degrade_dto(degrade),
-            text: String::new(),
-            encoding: enc_to_dto(TextEncoding::Utf8).into(),
-            has_bom: false,
-            line_ending: "none".into(),
-            decode_warning: false,
-            size_bytes: size,
-        });
+        return Ok(opened_document_virtual(stage, size));
     }
 
     // 通常/第1段階: 全量読みエンコーディング判定（第1段階でも編集は通常通り＝中心体験死守）。
     let bytes = std::fs::read(&path).map_err(|e| format!("読み込みに失敗: {e}"))?;
     let decoded = encoding::decode(&bytes);
-    // 段階制（サイズ）と行長ガード（内容）の両方を反映した縮退フラグ。
-    let degrade = degrade_flags(size, &decoded.text);
     // 全既読スタート（要件8.1・指摘6）: 開いた瞬間の内容を非クロバーでベースライン化する。
     // open_workspace の直下ループはルート直下しか張らないため、サブフォルダを展開して開いたファイルは
     // ベースライン不在になり compute_file_diff が誤って「差分非対象」を返していた。ここで開いた時点
     // （編集前）の内容を直下ファイルと同じ全既読スタートへ揃える（以後の編集は差分として正しく出る）。
     // 非クロバー＆policy 準拠（機密/巨大はハッシュのみ＝差分非対象のまま）。索引キー整合のため raw_path で張る。
+    // 縮退フラグ計算（degrade_flags）は副作用が無いので ensure_baseline の後に helper 内で行う（挙動不変）。
     snapshot.ensure_baseline(&raw_path, &decoded.text, size);
-    Ok(OpenedDocument {
-        stage: stage_to_dto(stage).into(),
-        degrade: to_degrade_dto(degrade),
-        text: decoded.text,
-        encoding: enc_to_dto(decoded.encoding).into(),
-        has_bom: decoded.has_bom,
-        line_ending: line_ending_dto(decoded.line_ending).into(),
-        decode_warning: decoded.had_decode_warning,
-        size_bytes: size,
-    })
+    let decode_warning = decoded.had_decode_warning;
+    Ok(opened_document_from_decoded(
+        stage,
+        size,
+        decoded,
+        decode_warning,
+    ))
 }
 
 /// 指定エンコーディングで文書を開き直す（要件5.6 Reopen・自動判定の誤り/曖昧をユーザー選択で上書き）。
@@ -181,12 +185,11 @@ pub fn reopen_document_with_encoding(
     encoding: String,
     access: State<'_, crate::access::AccessControl>,
 ) -> Result<OpenedDocument, String> {
-    let canon = access.verify_read(&path)?;
-    let path = canon.to_string_lossy().to_string();
+    // 封じ込め＋サイズ取得は open_document/read_range と共通（verify_read→metadata→size）。
+    // エンコーディング検証（dto_to_enc）は実体解決後に行う（正当フローでは frontend が固定 4 種から
+    // 渡すため常に妥当・順序差は実害なし）。
+    let (path, size) = verify_read_with_size(&access, &path)?;
     let enc = dto_to_enc(&encoding)?;
-    let size = std::fs::metadata(&path)
-        .map_err(|e| format!("メタデータ取得に失敗: {e}"))?
-        .len();
     let stage = FileStage::from_size(size);
     // 編集テキストを持つ段階のみ再オープン対象（第2段階以降は仮想ビューア＝再デコード対象外）。
     if !stage.can_open() || stage.needs_virtual_viewer() {
@@ -199,17 +202,8 @@ pub fn reopen_document_with_encoding(
             enc.label()
         )
     })?;
-    let degrade = degrade_flags(size, &decoded.text);
-    Ok(OpenedDocument {
-        stage: stage_to_dto(stage).into(),
-        degrade: to_degrade_dto(degrade),
-        text: decoded.text,
-        encoding: enc_to_dto(decoded.encoding).into(),
-        has_bom: decoded.has_bom,
-        line_ending: line_ending_dto(decoded.line_ending).into(),
-        decode_warning: false,
-        size_bytes: size,
-    })
+    // 指定エンコーディングでの再オープンは decode_warning を常に false にする（自動判定の警告は出さない）。
+    Ok(opened_document_from_decoded(stage, size, decoded, false))
 }
 
 fn to_degrade_dto(f: pika_core::huge::DegradeFlags) -> DegradeFlagsDto {
@@ -220,6 +214,49 @@ fn to_degrade_dto(f: pika_core::huge::DegradeFlags) -> DegradeFlagsDto {
         highlight_off: f.highlight_off,
         wrap_off: f.wrap_off,
         editing_off: f.editing_off,
+    }
+}
+
+/// 編集テキストを持つ段階（normal/stage1）の [`OpenedDocument`] を組み立てる共通ヘルパ。
+///
+/// open_document（自動判定）と reopen_document_with_encoding（指定エンコーディング）が共有する。
+/// 段階/縮退フラグ/エンコーディング/改行分類の DTO 化定型を 1 箇所へ集約し、**invoke 戻り JSON の
+/// フィールド構成（名前・型・値）を単一源**にする（frontend 型との齟齬を防ぐ）。`decode_warning` のみ
+/// 呼び出し側指定（自動判定は `decoded.had_decode_warning`／指定オープンは常に `false`）。
+/// 縮退フラグは段階制（サイズ）と行長ガード（内容）の両方を反映する（呼び出し側と同一の `degrade_flags`）。
+fn opened_document_from_decoded(
+    stage: FileStage,
+    size: u64,
+    decoded: encoding::DecodedFile,
+    decode_warning: bool,
+) -> OpenedDocument {
+    let degrade = degrade_flags(size, &decoded.text);
+    OpenedDocument {
+        stage: stage_to_dto(stage).into(),
+        degrade: to_degrade_dto(degrade),
+        text: decoded.text,
+        encoding: enc_to_dto(decoded.encoding).into(),
+        has_bom: decoded.has_bom,
+        line_ending: line_ending_dto(decoded.line_ending).into(),
+        decode_warning,
+        size_bytes: size,
+    }
+}
+
+/// 仮想化ビューア段階（`needs_virtual_viewer`＝第2段階）の [`OpenedDocument`] を組み立てる共通ヘルパ。
+///
+/// 内容は返さず段階のみ（CM6 へ全量ロードしない＝固まらない）。テキスト空・UTF-8・BOM なし・改行 none・
+/// 警告なしで、frontend は段階を見て range 読取ビューアへ切り替える（戻り JSON 形は従来と完全一致）。
+fn opened_document_virtual(stage: FileStage, size: u64) -> OpenedDocument {
+    OpenedDocument {
+        stage: stage_to_dto(stage).into(),
+        degrade: to_degrade_dto(degrade_flags(size, "")),
+        text: String::new(),
+        encoding: enc_to_dto(TextEncoding::Utf8).into(),
+        has_bom: false,
+        line_ending: "none".into(),
+        decode_warning: false,
+        size_bytes: size,
     }
 }
 
@@ -348,11 +385,8 @@ pub fn read_range(
     access: State<'_, crate::access::AccessControl>,
 ) -> Result<RangeWindowDto, String> {
     // #5: 範囲読取も封じ込めを通す（仮想化ビューアで任意パスを読めないようにする）。
-    let canon = access.verify_read(&path)?;
-    let path = canon.to_string_lossy().to_string();
-    let size = std::fs::metadata(&path)
-        .map_err(|e| format!("メタデータ取得に失敗: {e}"))?
-        .len();
+    // 封じ込め＋サイズ取得は open_document/reopen と共通（verify_read→metadata→size）。
+    let (path, size) = verify_read_with_size(&access, &path)?;
     let win = window.unwrap_or(DEFAULT_WINDOW_BYTES);
     let raw_range = window_around(center, win, size);
     let mut file = std::fs::File::open(&path).map_err(|e| format!("開けません: {e}"))?;
