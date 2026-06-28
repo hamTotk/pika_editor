@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// settings.toml のポーリング間隔（要件10.3 再起動なし反映・data_root 単一ファイルなので 2 秒で十分）。
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -198,6 +198,19 @@ fn emit_invalid_keys_warning(app: &AppHandle, warnings: &[String]) {
 #[tauri::command]
 pub fn get_settings(settings: State<'_, Arc<SettingsService>>) -> SettingsDto {
     settings.snapshot().into()
+}
+
+/// 機密判定の設定 `sensitive_patterns`（和集合・既定は外せない＝U2b-2）を managed state から取る。
+///
+/// preview/asset の custom protocol ハンドラが**逐語重複**していた取得（`try_state` →
+/// `snapshot().sensitive_patterns` → `unwrap_or_default`）を 1 箇所へ集約する単一源。
+/// `SettingsService` が未登録（後発プロセスの early-exit 等の極端な異常系）なら空 patterns を返す＝
+/// **既定機密のみで安全側**（`is_sensitive_with` が常に既定を内包するため、空でも `.env` 等は拒否される
+/// ＝機密判定を弱めない不変条件）。設定は既定へ「足すだけ」で外せない（U2b-2）。
+pub(crate) fn sensitive_patterns_of(app: &AppHandle) -> Vec<String> {
+    app.try_state::<Arc<SettingsService>>()
+        .map(|s| s.snapshot().sensitive_patterns)
+        .unwrap_or_default()
 }
 
 /// settings.toml の絶対パスを組み立てる（`<data_root>/settings.toml`・既存 state.json と同じ data_root）。
