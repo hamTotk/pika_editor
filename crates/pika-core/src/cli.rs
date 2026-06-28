@@ -8,6 +8,9 @@
 //! （`C:\dir\a.md:12:3` の最初の `:` は分割対象外。末尾から行・桁を剥がす）。
 
 use crate::error::{PikaError, Result};
+// Windows パス形状判定（ドライブレター/ドライブ絶対/UNC 接頭辞）は path_verify を単一 source とし、
+// cli はそれを呼ぶ（レイヤー的に転送パスの検証は path_verify が正＝二重実装を断つ）。
+use crate::path_verify::{has_drive_letter_at, is_drive_absolute, starts_with_double_slash};
 use std::path::{Path, PathBuf};
 
 /// `-g` で指定された「ファイル＋カーソル位置」の解析結果。
@@ -75,8 +78,7 @@ pub fn parse_goto_spec(spec: &str) -> Result<GotoTarget> {
 /// 先頭の `X:`（A-Z / a-z + コロン）を検出し、コロンまでのバイト長を返す。無ければ 0。
 /// この長さより手前の `:` は行・桁の区切りとして剥がさない（ドライブレター保護）。
 fn drive_prefix_len(spec: &str) -> usize {
-    let bytes = spec.as_bytes();
-    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+    if has_drive_letter_at(spec.as_bytes(), 0) {
         2
     } else {
         0
@@ -135,17 +137,14 @@ pub fn normalize_to_absolute(raw: &str, cwd: &str) -> Result<String> {
 
 /// 絶対パスか（ドライブ絶対 `X:\`・UNC `\\`・拡張長パス `\\?\`）を文字列で判定する。
 fn is_absolute_path(raw: &str) -> bool {
-    if raw.starts_with(r"\\") || raw.starts_with("//") {
-        return true;
-    }
-    let b = raw.as_bytes();
-    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+    // `\\`/`//` 始まり（UNC・拡張長パス）またはドライブ絶対（`X:\`/`X:/`）。判定は path_verify が単一 source。
+    starts_with_double_slash(raw) || is_drive_absolute(raw)
 }
 
 /// ドライブ相対（`X:rel`・`X:` 単体）か。絶対でもなく cwd 前置でも正しく絶対化できない曖昧形。
 fn is_drive_relative(raw: &str) -> bool {
     let b = raw.as_bytes();
-    if b.len() < 2 || !b[0].is_ascii_alphabetic() || b[1] != b':' {
+    if !has_drive_letter_at(b, 0) {
         return false;
     }
     // `X:\` / `X:/` は絶対（is_absolute_path で処理済み）。それ以外の `X:...` がドライブ相対。

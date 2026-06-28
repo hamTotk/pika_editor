@@ -10,8 +10,9 @@
 /// 画像の総ピクセル数上限（要件2.2 のレンダリングガード＝6000万px）。
 ///
 /// ヘッダから得た `width*height` がこれを**超える**とデコードせず「既定アプリで開く」へ誘導する
-/// （巨大画像のデコード爆発で固まらないため＝要件12.2）。[`crate::render::guard`] の画像上限と同値。
-pub const MAX_IMAGE_PIXELS: u64 = 60_000_000;
+/// （巨大画像のデコード爆発で固まらないため＝要件12.2）。値の単一 source は
+/// [`crate::render::guard::DEFAULT_IMAGE_MAX_PIXELS`]（同値を参照し二重定義のドリフトを断つ＝eval low）。
+pub const MAX_IMAGE_PIXELS: u64 = crate::render::guard::DEFAULT_IMAGE_MAX_PIXELS;
 
 /// ファイルの開き方の分類（要件12.2）。
 #[derive(Debug, Clone, PartialEq, Eq)]

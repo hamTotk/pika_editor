@@ -152,9 +152,42 @@ fn compile(query: &str, opts: SearchOptions) -> Result<Regex, SearchError> {
     let pattern = build_pattern(query, opts);
     let mut builder = fancy_regex::RegexBuilder::new(&pattern);
     builder.backtrack_limit(DEFAULT_BACKTRACK_LIMIT);
+    // build() はコンパイルエラーのみ（実行時 BacktrackLimitExceeded は返さない）ため常に InvalidPattern。
     builder
         .build()
         .map_err(|e| SearchError::InvalidPattern(e.to_string()))
+}
+
+/// 走査中（`find_from_pos`/`captures_from_pos`）の fancy-regex エラーを [`SearchError`] へ写す。
+///
+/// `search_all`/`replace_all`/`replace_one` の 3 経路で同一だった写像を 1 箇所へ集約する。
+/// `BacktrackLimitExceeded`（ReDoS の疑い）は [`SearchError::Backtrack`]、それ以外は
+/// [`SearchError::InvalidPattern`]（文言・種別は従来と完全等価）。
+fn map_regex_err(e: fancy_regex::Error) -> SearchError {
+    match e {
+        fancy_regex::Error::RuntimeError(fancy_regex::RuntimeError::BacktrackLimitExceeded) => {
+            SearchError::Backtrack
+        }
+        other => SearchError::InvalidPattern(other.to_string()),
+    }
+}
+
+/// マッチ終端 `end`（探索開始 `pos`）から次の探索開始位置を返す（`search_all`/`replace_all` 共通）。
+///
+/// 空マッチ（`end <= pos`）は次の char 境界へ前進する（無限ループ防止）。前進できない
+/// （末尾の空マッチを拾い切った）場合は `None`（呼び出し側はループを抜ける）。従来の
+/// `if end > pos { end } else { next_char_boundary }; if next <= pos { break }` と完全等価。
+fn next_scan_pos(haystack: &str, pos: usize, end: usize) -> Option<usize> {
+    let next = if end > pos {
+        end
+    } else {
+        next_char_boundary(haystack, pos)
+    };
+    if next <= pos {
+        None
+    } else {
+        Some(next)
+    }
 }
 
 /// 全ヒットを検索する（要件5.4: 全ヒットのハイライト・件数表示）。
@@ -194,25 +227,14 @@ pub fn search_all(
                     truncated = true;
                     break;
                 }
-                // 次の探索開始位置を進める。空マッチ（end==start）は char 境界へ前進する。
-                let next = if end > pos {
-                    end
-                } else {
-                    next_char_boundary(haystack, pos)
-                };
-                // 前進しなければ末尾の空マッチを拾い切った＝終了（無限ループ防止）。
-                if next <= pos {
+                // 次の探索開始位置へ進める（空マッチは char 境界へ前進・前進不可なら終了）。
+                let Some(next) = next_scan_pos(haystack, pos, end) else {
                     break;
-                }
+                };
                 pos = next;
             }
             Ok(None) => break,
-            Err(fancy_regex::Error::RuntimeError(
-                fancy_regex::RuntimeError::BacktrackLimitExceeded,
-            )) => {
-                return Err(SearchError::Backtrack);
-            }
-            Err(e) => return Err(SearchError::InvalidPattern(e.to_string())),
+            Err(e) => return Err(map_regex_err(e)),
         }
     }
     Ok(SearchResult {
@@ -284,30 +306,20 @@ pub fn replace_all(
                     truncated = true;
                     break;
                 }
-                let next = if end > pos {
-                    end
-                } else {
-                    // 空マッチ: 1 文字を地の文として送り、次の境界へ前進する。
-                    let nb = next_char_boundary(haystack, pos);
-                    if nb > last {
-                        out.push_str(&haystack[last..nb]);
-                        last = nb;
-                    }
-                    nb
-                };
-                // 前進しなければ終了（末尾の空マッチを拾い切った＝無限ループ防止）。
-                if next <= pos {
+                // 次の探索開始位置へ進める（前進不可なら終了＝無限ループ防止）。
+                let Some(next) = next_scan_pos(haystack, pos, end) else {
                     break;
+                };
+                // 空マッチ（end<=pos）で前進した 1 文字を地の文として送る（内容を失わない）。
+                // 非空マッチ（end>pos）では last はマッチ展開で end へ進めており、ここでは何もしない。
+                if end <= pos && next > last {
+                    out.push_str(&haystack[last..next]);
+                    last = next;
                 }
                 pos = next;
             }
             Ok(None) => break,
-            Err(fancy_regex::Error::RuntimeError(
-                fancy_regex::RuntimeError::BacktrackLimitExceeded,
-            )) => {
-                return Err(SearchError::Backtrack);
-            }
-            Err(e) => return Err(SearchError::InvalidPattern(e.to_string())),
+            Err(e) => return Err(map_regex_err(e)),
         }
     }
     // 残りの地の文を付ける（打ち切り時も last 以降を保つ＝内容を失わない）。
@@ -365,12 +377,7 @@ pub fn replace_one(
     let caps = match re.captures_from_pos(haystack, from) {
         Ok(Some(caps)) => caps,
         Ok(None) => return Ok(None),
-        Err(fancy_regex::Error::RuntimeError(
-            fancy_regex::RuntimeError::BacktrackLimitExceeded,
-        )) => {
-            return Err(SearchError::Backtrack);
-        }
-        Err(e) => return Err(SearchError::InvalidPattern(e.to_string())),
+        Err(e) => return Err(map_regex_err(e)),
     };
     let whole = caps
         .get(0)
