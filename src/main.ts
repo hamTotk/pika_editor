@@ -18,8 +18,6 @@ import {
   onWatchMode,
   onOpenRequest,
   takeStartupOpenRequest,
-  restoreAppState,
-  saveAppState,
   hashContent,
   noteRecent,
   showPreview,
@@ -29,8 +27,6 @@ import {
   logFolderPath,
   openInDefaultApp,
   openLogFolder,
-  createEntry,
-  deleteEntry,
   allowSavePath,
   allowOpenPath,
   getSettings,
@@ -41,20 +37,18 @@ import {
   type TreeEntry,
   type Settings,
   type OpenRequestPayload,
-  type AppState,
   type DocEncoding,
-  type LineEnding,
   type PreviewRect,
   type ImageInfo,
 } from "./ipc";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openNativeDialog, save as saveNativeDialog } from "@tauri-apps/plugin-dialog";
-import { initTheme, applyTheme, currentTheme, type ThemeMode } from "./theme";
-import { initMenuBar, type MenuItemSpec, type MenuSpec } from "./ui/menu";
+import { initTheme, applyTheme, type ThemeMode } from "./theme";
+import { initMenuBar } from "./ui/menu";
 import { initA11y, announce } from "./a11y";
 import { resolveShortcut, modsOf, normalizeKey, type Action, type Focus } from "./shortcuts";
-import { renderTree, resetTreeExpansion, reloadTreeDir, pruneTreeDir } from "./ui/tree";
-import { renderTabs, type TabModel } from "./ui/tabs";
+import { renderTree, resetTreeExpansion } from "./ui/tree";
+import { renderTabs } from "./ui/tabs";
 import { notify, notices } from "./ui/notifications";
 import { setStatus, renderStatus } from "./ui/status";
 import { UnreadStore } from "./ui/unread";
@@ -76,7 +70,7 @@ import {
   type ViewMode,
 } from "./preview";
 import type { PreviewTheme } from "./ipc";
-import { pathKey, samePath, parentDir, basename } from "./util/path";
+import { pathKey, basename } from "./util/path";
 import {
   workbench,
   treeHeadLabel,
@@ -97,67 +91,14 @@ import {
 } from "./ui/dom";
 import { promptText, confirmModal, confirmDiscardModal, isModalOpen } from "./ui/modal";
 import { openContextMenu, type ContextItem } from "./ui/context-menu";
+import { type OpenTab, type AppShellState } from "./app/types";
+import { buildMenuSpecs, encodingLabel } from "./ui/menu-specs";
+import { createTreeActions } from "./ui/tree-actions";
+import { createPersistence } from "./app/persistence";
 
-interface OpenTab extends TabModel {
-  dirty: boolean;
-  /**
-   * このタブの直近既知内容ハッシュ（LF 正規化・backend と同一規則）。
-   * 開く/保存/外部リロード時に backend(hash_content)で実値を詰め、終了時 collectAppState で
-   * state.json の content_hash として保存する。これにより復元の「別物=未読復元」分岐が
-   * production で発火する（eval high: ダミー値固定の解消）。
-   */
-  contentHash: string;
-  /** 1 始まりカーソル位置（非アクティブタブの復元用に最後に見えた位置を保持）。 */
-  cursorLine: number;
-  cursorColumn: number;
-  /** スクロール最上部の行番号（1 始まり近似・復元用）。 */
-  scrollTop: number;
-  /**
-   * 起動復元時に外部削除されていたタブ（取消線＋× 表示で残す）。退避/ベースラインは snapshot に
-   * 残るので、削除済みタブから「確認済み時点に戻す（rollback）」へ到達できる回復導線を保つ
-   * （eval high: 削除済みタブの回復導線欠落＝旧 wx 版 F-017 と同質の行き止まり防止）。
-   */
-  deleted: boolean;
-  /**
-   * 非テキスト（画像/非対応バイナリ＝要件12.2・U3）か。true のとき CM6 を作らず image-host で表示する
-   * （画像は簡易ビュー、巨大画像/非対応は「既定アプリで開く」誘導）。モード/差分は無効・カーソルステータス無し。
-   */
-  nonText: boolean;
-  /** 第2段階以降（編集不可・読み取り専用ビューア）か。開き直しメニューの無効化に使う（backend degrade.editing_off を保存）。 */
-  editingOff: boolean;
-  /**
-   * 開いたときに検出した元エンコーディング（保存時に維持する＝要件5.2・eval medium）。
-   * open_document が判定した値。これを save_document に渡し、Shift_JIS 等が暗黙に UTF-8 化
-   * されるのを防ぐ（最上位原則「データを失わない」）。新規タブ/不明時は utf-8。
-   */
-  encoding: DocEncoding;
-  /** 開いたときに BOM があったか（保存時に維持する＝要件5.2）。 */
-  hasBom: boolean;
-  /**
-   * 開いたときに検出した改行コード（表示メニューの現在値表示用・要件5.2）。
-   * 変換 backend は未実装のため表示専用（要件14章「足さない」）。新規/不明時は "none"。
-   */
-  lineEnding: LineEnding;
-  /**
-   * このタブで「許可して再読込」したオプトイン外部許可ホスト（要件6.2/6.3・2.4）。
-   * 既定は undefined（外部遮断）。許可は **タブ単位** で保持し、別タブ/別文書では既定オフに戻る
-   * （永続はしない＝要件6.2「既定は必ずオフに戻る」）。renderActivePreview がこれを buildPreview へ渡す。
-   */
-  allowExternal?: string[];
-  /**
-   * 未保存編集の保持バッファ（eval high #11・最上位原則「データを失わない」）。
-   *
-   * タブは単一の CM6（state.editor）を共有し、タブ切替のたびに editor を destroy→再生成する。
-   * このため dirty タブから別タブへ切り替えると、退避先が無ければ編集中テキストが消える。さらに
-   * 再アクティブ化時に activateTab が openDocument でディスク内容を読み直して上書きすると未保存編集を
-   * 失う。これを防ぐため、**dirty タブから切り替える瞬間に編集中テキストをここへ退避**し、再アクティブ化
-   * では（dirty なら）ディスクでなくこの draft を CM6 へ載せる。保存（onSave）成功で dirty=false に
-   * なったら draft はクリアする（以後はディスク内容を正とする）。非 dirty タブは常に undefined。
-   */
-  draft?: string;
-}
+// OpenTab / AppShellState の型定義は src/app/types.ts へ移した（S8・実体は下の state が持つ）。
 
-const state = {
+const state: AppShellState = {
   tabs: [] as OpenTab[],
   active: null as string | null,
   editor: null as EditorHandle | null,
@@ -471,36 +412,16 @@ function pruneSelfCreated(now: number): void {
   }
 }
 
-/** ツリー項目の右クリックメニュー（ファイル/フォルダ＝要件11）。 */
-function showTreeContextMenu(entry: TreeEntry, x: number, y: number): void {
-  // 新規作成先: フォルダ上ならその中、ファイル上ならその親フォルダ。
-  const targetDir = entry.is_dir ? entry.path : parentDir(entry.path);
-  const expandAfter = entry.is_dir; // フォルダ内に作ったら展開して中身を見せる。
-  openContextMenu(
-    [
-      { label: "新規ファイル", run: () => void onCreateEntry(targetDir, false, expandAfter) },
-      { label: "新規フォルダ", run: () => void onCreateEntry(targetDir, true, expandAfter) },
-      "sep",
-      { label: "削除（ごみ箱へ）", danger: true, run: () => void onDeleteEntry(entry) },
-    ],
-    x,
-    y,
-  );
+/**
+ * 自作成パスを watcher の created 未読抑制へ登録する（指摘4・tree-actions から注入）。
+ * 登録は onExternalChange（main 在籍）が onExternalChange 到着時にワンショット消費する。
+ */
+function markSelfCreated(path: string): void {
+  selfCreatedPaths.set(selfKey(path), Date.now());
 }
 
-/** ツリーの空き領域（ルート）右クリックメニュー（新規作成のみ）。 */
-function showRootContextMenu(x: number, y: number): void {
-  if (!state.folder) return;
-  const dir = state.folder;
-  openContextMenu(
-    [
-      { label: "新規ファイル", run: () => void onCreateEntry(dir, false, false) },
-      { label: "新規フォルダ", run: () => void onCreateEntry(dir, true, false) },
-    ],
-    x,
-    y,
-  );
-}
+// ツリーのコンテキストメニュー（showTreeContextMenu/showRootContextMenu）と新規作成/削除/階層更新は
+// src/ui/tree-actions.ts へ抽出した（S8・挙動不変）。下の DI 結線で createTreeActions に注入する。
 
 /** タブ右クリックの「パスをコピー」。フルパスをクリップボードへ書き、結果を通知する。 */
 async function copyPathToClipboard(path: string): Promise<void> {
@@ -539,76 +460,6 @@ async function copyText(text: string): Promise<boolean> {
 }
 
 // パス操作（parentDir/samePath/basename/pathKey）は src/util/path.ts へ集約した（S7・挙動不変）。
-
-/**
- * 新規ファイル/フォルダを作成する（要件11）。名前を尋ね、backend で作成し、ツリーを更新する。
- * ファイルは作成後に開く（中心体験へ即接続）。フォルダは作成先を展開して中身を見せる。
- */
-async function onCreateEntry(dir: string, isDir: boolean, expandDir: boolean): Promise<void> {
-  const what = isDir ? "フォルダ" : "ファイル";
-  const name = await promptText(
-    `新規${what}の名前を入力してください`,
-    isDir ? "新しいフォルダ" : "新しいファイル.md",
-  );
-  if (name === null) return; // キャンセル。
-  const trimmed = name.trim();
-  if (!trimmed) {
-    notify("名前を入力してください", "warn");
-    return;
-  }
-  try {
-    const created = await createEntry(dir, trimmed, isDir);
-    // 自作成は watcher の created イベントを未読(◆)にしない（指摘4）。イベント到着時に消費する。
-    selfCreatedPaths.set(selfKey(created), Date.now());
-    await refreshTreeDir(dir, { expand: expandDir });
-    if (!isDir) {
-      // 作成した空ファイルを開く（テキスト/非テキスト判定は openFile が拡張子で行う）。
-      await openFile({ name: trimmed, path: created, is_dir: false });
-      // 作成直後にすぐ編集を始められるようエディタへフォーカスを移す（指摘9）。
-      // refreshTreeDir/openFile の途中でツリー行へフォーカスが移っているため明示的に取り戻す。
-      state.editor?.focusEditor();
-    }
-    notify(`${what}を作成しました: ${trimmed}`);
-  } catch (e) {
-    notify(`${what}の作成に失敗しました: ${String(e)}`, "error");
-  }
-}
-
-/** 削除（ごみ箱へ移動・要件11）。確認のうえ backend でごみ箱へ送り、ツリーを更新する。 */
-async function onDeleteEntry(entry: TreeEntry): Promise<void> {
-  const what = entry.is_dir ? "フォルダ" : "ファイル";
-  const ok = await confirmModal(
-    `${what}「${entry.name}」をごみ箱へ移動します。よろしいですか？\n` +
-      `（完全削除ではなく OS のごみ箱へ移動するので、必要なら復元できます）`,
-    { okLabel: "ごみ箱へ移動", danger: true },
-  );
-  if (!ok) return;
-  try {
-    await deleteEntry(entry.path);
-    // 削除したフォルダ自身とその配下の展開状態/子キャッシュを掃除する（同名再作成時の幽霊表示防止・指摘8）。
-    if (entry.is_dir) pruneTreeDir(entry.path);
-    await refreshTreeDir(parentDir(entry.path));
-    notify(`ごみ箱へ移動しました: ${entry.name}`);
-    // 開いているタブの追従（「削除済み」表示）は watcher の removed イベント（onExternalChange）が担う。
-  } catch (e) {
-    notify(`削除に失敗しました: ${String(e)}`, "error");
-  }
-}
-
-/** 作成/削除後にツリーの該当階層を更新する（ルートは listDir で取り直し、サブフォルダは reloadTreeDir）。 */
-async function refreshTreeDir(dir: string, opts?: { expand?: boolean }): Promise<void> {
-  if (state.folder && samePath(dir, state.folder)) {
-    try {
-      const entries = await listDir(state.folder);
-      state.treeEntries = entries;
-      refreshTree();
-    } catch {
-      // 取得失敗は固めない（現状維持）。
-    }
-    return;
-  }
-  await reloadTreeDir(dir, opts);
-}
 
 /**
  * ツリーヘッダ（B4・ui-design 7章）の表示を現在のフォルダに合わせて更新する。
@@ -1410,43 +1261,74 @@ async function onToggleSplit(): Promise<void> {
   await setViewMode(state.viewMode === "split" ? "source" : "split");
 }
 
-/** 3モード×差分トグルの直交占有を DOM へ適用する（要件6.1・ui-design 8章）。 */
+/**
+ * 3モード×差分トグルの直交占有を DOM へ適用する（要件6.1・ui-design 8章）。
+ * S8 で意味単位（画像専有/検索バー追従/host 可視/split 属性/プレビュー追従）の小関数へ分割した。
+ * 実行順序・結果 DOM・検索同期・host 可視・別WebView の出し分けは分割前と一切変えていない（挙動不変）。
+ */
 function applyOccupancy(): void {
-  // 非テキスト（画像/非対応バイナリ＝要件12.2・U3）が占有なら他の host を全て隠して image-host だけ出す。
-  // 画像にモード/差分/プレビューは無いので resolveOccupancy より前に分岐して image-host を専有させる。
-  const activeTab = state.tabs.find((t) => t.path === state.active);
-  if (activeTab && activeTab.nonText && !activeTab.deleted) {
-    editorHost().hidden = true;
-    diffHost().hidden = true;
-    previewHost().hidden = true;
-    imageHost().hidden = false;
-    editorPane().removeAttribute("data-split");
-    // 画像占有ではエディタが消えるので検索バーも閉じる（canSearch=false と整合・古いハイライト残さない）。
-    if (searchController?.isOpen()) searchController.close();
-    // プレビュー子WebView は OS 子ウィンドウで z-index 制御不可＝画像占有中は必ず隠す（手前に残らない）。
-    void hidePreview();
-    // editor 無しなので no-op（カーソル/行/文字を出さない）。状態提示は image-host の描画自体が担う。
-    refreshStatus();
-    return;
-  }
+  // 非テキスト（画像）が占有なら image-host を専有して早期復帰（モード/差分/プレビューは無い）。
+  if (applyImageOccupancyIfActive()) return;
   // 非画像占有（テキスト/差分/プレビュー）では image-host を必ず隠す（画像→テキスト切替の正規化）。
   imageHost().hidden = true;
   const occ = resolveOccupancy(state.viewMode, state.diffOn);
-  // 検索バーが開いている間に占有が変わったとき（S5）:
-  // - エディタも差分も検索対象でない占有（プレビューのみ/画像）へ移ったら閉じる（プレビュー内検索は系統C）。
-  // - ソース⇄差分の切替や差分の再描画（外部変更で差分ハンドルが作り直される）では、ハイライト先を
-  //   現在の対象（CM6 or 差分DOM）へ貼り直す（refresh＝現クエリで再検索し新ハンドルへ再適用する）。
+  syncSearchBarForOccupancy();
+  applyHostVisibility(occ);
+  applySplitAttribute(occ);
+  // 占有（ソース/差分/プレビュー）が変わったらステータスのカーソル有無も切り替える（要件11.1）。
+  // ソース占有のみカーソル位置を出し、差分/プレビュー占有では全体（差分・行・文字）のみにする。
+  refreshStatus();
+  syncPreviewForOccupancy(occ);
+}
+
+/**
+ * 非テキスト（画像/非対応バイナリ＝要件12.2・U3）が占有なら image-host を専有して true を返す。
+ * 画像にモード/差分/プレビューは無いので resolveOccupancy より前に分岐する（呼び出し側は true で早期復帰）。
+ */
+function applyImageOccupancyIfActive(): boolean {
+  const activeTab = state.tabs.find((t) => t.path === state.active);
+  if (!(activeTab && activeTab.nonText && !activeTab.deleted)) return false;
+  editorHost().hidden = true;
+  diffHost().hidden = true;
+  previewHost().hidden = true;
+  imageHost().hidden = false;
+  editorPane().removeAttribute("data-split");
+  // 画像占有ではエディタが消えるので検索バーも閉じる（canSearch=false と整合・古いハイライト残さない）。
+  if (searchController?.isOpen()) searchController.close();
+  // プレビュー子WebView は OS 子ウィンドウで z-index 制御不可＝画像占有中は必ず隠す（手前に残らない）。
+  void hidePreview();
+  // editor 無しなので no-op（カーソル/行/文字を出さない）。状態提示は image-host の描画自体が担う。
+  refreshStatus();
+  return true;
+}
+
+/**
+ * 検索バーが開いている間に占有が変わったときの追従（S5）:
+ * - エディタも差分も検索対象でない占有（プレビューのみ/画像）へ移ったら閉じる（プレビュー内検索は系統C）。
+ * - ソース⇄差分の切替や差分の再描画（外部変更で差分ハンドルが作り直される）では、ハイライト先を
+ *   現在の対象（CM6 or 差分DOM）へ貼り直す（refresh＝現クエリで再検索し新ハンドルへ再適用する）。
+ */
+function syncSearchBarForOccupancy(): void {
   if (searchController?.isOpen()) {
     if (!canSearchView()) searchController.close();
     else searchController.refresh();
   }
+}
+
+/** 占有に応じて 3 つの host（エディタ/差分/プレビュー）の可視を切り替える。 */
+function applyHostVisibility(occ: ReturnType<typeof resolveOccupancy>): void {
   editorHost().hidden = !occ.showEditor;
   diffHost().hidden = !occ.showDiff;
   previewHost().hidden = !occ.showPreview;
-  // 左右並置（split）の出し分け（ui-design 8章）。occ は直交占有の結果なので、
-  //  - プレビュー＋差分（preview/split で差分ON）→ 左＝レンダリング／右＝テキスト差分。
-  //  - 分割＋差分OFF（split で showEditor && showPreview）→ 左＝エディタ／右＝プレビュー。
-  //  - それ以外（単独占有）→ data-split を外し既存の単独レイアウト（grid-row:2 を 1 要素が占有）に戻す。
+}
+
+/**
+ * 左右並置（split）の出し分け（ui-design 8章）。occ は直交占有の結果なので、
+ *  - プレビュー＋差分（preview/split で差分ON）→ 左＝レンダリング／右＝テキスト差分。
+ *  - 分割＋差分OFF（split で showEditor && showPreview）→ 左＝エディタ／右＝プレビュー。
+ *  - それ以外（単独占有）→ data-split を外し既存の単独レイアウト（grid-row:2 を 1 要素が占有）に戻す。
+ */
+function applySplitAttribute(occ: ReturnType<typeof resolveOccupancy>): void {
   if (occ.showPreview && occ.showDiff) {
     editorPane().setAttribute("data-split", "preview-diff");
   } else if (occ.showPreview && occ.showEditor) {
@@ -1454,11 +1336,13 @@ function applyOccupancy(): void {
   } else {
     editorPane().removeAttribute("data-split");
   }
-  // 占有（ソース/差分/プレビュー）が変わったらステータスのカーソル有無も切り替える（要件11.1）。
-  // ソース占有のみカーソル位置を出し、差分/プレビュー占有では全体（差分・行・文字）のみにする。
-  refreshStatus();
-  // 占有がプレビュー非表示なら別WebView を隠す（表示は renderActivePreview の show_preview が担う）。
-  // 占有がプレビュー表示でも、ここでは bounds 追従のみ更新する（ナビゲートは renderActivePreview）。
+}
+
+/**
+ * 占有がプレビュー非表示なら別WebView を隠す（表示は renderActivePreview の show_preview が担う）。
+ * 占有がプレビュー表示でも、ここでは bounds 追従のみ更新する（ナビゲートは renderActivePreview）。
+ */
+function syncPreviewForOccupancy(occ: ReturnType<typeof resolveOccupancy>): void {
   if (!occ.showPreview) {
     void hidePreview();
   } else {
@@ -1912,259 +1796,9 @@ function onShowVersion(): void {
   notify("pika 0.1", "info");
 }
 
-/** アクティブタブのエンコーディング表記（表示メニューの現在値表示用・表示専用）。 */
-function encodingLabel(enc: DocEncoding, hasBom: boolean): string {
-  const base =
-    enc === "utf-8"
-      ? "UTF-8"
-      : enc === "utf-16le"
-        ? "UTF-16 LE"
-        : enc === "utf-16be"
-          ? "UTF-16 BE"
-          : "Shift_JIS";
-  return hasBom ? `${base} (BOM)` : base;
-}
-
-/** アクティブタブの改行コード表記（表示メニューの現在値表示用・表示専用）。 */
-function lineEndingLabel(le: LineEnding): string {
-  switch (le) {
-    case "lf":
-      return "LF";
-    case "crlf":
-      return "CRLF";
-    case "cr":
-      return "CR";
-    case "mixed":
-      return "混在";
-    default:
-      return "—";
-  }
-}
-
-/**
- * 5つのメニュー（ファイル/編集/表示/移動/ヘルプ）の定義を組み立てる（UIブラッシュアップ T8）。
- * build は**開くたびに**評価され checked/disabled/現在値（エンコーディング/改行/テーマ/折り返し）を反映する。
- * 各項目は既存ハンドラへ結線する。backend 未実装（エンコーディング再オープン・改行変換・OS で開く）は
- * 項目を出さない or 案内に留める（要件14章「足さない」を厳守）。
- */
-function buildMenuSpecs(): MenuSpec[] {
-  const hasActive = (): boolean => !!state.active;
-  const activeTab = (): OpenTab | undefined =>
-    state.tabs.find((t) => t.path === state.active);
-  // 「すべて確認済み」に対象があるか（無ければ無効化せず実行時に空案内する＝既存挙動を維持）。
-  return [
-    {
-      id: "file",
-      build: (): MenuItemSpec[] => [
-        { kind: "item", label: "フォルダを開く…", accel: "Ctrl+Shift+O", onSelect: () => void onOpenFolder() },
-        { kind: "item", label: "ファイルを開く…", accel: "Ctrl+O", onSelect: () => void onOpenFile() },
-        { kind: "separator" },
-        {
-          kind: "item",
-          label: "保存",
-          accel: "Ctrl+S",
-          disabled: !hasActive() || state.busy,
-          onSelect: () => void onSave(),
-        },
-        {
-          kind: "item",
-          label: "名前を付けて保存…",
-          // 編集可能テキストタブなら**ペイン可視を問わず**対象（プレビューのみでもプレーン保存同様に効く・
-          // Codex P2 是正）。現在のエディタ内容を別パスへ書き出すだけで可視は不要なため canEditActiveText で判定。
-          disabled: !canEditActiveText() || state.busy,
-          onSelect: () => void onSaveAs(),
-        },
-        { kind: "separator" },
-        { kind: "item", label: "ログフォルダを開く", onSelect: () => void onOpenLogFolder() },
-      ],
-    },
-    {
-      id: "edit",
-      build: (): MenuItemSpec[] => [
-        {
-          kind: "item",
-          label: "すべて確認済み",
-          accel: "Ctrl+Alt+Enter",
-          disabled: state.busy,
-          onSelect: () => void onConfirmAll(),
-        },
-        {
-          kind: "item",
-          label: "確認済み時点に戻す",
-          disabled: !hasActive() || state.busy,
-          onSelect: () => void onRollback(),
-        },
-        { kind: "separator" },
-        {
-          kind: "item",
-          label: "検索",
-          accel: "Ctrl+F",
-          disabled: !hasActive(),
-          onSelect: () => dispatchAction("find"),
-        },
-        {
-          kind: "item",
-          label: "置換",
-          accel: "Ctrl+H",
-          disabled: !hasActive(),
-          onSelect: () => dispatchAction("replace"),
-        },
-        { kind: "separator" },
-        // 編集補助コマンド（要件5.1）。キーバインドが主経路で、メニューは発見性のための薄い再掲。
-        // canSearch()＝エディタが可視かつ編集可能（テキスト/非削除/非editingOff）と同条件で出す。
-        {
-          kind: "item",
-          label: "太字",
-          accel: "Ctrl+B",
-          disabled: !canSearch(),
-          onSelect: () => state.editor?.toggleBold(),
-        },
-        {
-          kind: "item",
-          label: "斜体",
-          accel: "Ctrl+I",
-          disabled: !canSearch(),
-          onSelect: () => state.editor?.toggleItalic(),
-        },
-        {
-          kind: "item",
-          label: "チェックボックス",
-          accel: "Ctrl+L",
-          disabled: !canSearch(),
-          onSelect: () => state.editor?.toggleCheckbox(),
-        },
-      ],
-    },
-    {
-      id: "view",
-      build: (): MenuItemSpec[] => {
-        const enabled = hasActive();
-        const tab = activeTab();
-        const rows: MenuItemSpec[] = [
-          {
-            kind: "item",
-            label: "ソース",
-            disabled: !enabled,
-            checked: state.viewMode === "source",
-            onSelect: () => void setViewMode("source"),
-          },
-          {
-            kind: "item",
-            label: "分割",
-            accel: "Ctrl+\\",
-            disabled: !enabled,
-            checked: state.viewMode === "split",
-            onSelect: () => void setViewMode("split"),
-          },
-          {
-            kind: "item",
-            label: "プレビュー",
-            accel: "Ctrl+E",
-            disabled: !enabled,
-            checked: state.viewMode === "preview",
-            onSelect: () => void setViewMode("preview"),
-          },
-          {
-            kind: "item",
-            label: "差分",
-            accel: "Ctrl+Shift+D",
-            disabled: !enabled,
-            checked: state.diffOn,
-            onSelect: () => void onToggleDiff(),
-          },
-          { kind: "separator" },
-          {
-            kind: "item",
-            label: "折り返し",
-            disabled: !enabled,
-            checked: state.lineWrapping,
-            onSelect: () => onToggleWrap(),
-          },
-          { kind: "separator" },
-          // エンコーディングは「指定して開き直す」を実結線（要件5.6 Reopen）。改行コードは現在値の表示のみ
-          // （変換 backend は未実装＝要件14章）。アクティブタブが無いときは出さない。
-          ...(tab
-            ? ([
-                // エンコーディングを指定して開き直す（要件5.6 Reopen）。見出しに現在値を表示し、
-                // 下の4項目で強制再デコードする。入れ子サブメニュー非対応のためフラット展開（テーマと同型）。
-                {
-                  kind: "item",
-                  label: "エンコーディングを指定して開き直す",
-                  accel: encodingLabel(tab.encoding, tab.hasBom),
-                  disabled: true,
-                },
-                ...(["utf-8", "utf-16le", "utf-16be", "shift_jis"] as DocEncoding[]).map(
-                  (e): MenuItemSpec => ({
-                    kind: "item",
-                    label: `　${encodingLabel(e, false)}`,
-                    checked: tab.encoding === e,
-                    // 削除済みタブは実体が無く開き直せない（backend verify_read も弾くが UI でも無効化）。
-                    // 巨大ファイル（編集不可＝第2段階以降）も無効化（backend reopen 拒否と同条件）。
-                    disabled: tab.deleted || tab.editingOff,
-                    onSelect: () => void reopenActiveWithEncoding(e),
-                  }),
-                ),
-                { kind: "separator" },
-                {
-                  kind: "item",
-                  label: "改行コード",
-                  accel: lineEndingLabel(tab.lineEnding),
-                  disabled: true,
-                },
-                { kind: "separator" },
-              ] as MenuItemSpec[])
-            : []),
-          {
-            kind: "item",
-            label: "テーマ: ライト",
-            checked: currentTheme() === "light",
-            onSelect: () => onSetTheme("light"),
-          },
-          {
-            kind: "item",
-            label: "テーマ: ダーク",
-            checked: currentTheme() === "dark",
-            onSelect: () => onSetTheme("dark"),
-          },
-          {
-            kind: "item",
-            label: "テーマ: システム",
-            checked: currentTheme() === "system",
-            onSelect: () => onSetTheme("system"),
-          },
-        ];
-        return rows;
-      },
-    },
-    {
-      id: "go",
-      build: (): MenuItemSpec[] => [
-        {
-          kind: "item",
-          label: "次の変更",
-          accel: "F8",
-          disabled: !state.diff,
-          onSelect: () => dispatchAction("next-change"),
-        },
-        {
-          kind: "item",
-          label: "前の変更",
-          accel: "Shift+F8",
-          disabled: !state.diff,
-          onSelect: () => dispatchAction("prev-change"),
-        },
-        { kind: "separator" },
-        { kind: "item", label: "再同期", accel: "F5", onSelect: () => void onF5() },
-      ],
-    },
-    {
-      id: "help",
-      build: (): MenuItemSpec[] => [
-        { kind: "item", label: "バージョン情報", onSelect: () => onShowVersion() },
-      ],
-    },
-  ];
-}
+// エンコーディング/改行コード表記（encodingLabel/lineEndingLabel）とメニュー定義（buildMenuSpecs）は
+// src/ui/menu-specs.ts へ抽出した（S8・挙動不変）。encodingLabel は reopenActiveWithEncoding で使うため
+// main も import する。buildMenuSpecs は main() で ctx（state＋各ハンドラ）を注入して呼ぶ。
 
 /**
  * 単一インスタンス転送（要件3.4）。既に起動済みの pika に別プロセスが `pika <path>` を投げると
@@ -2259,151 +1893,10 @@ function openNewFileTab(path: string, name: string): void {
   persistAppState();
 }
 
-/** 現在の UI 状態を AppState へ写す（state.json 保存用・要件10.1）。 */
-function collectAppState(): AppState {
-  // アクティブタブのカーソル/スクロールを最新化してから収集する（実値で保存・eval high）。
-  captureActivePosition();
-  const activeIdx = state.tabs.findIndex((t) => t.path === state.active);
-  return {
-    version: 1,
-    workspace: state.folder ?? undefined,
-    // 各タブの実カーソル/スクロール/content_hash を保存する（ダミー値固定の解消・eval high）。
-    // diff_on/view_mode はアプリ全体で 1 つ（ソース/プレビューと差分トグルは現状グローバル）なので
-    // 現在の表示状態を全タブに反映する。content_hash は開く/保存/外部リロード時に実値で埋めている。
-    tabs: state.tabs.map((t) => ({
-      path: t.path,
-      cursor_line: t.cursorLine,
-      cursor_column: t.cursorColumn,
-      scroll_top: t.scrollTop,
-      view_mode: state.viewMode,
-      diff_on: state.diffOn,
-      content_hash: t.contentHash,
-    })),
-    active_tab: activeIdx < 0 ? 0 : activeIdx,
-    expanded_dirs: [],
-    window: { x: 0, y: 0, width: 0, height: 0, maximized: false },
-    // recent は backend(note_recent)が read-modify-write で別管理するため空で送る
-    // （save_app_state が recent を上書きしないよう backend 側で保つ。下記コメント参照）。
-    recent: { files: [], folders: [] },
-  };
-}
-
-/** persistAppState のデバウンスタイマー（連続操作で書込が積み重なるのを抑える・eval medium）。 */
-let persistTimer: number | null = null;
-
-/**
- * アプリ状態をアトミック保存する（要件10.1）。未知バージョン/破損で空起動した（safeEmpty）間は
- * 保存しない＝読めない state.json を上書きしない（最上位原則「データを失わない」）。
- *
- * 連続でタブ/フォルダを開く操作で都度アトミック書込（同期 FS I/O）が積み重なるため、
- * 短時間デバウンス（合体）する（eval medium）。終了時（beforeunload）は flush で確実に書く。
- */
-function persistAppState(): void {
-  if (state.safeEmpty) return;
-  if (persistTimer !== null) window.clearTimeout(persistTimer);
-  persistTimer = window.setTimeout(() => {
-    persistTimer = null;
-    void persistAppStateNow();
-  }, 400);
-}
-
-/** デバウンスせず即座に state.json を保存する（終了時 flush 用）。 */
-async function persistAppStateNow(): Promise<void> {
-  if (state.safeEmpty) return;
-  try {
-    await saveAppState(collectAppState());
-  } catch (e) {
-    // 保存失敗は通知のみ（状態保存はベストエフォート・データ本体は失わない）。
-    notify(`状態の保存に失敗: ${String(e)}`, "warn");
-  }
-}
-
-/**
- * 起動時に state.json を復元する（要件10.1/13）。version 安全側・復元3分岐の判定は backend(pika-core)。
- * ワークスペース消失=空状態、タブ消失=削除済み表示、別物=未読復元、を status で受けて反映する。
- */
-async function restoreOnStartup(): Promise<void> {
-  let outcome;
-  try {
-    outcome = await restoreAppState();
-  } catch {
-    return; // 復元できなくても空状態で起動する（クラッシュさせない）。
-  }
-  // 未知バージョン/破損は上書き禁止フラグを立てて以後の保存を控える。
-  state.safeEmpty = outcome.safe_empty;
-  if (state.safeEmpty) {
-    // 前回状態を読めなかったため空で起動した／元の state.json は保全し上書きしない旨を伝える
-    // （eval medium: 破損空起動の可視化。回復の手掛かりに触れる）。
-    notify(
-      "前回の状態を読み込めなかったため空の状態で起動しました（元の設定は保全し上書きしません）",
-      "warn",
-    );
-  }
-  if (outcome.workspace_status === "restore" && outcome.workspace_path) {
-    try {
-      const entries = await openWorkspace(outcome.workspace_path);
-      state.folder = outcome.workspace_path;
-      state.treeEntries = entries;
-      resetTreeExpansion();
-      state.unread = new UnreadStore();
-      refreshTree();
-      updateTreeHeader();
-      // フォルダ名＋件数はツリーヘッダ（T3）へ移したのでステータスからは外す。タブ復元・活性化後に
-      // refreshStatus（activateTab 経由）が構造化ステータスを描画する。
-      setStatus("");
-    } catch {
-      // ワークスペースが開けなければ空状態へ落とす（安全遷移）。
-    }
-  }
-  // タブ復元（消失=削除済みタブとして残す・別物=未読復元・正常=位置復元して開く）。
-  for (const rt of outcome.tabs) {
-    const name = basename(rt.tab.path);
-    if (rt.status === "deleted") {
-      // 外部削除されたタブを取消線タブとして残す（退避から「確認済み時点に戻す」へ到達可能・eval high）。
-      const tab = newTab(rt.tab.path, name);
-      tab.deleted = true;
-      tab.cursorLine = rt.tab.cursor_line || 1;
-      tab.cursorColumn = rt.tab.cursor_column || 1;
-      tab.scrollTop = rt.tab.scroll_top || 1;
-      tab.contentHash = rt.tab.content_hash;
-      state.unread.apply([{ kind: "removed", path: rt.tab.path }]);
-      if (!state.tabs.some((t) => t.path === tab.path)) state.tabs.push(tab);
-      continue;
-    }
-    try {
-      await openFile({ name, path: rt.tab.path, is_dir: false });
-      // 保存時の位置を復元する（カーソル/スクロール・eval high の実値復元）。
-      restoreTabPosition(rt.tab.path, rt.tab.cursor_line, rt.tab.cursor_column, rt.tab.scroll_top);
-      if (rt.status === "unread") {
-        // 別物（外部変更）＝未読として復元（差分マークを付ける）。
-        state.unread.apply([{ kind: "modified", path: rt.tab.path }]);
-      }
-    } catch {
-      // 個別タブが開けなくても他タブの復元は続ける。
-    }
-  }
-  // 保存時のアクティブタブをパスで再アクティブ化する（復元順に依らない・eval high）。
-  if (outcome.active_path && state.tabs.some((t) => t.path === outcome.active_path)) {
-    await activateTab(outcome.active_path);
-  }
-  refreshTabs();
-  refreshTree();
-}
-
-/** 復元したタブの保存時カーソル/スクロールをエディタへ反映する（アクティブタブのみ即時・要件10.1）。 */
-function restoreTabPosition(path: string, line: number, column: number, scrollTop: number): void {
-  const tab = state.tabs.find((t) => t.path === path);
-  if (tab) {
-    tab.cursorLine = line || 1;
-    tab.cursorColumn = column || 1;
-    tab.scrollTop = scrollTop || 1;
-  }
-  // 現在エディタに乗っているタブなら即座に位置を反映する（非アクティブタブは activate 時に反映）。
-  if (state.active === path && state.editor) {
-    state.editor.gotoPosition(line || 1, column || 1);
-    state.editor.scrollToLine(scrollTop || 1);
-  }
-}
+// 状態収集/保存/復元（collectAppState/persistAppState/persistAppStateNow/restoreOnStartup/
+// restoreTabPosition＋デバウンスタイマー）は src/app/persistence.ts へ抽出した（S8・挙動不変＝
+// データを失わない不変条件を保持）。下の DI 結線で createPersistence に注入し、main は返り値の
+// persistAppState/persistAppStateNow/restoreOnStartup/cancelPendingPersist を呼ぶ。
 
 /**
  * いまフォーカスのあるペインを判定する（Ctrl+Enter 誤爆防止に使う＝要件11.2）。
@@ -2848,6 +2341,35 @@ async function closeTab(path: string): Promise<void> {
   void persistAppState();
 }
 
+// ── DI 結線（S8・main.ts モノリス分割）─────────────────────────────────────────────────────
+// 抽出した3モジュール（ui/tree-actions・app/persistence・ui/menu-specs）へ state とハンドラを注入する。
+// state は単一の可変オブジェクトへの**参照**を渡し（挙動不変＝データ損失防止の不変条件を保持）、main 在籍の
+// 各関数（hoisted）をコールバックとして渡す。createTreeActions/createPersistence の呼び出しは関数を
+// 組み立てるだけで実行はしない（実際の呼び出しは runtime＝module 評価完了後）ので TDZ にならない。
+// menu-specs は buildMenuSpecs の呼び出しが 1 度だけなので main() 内で ctx を組んで結線する。
+
+// ツリー操作（新規作成/削除/コンテキストメニュー）。selfCreatedPaths は main が保持し、登録だけ注入する
+// （消費は onExternalChange が担う）。挙動は tree-actions 抽出前と不変。
+const { showTreeContextMenu, showRootContextMenu } = createTreeActions({
+  state,
+  refreshTree,
+  openFile,
+  markSelfCreated,
+});
+
+// 状態の収集/保存/復元（state.json）。退避先行/最新性ガード/デバウンス/復元順序は persistence 内で不変。
+const { persistAppState, persistAppStateNow, restoreOnStartup, cancelPendingPersist } =
+  createPersistence({
+    state,
+    captureActivePosition,
+    refreshTree,
+    refreshTabs,
+    updateTreeHeader,
+    newTab,
+    openFile,
+    activateTab,
+  });
+
 async function main(): Promise<void> {
   initTheme();
   // ARIA 全Web再構築の初期化（F6/Shift+F6 ペイン間フォーカス循環・ランドマーク確実化＝要件11.5・design doc 17章）。
@@ -2857,7 +2379,32 @@ async function main(): Promise<void> {
   // 各メニューの活性・✓・現在値（エンコーディング/改行/テーマ/折り返し）は build が開くたびに評価する。
   const menubarEl = document.getElementById("menubar") as HTMLElement;
   const menuLayerEl = document.getElementById("menu-layer") as HTMLElement;
-  initMenuBar(menubarEl, menuLayerEl, buildMenuSpecs());
+  // メニュー定義（ui/menu-specs）へ state と各ハンドラを注入する（buildMenuSpecs は 1 度だけ呼ぶ）。
+  // メニュー構成・有効無効条件・各アクションの呼び出し先は menu-specs 抽出前と一切変えていない（挙動不変）。
+  initMenuBar(
+    menubarEl,
+    menuLayerEl,
+    buildMenuSpecs({
+      state,
+      onOpenFolder,
+      onOpenFile,
+      onSave,
+      onSaveAs,
+      onOpenLogFolder,
+      onConfirmAll,
+      onRollback,
+      onToggleDiff,
+      onToggleWrap,
+      onSetTheme,
+      onF5,
+      onShowVersion,
+      setViewMode,
+      reopenActiveWithEncoding,
+      dispatchAction,
+      canEditActiveText,
+      canSearch,
+    }),
+  );
   // フレームレス化の自前ウィンドウ操作（最小化/最大化/閉じる・ui-design §7）。ドラッグ移動は
   // メニュー帯の data-tauri-drag-region（index.html）が担う。
   initWindowControls();
@@ -2993,10 +2540,7 @@ async function main(): Promise<void> {
   // 即時 flush 後にデバウンス分が後から発火し、二重保存や（終了で UI が消えた後の）未完走で
   // 終了直前保存が取りこぼされうる。タイマーを止めてから 1 回だけ確実に書く。
   window.addEventListener("beforeunload", () => {
-    if (persistTimer !== null) {
-      window.clearTimeout(persistTimer);
-      persistTimer = null;
-    }
+    cancelPendingPersist();
     void persistAppStateNow();
   });
   // 起動時に state.json を復元（version 安全側・復元3分岐は backend が判定）。
