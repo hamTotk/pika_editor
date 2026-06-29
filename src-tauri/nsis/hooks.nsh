@@ -20,6 +20,11 @@
   ; HKCU に候補（OpenWithProgids）と右クリック「pikaで開く」を登録する。
   ; 失敗してもインストール自体は成功扱いにする（関連付けは任意機能・後から手動登録も可能）。
   ; nsExec はウィンドウを出さずに実行する（pika-cli は console subsystem）。
+  ;
+  ; 【installMode=both の注意】登録先は HKCU（pika-core::explorer。全ユーザー＝HKLM 未対応）。
+  ; 「全ユーザー（perMachine）」を選んでインストールした場合でも、関連付けは **インストールを実行した
+  ; ユーザーのみ** に効く（昇格時は管理者ユーザーの HKCU・データルートも各ユーザーの %LOCALAPPDATA%）。
+  ; 他ユーザーで使うときは、そのユーザーが `pika-cli.exe --register-shell` を一度実行すればよい。
   nsExec::Exec '"$INSTDIR\pika-cli.exe" --register-shell'
 !macroend
 
