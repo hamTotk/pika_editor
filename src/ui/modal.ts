@@ -24,6 +24,18 @@ export function isModalOpen(): boolean {
   return modalDepth > 0;
 }
 
+/**
+ * openModal の土台に乗らないカスタムモーダル（About 等・スクロール領域や閉じないボタンを持つ）が
+ * modalDepth を共有するための増減プリミティブ。openModal と同じく、表示中はグローバルショートカット
+ * （window keydown）を無効化したい場合に開始/終了で呼ぶ。必ず対で呼ぶこと。
+ */
+export function enterModal(): void {
+  modalDepth += 1;
+}
+export function leaveModal(): void {
+  modalDepth = Math.max(0, modalDepth - 1);
+}
+
 /** モーダルボタンの見た目（class を分ける）。 */
 type ModalButtonVariant = "primary" | "danger";
 

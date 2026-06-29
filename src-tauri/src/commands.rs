@@ -481,6 +481,30 @@ pub fn open_log_folder() -> Result<(), String> {
     tauri_plugin_opener::open_path(p, None::<&str>).map_err(|e| e.to_string())
 }
 
+// ── About 画面（要件13「About にバージョン・同梱 OSS ライセンスを表示」）──────────────────
+
+/// About 画面に表示する情報（バージョン＋同梱第三者 OSS のライセンス全文）。
+#[derive(Serialize)]
+pub struct AboutInfo {
+    /// アプリのバージョン（workspace の version＝tauri.conf.json と同一の単一源）。
+    pub version: &'static str,
+    /// 同梱第三者 OSS のライセンス全文（`assets/THIRD_PARTY_NOTICES`）。
+    pub notices: &'static str,
+}
+
+/// About 画面の情報を返す（要件13）。
+///
+/// バージョンは `CARGO_PKG_VERSION`（pika-app の version = workspace version = tauri.conf.json と一致）。
+/// ライセンス全文はビルド時に `include_str!` で exe へ畳み込む（実行時 FS 依存にしない＝同梱ベンダー
+/// アセットと同じ自己完結方針。配布物の THIRD_PARTY_NOTICES.txt と同一ソース）。
+#[tauri::command]
+pub fn about_info() -> AboutInfo {
+    AboutInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        notices: include_str!("../../assets/THIRD_PARTY_NOTICES"),
+    }
+}
+
 // ── ツリーからのファイル/フォルダ 新規作成・削除（要件11「新規ファイル/新規フォルダ/削除」・design G）──
 //
 // 【セキュリティ境界】frontend からのパスは信頼せず、AccessControl で**開いているワークスペース配下**へ

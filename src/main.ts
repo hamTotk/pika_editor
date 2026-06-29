@@ -97,6 +97,7 @@ import {
   conflictModal,
   isModalOpen,
 } from "./ui/modal";
+import { showAboutModal } from "./ui/about";
 import { openContextMenu, type ContextItem } from "./ui/context-menu";
 import { type OpenTab, type AppShellState } from "./app/types";
 import { buildMenuSpecs, encodingLabel } from "./ui/menu-specs";
@@ -1877,9 +1878,9 @@ async function onOpenExternal(): Promise<void> {
   }
 }
 
-/** バージョン表示（ヘルプメニュー）。 */
+/** バージョン情報（ヘルプメニュー・要件13）。バージョン＋同梱 OSS ライセンスをモーダルで表示する。 */
 function onShowVersion(): void {
-  notify("pika 0.1", "info");
+  void showAboutModal();
 }
 
 // エンコーディング/改行コード表記（encodingLabel/lineEndingLabel）とメニュー定義（buildMenuSpecs）は
