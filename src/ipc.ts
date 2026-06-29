@@ -674,6 +674,21 @@ export function openLogFolder(): Promise<void> {
   return invoke<void>("open_log_folder");
 }
 
+/** About 画面の情報（バージョン＋同梱第三者 OSS のライセンス全文）。 */
+export interface AboutInfo {
+  version: string;
+  notices: string;
+}
+
+/**
+ * 「バージョン情報」画面の情報を取得する（要件13「About にバージョン・OSS ライセンスを表示」）。
+ * version は exe の単一源（CARGO_PKG_VERSION＝tauri.conf.json）、notices は exe 埋め込みの
+ * assets/THIRD_PARTY_NOTICES（配布物の THIRD_PARTY_NOTICES.txt と同一）。
+ */
+export function aboutInfo(): Promise<AboutInfo> {
+  return invoke<AboutInfo>("about_info");
+}
+
 // ── settings.toml サブシステム（要件10.3/10.4）──────────────────────────────
 
 /** テーマ設定（settings.toml の `theme`・pika-core::settings::ThemeSetting と対応）。 */
