@@ -21,10 +21,10 @@
   ; 失敗してもインストール自体は成功扱いにする（関連付けは任意機能・後から手動登録も可能）。
   ; nsExec はウィンドウを出さずに実行する（pika-cli は console subsystem）。
   ;
-  ; 【installMode=both の注意】登録先は HKCU（pika-core::explorer。全ユーザー＝HKLM 未対応）。
-  ; 「全ユーザー（perMachine）」を選んでインストールした場合でも、関連付けは **インストールを実行した
-  ; ユーザーのみ** に効く（昇格時は管理者ユーザーの HKCU・データルートも各ユーザーの %LOCALAPPDATA%）。
-  ; 他ユーザーで使うときは、そのユーザーが `pika-cli.exe --register-shell` を一度実行すればよい。
+  ; 【installMode=currentUser 固定】登録先は HKCU（pika-core::explorer。全ユーザー＝HKLM 未対応）。
+  ; インストーラは「現在のユーザーのみ」固定（perMachine は提供しない）。pika は per-user 設計
+  ; （登録先 HKCU・データルート %LOCALAPPDATA%）であり、昇格しないので登録先 HKCU は実際に pika を
+  ; 使うユーザーと一致する。全ユーザー導入が要るなら各ユーザーが自分でインストールする。
   nsExec::Exec '"$INSTDIR\pika-cli.exe" --register-shell'
 !macroend
 
@@ -40,6 +40,9 @@
   ; 設定・状態・ログは常に削除する（要件13）。
   ; データルート直下の永続ファイルは settings.toml と state.json のみ（最近使った項目は state.json 内）。
   ; index.json/meta.json/objects は snapshots\ 配下＝退避データの一部なので、ここでは触らない。
+  ; installMode=currentUser 固定（昇格しない）ため $LOCALAPPDATA は実際に pika を使ったユーザーを指す
+  ; ＝削除もスナップショット確認も正しいプロファイルへ届く（perMachine だと昇格アカウントを掃除して
+  ; しまい実ユーザーのデータが残置する問題があり、currentUser 固定で回避している）。
   Delete "$LOCALAPPDATA\pika\settings.toml"
   Delete "$LOCALAPPDATA\pika\state.json"
   RMDir /r "$LOCALAPPDATA\pika\logs"

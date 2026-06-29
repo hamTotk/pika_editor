@@ -47,7 +47,7 @@
         "type": "downloadBootstrapper"
       },
       "nsis": {
-        "installMode": "both",
+        "installMode": "currentUser",
         "languages": ["Japanese"],
         "displayLanguageSelector": false,
         "installerHooks": "nsis/hooks.nsh"
