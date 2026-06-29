@@ -2,6 +2,10 @@
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "active": true,
-    "externalBin": ["binaries/pika-cli"]
+    "externalBin": ["binaries/pika-cli"],
+    "resources": {
+      "icons/shell/md.ico": "md.ico",
+      "icons/shell/html.ico": "html.ico"
+    }
   }
 }
