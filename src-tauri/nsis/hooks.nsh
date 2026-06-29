@@ -49,7 +49,7 @@
 
   ; 退避スナップショットはユーザー選択（既定＝残す）。
   ; サイレント（/S）時は /SD IDYES で「残す」に倒す（データ保全を優先）。
-  MessageBox MB_YESNO|MB_ICONQUESTION "退避スナップショット（pika が保持するバックアップ。最後の砦になりうる）を残しますか？$\n$\n［はい］残す（既定）  ／  ［いいえ］完全に削除する" /SD IDYES IDYES pika_keep_snapshots
+  MessageBox MB_YESNO|MB_ICONQUESTION "退避スナップショット（Pika Editor が保持するバックアップ。最後の砦になりうる）を残しますか？$\n$\n［はい］残す（既定）  ／  ［いいえ］完全に削除する" /SD IDYES IDYES pika_keep_snapshots
     RMDir /r "$LOCALAPPDATA\pika\snapshots"
   pika_keep_snapshots:
 
