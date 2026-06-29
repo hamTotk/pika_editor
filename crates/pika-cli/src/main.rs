@@ -171,6 +171,30 @@ fn gui_exe_path() -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
+/// 種別アイコン（.ico）が同梱されたディレクトリを exe の隣から探して返す（登録の `DefaultIcon` 用）。
+///
+/// NSIS の `bundle.resources` がどこへ展開するか（INSTDIR 直下か `resources\` 配下か）は
+/// 配置形態に依存しうるため、候補を順に当たり、[`ASSOC_TYPES`] の **全 .ico が揃う**最初の
+/// ディレクトリを採用する。どこにも無ければ `None`（呼び出し側で exe アプリアイコンへ退避）。
+///
+/// [`ASSOC_TYPES`]: pika_core::explorer::ASSOC_TYPES
+#[cfg(windows)]
+fn resolve_icon_dir() -> Option<String> {
+    let mut base = std::env::current_exe().ok()?;
+    base.pop();
+    // exe 直下 → resources\ → icons\ → resources\icons\ の順で探す。
+    for sub in ["", "resources", "icons", "resources\\icons"] {
+        let dir = if sub.is_empty() { base.clone() } else { base.join(sub) };
+        let all_present = pika_core::explorer::ASSOC_TYPES
+            .iter()
+            .all(|t| dir.join(t.icon_file).is_file());
+        if all_present {
+            return Some(dir.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 // ── エクスプローラー統合（要件3.3 `--register-shell` / `--unregister-shell`）─────────────
 //
 // 書き込む/消すキー・値の決定は純粋ロジック pika_core::explorer（cargo test 済み）に集約し、
@@ -191,7 +215,10 @@ fn register_shell() -> ExitCode {
             return ExitCode::from(3);
         }
     };
-    let entries = pika_core::explorer::registration_entries(&exe);
+    // 種別アイコン（.ico）の同梱先を exe の隣から探す（NSIS の resources 配置に追従）。
+    // 見つからなければ None＝DefaultIcon は exe のアプリアイコンへフォールバックする。
+    let icon_dir = resolve_icon_dir();
+    let entries = pika_core::explorer::registration_entries(&exe, icon_dir.as_deref());
     for e in &entries {
         if let Err(msg) = win::write_reg_sz(&e.key, &e.name, &e.data) {
             eprintln!("エラー: レジストリ書込に失敗しました（{}）: {msg}", e.key);
