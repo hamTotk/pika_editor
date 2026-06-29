@@ -17,7 +17,7 @@ use std::process::ExitCode;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const HELP: &str = "\
-pika — Windows 向け超軽量 Markdown/HTML エディタ
+Pika Editor — Windows 向け超軽量 Markdown/HTML エディタ
 
 使い方:
     pika [オプション] [パス...]
@@ -27,14 +27,14 @@ pika — Windows 向け超軽量 Markdown/HTML エディタ
     -h, --help            このヘルプを表示して終了する
     -v, --version         バージョンを表示して終了する
     -g <spec>             指定位置にカーソルを置いて開く（VS Code 互換）
-    --register-shell      エクスプローラー統合を登録する（HKCU・「pikaで開く」/関連付け候補）
+    --register-shell      エクスプローラー統合を登録する（HKCU・「Pika Editorで開く」/関連付け候補）
     --unregister-shell    エクスプローラー統合を解除する
 
 注記:
     本 console CLI は引数を検証し絶対パス正規化して GUI（pika.exe）を起動する。
     既に起動済みのときは GUI 側が単一インスタンスとして引数を転送し前面化する。
     --register-shell は HKCU\\Software\\Classes に候補（OpenWithProgids）と右クリック
-    「pikaで開く」を追加する（管理者不要）。Windows は既定アプリを強制設定できないため、
+    「Pika Editorで開く」を追加する（管理者不要）。Windows は既定アプリを強制設定できないため、
     最後にエクスプローラーで対象を右クリック→「プログラムから開く」→「常にこのアプリ」を選ぶ。
 ";
 
@@ -208,8 +208,8 @@ fn register_shell() -> ExitCode {
     println!(
         "Windows は既定アプリを強制設定できないため、最後にユーザー操作が必要です:\n  \
          エクスプローラーで対象ファイル（.md/.markdown/.html/.htm）を右クリック →\n  \
-         「プログラムから開く」→「別のプログラムを選択」→ pika を選び「常にこのアプリで開く」。\n  \
-         フォルダ/ファイルの右クリックには「pikaで開く」が追加されています。"
+         「プログラムから開く」→「別のプログラムを選択」→ Pika Editor を選び「常にこのアプリで開く」。\n  \
+         フォルダ/ファイルの右クリックには「Pika Editorで開く」が追加されています。"
     );
     ExitCode::SUCCESS
 }

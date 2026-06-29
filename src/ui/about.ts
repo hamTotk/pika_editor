@@ -37,13 +37,13 @@ export async function showAboutModal(): Promise<void> {
   box.className = "modal-box about-box";
   box.setAttribute("role", "dialog");
   box.setAttribute("aria-modal", "true");
-  box.setAttribute("aria-label", "pika バージョン情報");
+  box.setAttribute("aria-label", "Pika Editor バージョン情報");
 
   const header = document.createElement("div");
   header.className = "about-header";
   const title = document.createElement("span");
   title.className = "about-title";
-  title.textContent = "pika";
+  title.textContent = "Pika Editor";
   const ver = document.createElement("span");
   ver.className = "about-version";
   ver.textContent = `version ${version}`;
@@ -54,7 +54,7 @@ export async function showAboutModal(): Promise<void> {
   desc.textContent = "Windows 向け超軽量 Markdown/HTML エディタ";
   const lic = document.createElement("div");
   lic.className = "about-meta";
-  lic.textContent = "MIT License — Copyright (c) 2026 pika contributors";
+  lic.textContent = "MIT License — Copyright (c) 2026 Pika Editor contributors";
 
   const licLabel = document.createElement("div");
   licLabel.className = "about-licenses-label";

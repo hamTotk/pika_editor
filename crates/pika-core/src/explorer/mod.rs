@@ -65,7 +65,7 @@ pub fn registration_entries(exe_path: &str) -> Vec<RegEntry> {
     entries.push(RegEntry {
         key: progid.clone(),
         name: String::new(),
-        data: "pika ドキュメント".to_string(),
+        data: "Pika Editor ドキュメント".to_string(),
     });
     entries.push(RegEntry {
         key: format!("{progid}\\DefaultIcon"),
@@ -93,7 +93,7 @@ pub fn registration_entries(exe_path: &str) -> Vec<RegEntry> {
         entries.push(RegEntry {
             key: verb.clone(),
             name: String::new(),
-            data: "pikaで開く".to_string(),
+            data: "Pika Editorで開く".to_string(),
         });
         entries.push(RegEntry {
             key: verb.clone(),
@@ -203,7 +203,7 @@ mod tests {
             assert!(
                 entries
                     .iter()
-                    .any(|e| e.key == verb && e.name.is_empty() && e.data == "pikaで開く"),
+                    .any(|e| e.key == verb && e.name.is_empty() && e.data == "Pika Editorで開く"),
                 "{verb} の右クリック表示名が無い"
             );
         }
