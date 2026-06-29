@@ -1277,3 +1277,35 @@
   （`state() called before manage() for Arc<SettingsService>`・tauri 2.11.3 lib.rs:734）。転送自体は成功しファイルは開くが
   転送プロセスはクラッシュする。single-instance/CLI 起動経路が SettingsService を `.manage()` する前に `state()` 参照して
   いるのが原因と推定（初期化順）。今回のフリーズ/権限修正とは無関係の既存バグ。要対応（manage 後に state アクセスへ）。
+
+## F-030（重大・修正済み）ポータブル版 pika.exe が起動時に真っ白（devUrl 接続拒否）
+
+- **重大度**: 高（配布物が全く起動しない）。ポータブル zip 経路のみ・NSIS バンドルは非該当。
+- **対応章**: 要件13・design doc sprint7（配布）・本番リリース準備（PR #8）。
+- **現象（実機・2026-06-29）**: ポータブル zip を展開して `pika.exe` を起動すると、メイン WebView が
+  `http://localhost:5173`（Vite 開発サーバー）へ接続して `ERR_CONNECTION_REFUSED` で真っ白
+  （Edge の「このページに到達できません」）。本番ビルドなのに dev モードで起動していた。
+- **根本原因**: `installer/build-portable.ps1` が生の `cargo build --release -p pika-app --bin pika` で
+  ビルドしていた。Tauri は **`custom-protocol` feature が有効なときだけ**埋め込み dist を custom protocol で
+  配信する本番モードになり、無効だと Release でも `devUrl` を見る dev モードになる（`cargo tauri build` は
+  この feature を自動付与するが、生 cargo build は付けない）。`src-tauri/Cargo.toml` に
+  `custom-protocol = ["tauri/custom-protocol"]` が定義済みだが、ポータブル生成では未指定だった。
+- **修正**: `build-portable.ps1` の pika.exe ビルドに `--features custom-protocol` を付与（pika-cli は
+  WebView 非依存で不要）。CLAUDE.md の「release は埋め込み dist で不要」という誤記も訂正。
+- **修正後の実機確認**: 再ビルドした exe（11.0→11.2MB＝dist 埋め込み分増）で zip 展開→起動→エディタ表示、
+  About モーダル（version 0.1.0・OSS ライセンス全文）・新アイコン・Mermaid/KaTeX 描画・フォルダ内 `pika-data\`
+  生成／`%LOCALAPPDATA%` 非書込（痕跡なし）を確認。**全 OK**。
+- **状態**: 修正済み（実機検証一巡）。NSIS バンドル経路は `cargo tauri build` が custom-protocol を自動付与
+  するため本問題は出ない（実バンドルは系統C で別途確認）。
+
+## F-031（軽微・対象環境で非再現クローズ）ポータブル zip の日本語ファイル名エンコーディング不整合
+
+- **重大度**: 低（対象環境＝日本語 Windows 11 では非再現）。
+- **現象**: `Compress-Archive`（PowerShell 7）が生成した zip で、日本語エントリ「はじめにお読みください.md」が
+  **UTF-8 フラグ（bit 11=0x800）を立てつつファイル名バイトは CP932** という不整合状態。UTF-8 を尊重する
+  解凍側（python/7-zip 等）では文字化けする。
+- **対象環境での実機結果**: Windows 11 エクスプローラーの「すべて展開」では**文字化けせず正しく展開**された
+  （システムロケール CP932 優先で読むため）。pika は対象環境＝日本語 Windows 11 限定（CLAUDE.md）のため実害なし。
+- **状態**: 対象環境で非再現＝クローズ。潜在リスク（非日本語ロケール・別解凍ツール）として記録のみ。堅牢化が
+  必要になれば zip 化を `Compress-Archive`→.NET `ZipFile.CreateFromDirectory`＋UTF-8 明示へ変更（数行・トップ
+  フォルダ挙動は維持）。設計原則「足さない/軽い」に照らし現時点では見送り。
