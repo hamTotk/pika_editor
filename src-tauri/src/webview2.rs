@@ -33,7 +33,7 @@ pub fn ensure_runtime_available() -> Result<(), String> {
 pub fn show_missing_runtime_dialog(message: &str) {
     #[cfg(windows)]
     {
-        windows_impl::message_box(message, "pika — WebView2 ランタイムが必要です");
+        windows_impl::message_box(message, "Pika Editor — WebView2 ランタイムが必要です");
     }
     #[cfg(not(windows))]
     {
@@ -42,9 +42,9 @@ pub fn show_missing_runtime_dialog(message: &str) {
 }
 
 /// 不在時のユーザー向け案内文言。Runtime 導入手順へ誘導する。
-const MISSING_MESSAGE: &str = "pika の起動には Microsoft Edge WebView2 ランタイムが必要です。\n\n\
+const MISSING_MESSAGE: &str = "Pika Editor の起動には Microsoft Edge WebView2 ランタイムが必要です。\n\n\
      お使いの環境にランタイムが見つかりませんでした。\n\
-     下記から Evergreen ランタイムを導入してから再度 pika を起動してください。\n\n\
+     下記から Evergreen ランタイムを導入してから再度 Pika Editor を起動してください。\n\n\
      https://developer.microsoft.com/microsoft-edge/webview2/";
 
 #[cfg(windows)]
