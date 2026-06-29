@@ -51,9 +51,14 @@ try {
     npm run build
     if ($LASTEXITCODE -ne 0) { throw 'npm run build に失敗しました' }
 
-    Write-Host '==> cargo build --release（pika / pika-cli）' -ForegroundColor Yellow
-    cargo build --release -p pika-app --bin pika
+    # ⚠ pika.exe は本番モード（埋め込み dist を custom protocol で配信）にするため custom-protocol
+    # feature が必須。付けないと Release でも devUrl(localhost:5173) を見にいき、Vite 未起動だと真っ白
+    # （ERR_CONNECTION_REFUSED）になる＝`cargo tauri build` 相当を tauri-cli 無しで再現する。
+    Write-Host '==> cargo build --release --features custom-protocol（pika）' -ForegroundColor Yellow
+    cargo build --release -p pika-app --bin pika --features custom-protocol
     if ($LASTEXITCODE -ne 0) { throw 'pika.exe の Release ビルドに失敗しました' }
+    # pika-cli は WebView 非依存（custom-protocol 不要）。
+    Write-Host '==> cargo build --release（pika-cli）' -ForegroundColor Yellow
     cargo build --release -p pika-cli
     if ($LASTEXITCODE -ne 0) { throw 'pika-cli.exe の Release ビルドに失敗しました' }
   }
