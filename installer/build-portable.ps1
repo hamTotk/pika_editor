@@ -90,7 +90,9 @@ try {
   $ZipPath = Join-Path $OutDir "pika-$Version-portable.zip"
   if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
   Write-Host "==> zip 生成: $ZipPath" -ForegroundColor Yellow
-  Compress-Archive -Path (Join-Path $StageDir '*') -DestinationPath $ZipPath -CompressionLevel Optimal
+  # $StageDir 自体（末尾 \* を付けない）を固める＝zip ルートに pika-<version>-portable\ トップフォルダが
+  # 入る。`\*` だと中身だけが固められ、展開時に任意フォルダを直接汚染する（トップフォルダが無い）。
+  Compress-Archive -Path $StageDir -DestinationPath $ZipPath -CompressionLevel Optimal
 
   Remove-Item $StageRoot -Recurse -Force
   Write-Host "完了: $ZipPath" -ForegroundColor Green
