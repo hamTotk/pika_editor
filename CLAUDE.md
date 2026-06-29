@@ -72,7 +72,7 @@ pika/
 
 ### GUI 起動（実機確認）
 
-1. **Vite を先に起動**：`npm run dev`（debug ビルドは devUrl `http://localhost:5173` を見る。未起動だと真っ白。release は埋め込み dist で不要）
+1. **Vite を先に起動**：`npm run dev`（debug ビルドは devUrl `http://localhost:5173` を見る。未起動だと真っ白）。**release で埋め込み dist を使うには `--features custom-protocol` 必須**（付けないと release でも devUrl を見て `ERR_CONNECTION_REFUSED`＝真っ白。`cargo tauri build` はこれを自動付与する。ポータブル zip は `installer/build-portable.ps1` が付与済み）
 2. **GUI ビルド**：`cargo build -p pika-app --bin pika`（exe＝`target/debug/pika.exe`）。bash では先に `export PATH="$USERPROFILE/.cargo/bin:$PATH"`。ビルド前に `taskkill //F //IM pika.exe`（実行中だと exe ロックでリンク失敗）
 3. **起動（デタッチ）**：`cmd //c start "" target\debug\pika.exe <開くフォルダ>`
 
