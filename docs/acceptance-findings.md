@@ -1309,3 +1309,22 @@
 - **状態**: 対象環境で非再現＝クローズ。潜在リスク（非日本語ロケール・別解凍ツール）として記録のみ。堅牢化が
   必要になれば zip 化を `Compress-Archive`→.NET `ZipFile.CreateFromDirectory`＋UTF-8 明示へ変更（数行・トップ
   フォルダ挙動は維持）。設計原則「足さない/軽い」に照らし現時点では見送り。
+
+## F-032（重大・修正済み）NSIS バンドルが設定エラーで生成できない（tauri.bundle.conf.json の // コメントキー）
+
+- **重大度**: 高（インストーラを生成できない）。実バンドル時のみ発生・dev ゲートは非該当。
+- **対応章**: 要件13・design doc sprint7（配布）・本番リリース準備。
+- **現象（実機・2026-06-29）**: `cargo tauri build --config src-tauri/tauri.bundle.conf.json` が
+  `Error "tauri.conf.json" error: Additional properties are not allowed ('//', '//build', '//why' were unexpected)`
+  で即失敗（EXIT 1）。Release ビルドにも入れず NSIS インストーラが生成できなかった。
+- **根本原因**: tauri.bundle.conf.json に説明用のコメント擬似キー `//`/`//build`/`//why` を置いていた。
+  JSON 構文的には valid だが、Tauri 2 の config スキーマは `additionalProperties: false` で未知キーを
+  許さず `--config` 読込時の検証で弾く。base tauri.conf.json には // キーが無いため dev ゲートでは出ず、
+  実バンドルで初めて発覚（PR #8 で導入・系統C で捕捉）。
+- **修正**: tauri.bundle.conf.json から // 系キーを全削除（`$schema`＋`bundle.active`/`externalBin` のみ）。
+  オーバーレイの説明は src-tauri/binaries/README.md / installer/README.md に既出のため情報は保たれる。
+  **教訓: Tauri config(JSON)にコメント擬似キーを置かない**（JSON コメント不可＋Tauri スキーマが弾く）。
+- **修正後の実機確認**: `pika_0.1.0_x64-setup.exe`（3.5MB）生成 →**実機 NSIS インストール検証一巡 OK**＝
+  管理者不要（currentUser）インストール／関連付け「pikaで開く」候補表示／アンインストールで snapshots 選択・
+  関連付け残骸ゼロ・settings/state/logs 削除を確認。
+- **状態**: 修正済み（実機 NSIS 一巡）。これで本番配布（ポータブル zip＋NSIS インストーラ）両形態が実機検証済み。
