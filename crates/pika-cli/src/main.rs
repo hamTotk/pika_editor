@@ -182,8 +182,10 @@ fn gui_exe_path() -> Option<std::path::PathBuf> {
 fn resolve_icon_dir() -> Option<String> {
     let mut base = std::env::current_exe().ok()?;
     base.pop();
-    // exe 直下 → resources\ → icons\ → resources\icons\ の順で探す。
-    for sub in ["", "resources", "icons", "resources\\icons"] {
+    // バンドラの展開先は配置形態で変わりうる: マップ先名で INSTDIR 直下に置く形（""・resources\）と、
+    // ソース構造（icons/shell/*.ico）を保って展開する形（icons\shell\・resources\icons\shell\）の
+    // 両方を順に当たる。
+    for sub in ["", "resources", "icons\\shell", "resources\\icons\\shell"] {
         let dir = if sub.is_empty() { base.clone() } else { base.join(sub) };
         let all_present = pika_core::explorer::ASSOC_TYPES
             .iter()
@@ -218,6 +220,14 @@ fn register_shell() -> ExitCode {
     // 種別アイコン（.ico）の同梱先を exe の隣から探す（NSIS の resources 配置に追従）。
     // 見つからなければ None＝DefaultIcon は exe のアプリアイコンへフォールバックする。
     let icon_dir = resolve_icon_dir();
+    if icon_dir.is_none() {
+        // フォールバックは登録自体を妨げないが、種別アイコンが出ない原因になるので明示する
+        // （無言の退化を防ぐ。dev ビルドや resources 同梱漏れの早期検知）。
+        eprintln!(
+            "注意: 種別アイコン（md.ico/html.ico）が見つからないため、関連付けには pika の\n  \
+             アプリアイコンを使います（種別ごとの専用アイコンは表示されません）。"
+        );
+    }
     let entries = pika_core::explorer::registration_entries(&exe, icon_dir.as_deref());
     for e in &entries {
         if let Err(msg) = win::write_reg_sz(&e.key, &e.name, &e.data) {
@@ -236,7 +246,9 @@ fn register_shell() -> ExitCode {
         "Windows は既定アプリを強制設定できないため、最後にユーザー操作が必要です:\n  \
          エクスプローラーで対象ファイル（.md/.markdown/.html/.htm）を右クリック →\n  \
          「プログラムから開く」→「別のプログラムを選択」→ Pika Editor を選び「常にこのアプリで開く」。\n  \
-         フォルダ/ファイルの右クリックには「Pika Editorで開く」が追加されています。"
+         フォルダ/ファイルの右クリックには「Pika Editorで開く」が追加されています。\n  \
+         （旧バージョンからの更新時は、Windows の仕様で既定アプリの紐付けが外れることがあります。\n   \
+         その場合は上の手順で選び直してください。）"
     );
     ExitCode::SUCCESS
 }
@@ -459,6 +471,43 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── 種別アイコンのドリフトガード ──────────────────────────────────────────
+    // 「generate.py TYPES ／ ASSOC_TYPES ／ bundle.resources の3点手動同期」のうち、
+    // 名前のずれ・同梱漏れは cargo test では無言で素通りし、実機で全種別が一括して
+    // exe アイコンへ退化する（resolve_icon_dir の all-or-nothing）。最も間違えやすい連結を
+    // ここで固定する。パスはワークスペース構成（crates/pika-cli → ../../src-tauri）前提。
+
+    /// `ASSOC_TYPES` の各 icon_file が `src-tauri/icons/shell/` に実在すること（rename ドリフト検知）。
+    #[test]
+    fn 各種別の_ico_がリポジトリに実在する() {
+        let shell_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/icons/shell");
+        for t in pika_core::explorer::ASSOC_TYPES {
+            let ico = shell_dir.join(t.icon_file);
+            assert!(
+                ico.is_file(),
+                "{} が無い（generate.py で生成し忘れ、または icon_file 名のずれ）: {}",
+                t.icon_file,
+                ico.display()
+            );
+        }
+    }
+
+    /// 各 icon_file がバンドル同梱設定（tauri.bundle.conf.json の resources）に載っていること
+    /// （同梱漏れドリフト検知）。実バンドルでの展開は系統C で目視確認する。
+    #[test]
+    fn 各種別の_ico_がバンドル_resources_に載っている() {
+        const BUNDLE_CONF: &str =
+            include_str!("../../../src-tauri/tauri.bundle.conf.json");
+        for t in pika_core::explorer::ASSOC_TYPES {
+            assert!(
+                BUNDLE_CONF.contains(t.icon_file),
+                "{} が tauri.bundle.conf.json の resources に無い（NSIS 同梱漏れになる）",
+                t.icon_file
+            );
+        }
+    }
 
     #[test]
     fn help_は成功で返る() {

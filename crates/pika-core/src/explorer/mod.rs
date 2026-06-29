@@ -66,6 +66,10 @@ pub const ASSOC_TYPES: &[AssocType] = &[
 /// 解除（[`unregistration`]）でこれらも掃除対象に含める（書き込みは新 [`ASSOC_TYPES`] のみ）。
 pub const LEGACY_PROG_IDS: &[&str] = &["pika.AssocFile"];
 
+/// 旧バージョンが [`LEGACY_PROG_IDS`] を登録していた拡張子。掃除はこの**旧**集合を基準にする
+/// （現行 [`ASSOC_TYPES`] からいつか拡張子を外しても、外した拡張子に残る旧値を取りこぼさない）。
+pub const LEGACY_EXTENSIONS: &[&str] = &[".md", ".markdown", ".html", ".htm"];
+
 /// 全 [`ASSOC_TYPES`] の拡張子を平坦化して返す（重複は想定しない）。
 pub fn assoc_extensions() -> Vec<&'static str> {
     ASSOC_TYPES.iter().flat_map(|t| t.extensions.iter().copied()).collect()
@@ -98,7 +102,11 @@ fn open_with_progids_key(ext: &str) -> String {
 /// にフォールバックする（登録自体は必ず成立させ、見た目だけ既定ロゴに退避する）。
 fn default_icon(exe_path: &str, icon_dir: Option<&str>, icon_file: &str) -> String {
     match icon_dir {
-        Some(dir) if !dir.is_empty() => format!("\"{dir}\\{icon_file}\",0"),
+        Some(dir) if !dir.is_empty() => {
+            // 末尾の区切りを正規化して二重バックスラッシュ（`C:\\md.ico`）を防ぐ。
+            let dir = dir.trim_end_matches('\\');
+            format!("\"{dir}\\{icon_file}\",0")
+        }
         _ => format!("\"{exe_path}\",0"),
     }
 }
@@ -188,8 +196,8 @@ pub fn unregistration() -> (Vec<String>, Vec<(String, String)>) {
             values.push((open_with_progids_key(ext), t.progid.to_string()));
         }
     }
-    // 旧 ProgId は全拡張子へ登録されていた可能性があるので、全拡張子から消す（残骸ゼロ）。
-    for ext in assoc_extensions() {
+    // 旧 ProgId は旧版が登録した拡張子（LEGACY_EXTENSIONS）から消す（現行テーブルに依存しない）。
+    for ext in LEGACY_EXTENSIONS {
         for legacy in LEGACY_PROG_IDS {
             values.push((open_with_progids_key(ext), (*legacy).to_string()));
         }
@@ -219,15 +227,39 @@ pub fn empty_delete_candidates() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     const EXE: &str = r"C:\Program Files\pika\pika.exe";
     const ICONS: &str = r"C:\Program Files\pika";
 
     #[test]
+    fn テーブルは拡張子_progid_icon_file_がそれぞれ一意() {
+        // 「種類を増やすときは ASSOC_TYPES に 1 エントリ足すだけ」の不変条件を件数非依存で守る。
+        // 拡張子重複は OpenWithProgids 複数値・掃除候補重複を、icon_file 重複は別種別が同じ
+        // アイコンになる退化を招く。
+        let exts: Vec<_> = assoc_extensions();
+        assert_eq!(
+            exts.iter().collect::<HashSet<_>>().len(),
+            exts.len(),
+            "拡張子が重複している"
+        );
+        let progids: Vec<_> = ASSOC_TYPES.iter().map(|t| t.progid).collect();
+        assert_eq!(
+            progids.iter().collect::<HashSet<_>>().len(),
+            progids.len(),
+            "ProgId が重複している"
+        );
+        let icons: Vec<_> = ASSOC_TYPES.iter().map(|t| t.icon_file).collect();
+        assert_eq!(
+            icons.iter().collect::<HashSet<_>>().len(),
+            icons.len(),
+            "icon_file が重複している"
+        );
+    }
+
+    #[test]
     fn 登録は各種別の拡張子の_openwithprogids_に対応_progid_を値追加する() {
         let entries = registration_entries(EXE, Some(ICONS));
-        // 対象は .md/.markdown/.html/.htm の 4 つ（2 種別）。
-        assert_eq!(assoc_extensions().len(), 4);
         for t in ASSOC_TYPES {
             for ext in t.extensions {
                 let key = open_with_progids_key(ext);
@@ -259,13 +291,20 @@ mod tests {
                 .iter()
                 .find(|e| e.key == key && e.name.is_empty())
                 .unwrap_or_else(|| panic!("{} の DefaultIcon が無い", t.progid));
-            // 種別ごとに別 .ico を指す（VSCode 風に種別で別アイコン）。
+            // 種別ごとに別 .ico を指す（VSCode 風に種別で別アイコン）。一意性は別テストで担保。
             assert_eq!(e.data, format!("\"{ICONS}\\{}\",0", t.icon_file));
         }
-        // 種別アイコンは互いに異なるファイルを指す。
-        let icons: Vec<_> = ASSOC_TYPES.iter().map(|t| t.icon_file).collect();
-        assert_eq!(icons.len(), 2);
-        assert_ne!(icons[0], icons[1]);
+    }
+
+    #[test]
+    fn default_icon_は末尾区切り付きの_icon_dir_でも二重バックスラッシュにならない() {
+        // resolve_icon_dir は通常末尾区切り無しだが、ドライブ直下等の保険。
+        let entries = registration_entries(EXE, Some(r"C:\Program Files\pika\"));
+        let md = ASSOC_TYPES.iter().find(|t| t.progid == "pika.Markdown").unwrap();
+        let key = format!("Software\\Classes\\{}\\DefaultIcon", md.progid);
+        let e = entries.iter().find(|e| e.key == key).unwrap();
+        assert_eq!(e.data, format!("\"C:\\Program Files\\pika\\{}\",0", md.icon_file));
+        assert!(!e.data.contains("\\\\"), "二重バックスラッシュが残っている: {}", e.data);
     }
 
     #[test]
@@ -364,8 +403,8 @@ mod tests {
                 );
             }
         }
-        // 旧 ProgId は全拡張子の OpenWithProgids からも消す。
-        for ext in assoc_extensions() {
+        // 旧 ProgId は旧版が登録した拡張子（LEGACY_EXTENSIONS）の OpenWithProgids からも消す。
+        for ext in LEGACY_EXTENSIONS {
             let owp = open_with_progids_key(ext);
             for legacy in LEGACY_PROG_IDS {
                 assert!(
