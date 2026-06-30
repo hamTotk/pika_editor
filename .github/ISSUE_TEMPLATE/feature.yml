@@ -1,0 +1,39 @@
+name: 機能追加・改善
+description: 新機能や既存機能の改善を提案する
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景 / なぜ
+      description: 解決したい課題・動機。what ではなく why を書く
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 提案内容
+      description: どう変えるか。UI に触れるなら docs/ui-design.md との関係も書く
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope-gate
+    attributes:
+      label: スコープ確認
+      options:
+        - label: docs/requirements.md 14章「やらないこと」を確認した（該当するなら本文に要件改訂案を書く）
+          required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 受け入れ基準
+      description: 完了をどう判定するか（観測可能な形で）
+    validations:
+      required: true
+  - type: input
+    id: req-chapter
+    attributes:
+      label: 関連する要件章番号（任意）
+      placeholder: 例 3.3 / 5.6
+    validations:
+      required: false

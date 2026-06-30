@@ -1,0 +1,42 @@
+name: バグ報告
+description: 不具合を報告する
+labels: ["bug"]
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: 再現手順
+      description: どう操作すると起きるか
+    validations:
+      required: true
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: 期待する挙動 / 実際の挙動
+    validations:
+      required: true
+  - type: dropdown
+    id: build-form
+    attributes:
+      label: ビルド形態
+      options:
+        - ポータブル zip
+        - NSIS インストーラ
+        - ローカルビルド（cargo / dev）
+        - 不明
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: pika バージョン（任意）
+      placeholder: 例 0.1.0
+    validations:
+      required: false
+  - type: input
+    id: findings-ref
+    attributes:
+      label: 関連する acceptance-findings 番号（任意）
+      placeholder: 例 F-031
+    validations:
+      required: false
