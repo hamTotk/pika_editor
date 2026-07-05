@@ -50,12 +50,6 @@ cargo build       # 警告をエラー扱いにしたビルドゲート
 npm run typecheck # フロントエンドの型チェック
 ```
 
-## 開発について
-
-このプロジェクトは Claude Code をメインの実装者として、要件定義（`docs/requirements.md`）・設計（`docs/design.md`）・UI 仕様（`docs/ui-design.md`）を先に固めたうえで、issue 駆動で機能追加を進めています。まとまった量の実装は自動スプリントループ（複数の AI エージェントが実装 → レビュー → 評価を繰り返す仕組み）に任せ、人間はレビューとマージ判断に専念する形で開発しました。「AI に何をどこまで任せるか」を明文化した運用ルールは `CLAUDE.md` と `.claude/skills/` に残しています。
-
-もともと wxWidgets/C++ で作り始めましたが、軽量さと保守性の両立を再検討した結果、Tauri + Rust への全面刷新を行っています。
-
 ## ライセンス
 
 MIT License
